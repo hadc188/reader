@@ -1,0 +1,57 @@
+import { describe, expect, it } from 'vitest'
+import { rankSearchResults, searchMergeKey } from './searchRank'
+import type { SearchBook } from '../types'
+
+function book(partial: Partial<SearchBook>): SearchBook {
+  return {
+    name: '',
+    author: '',
+    bookUrl: '',
+    origin: '',
+    ...partial,
+  }
+}
+
+describe('rankSearchResults', () => {
+  it('puts exact title match first, then substring, then other', () => {
+    const exact = book({ name: '遮天', author: '辰东', bookSourceUrls: ['a'] })
+    const contains = book({ name: '遮天之龙起微末', author: '某', bookSourceUrls: ['b'] })
+    const other = book({ name: '凡人修仙传', author: '忘语', bookSourceUrls: ['c'] })
+    const ranked = rankSearchResults([other, contains, exact], '遮天')
+    expect(ranked[0].name).toBe('遮天')
+    expect(ranked[1].name).toBe('遮天之龙起微末')
+    expect(ranked[2].name).toBe('凡人修仙传')
+  })
+
+  it('ranks exact author match as tier 0', () => {
+    const byAuthor = book({ name: '某书', author: '辰东', bookSourceUrls: ['a'] })
+    const bySubstring = book({ name: '遮天纪', author: '乙', bookSourceUrls: ['b'] })
+    const ranked = rankSearchResults([bySubstring, byAuthor], '辰东')
+    expect(ranked[0].author).toBe('辰东')
+  })
+
+  it('sorts within a tier by source count descending', () => {
+    const one = book({ name: '遮天', author: '辰东', bookSourceUrls: ['a'] })
+    const three = book({ name: '遮天', author: '辰东', bookSourceUrls: ['a', 'b', 'c'] })
+    const ranked = rankSearchResults([one, three], '遮天')
+    expect(ranked[0].bookSourceUrls?.length).toBe(3)
+  })
+
+  it('returns list unchanged when key is empty', () => {
+    const list = [book({ name: 'b' }), book({ name: 'a' })]
+    expect(rankSearchResults(list, '  ')).toBe(list)
+  })
+})
+
+describe('searchMergeKey', () => {
+  it('normalizes case and trims', () => {
+    expect(searchMergeKey({ name: ' 遮天 ', author: '辰东' })).toBe('遮天|辰东')
+    expect(searchMergeKey({ name: 'ABC', author: 'X' })).toBe('abc|x')
+  })
+
+  it('strips 作者 label prefix and whitespace from author', () => {
+    expect(searchMergeKey({ name: '遮天', author: '作者：辰东' })).toBe('遮天|辰东')
+    expect(searchMergeKey({ name: '遮天', author: '作者: 辰 东' })).toBe('遮天|辰东')
+    expect(searchMergeKey({ name: '遮 天', author: '辰东' })).toBe('遮天|辰东')
+  })
+})

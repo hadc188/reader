@@ -1,0 +1,39 @@
+# Environment variables (contains secrets)
+.env
+
+# Rust build artifacts
+target/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Storage data (if contains user data)
+/storage/
+
+# Desktop build output and dev data
+desktop/dist/
+desktop/.dev-data/
+desktop/src-tauri/gen/
+
+release-assets/
+node_modules/
+playwright-report/
+test-results/
+.superpowers/
+.codegraph/
+
+# Debug scratch files
+toc_tmp.html
+*.tmp.html

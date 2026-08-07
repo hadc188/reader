@@ -1,0 +1,28 @@
+<svg width="200" height="60" viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg">
+  <!-- 定义字体，确保在大多数系统中正常显示中文 -->
+  <style>
+    .logo-text {
+      font-family: "Microsoft YaHei", "SimHei", "Heiti SC", sans-serif;
+      font-weight: bold;
+    }
+  </style>
+  <!-- 图标部分：打开的书籍 -->
+  <g transform="translate(10, 10)">
+    <!-- 左页 -->
+    <path d="M 22,36 C 12,36 4,28 4,14 L 4,4 C 4,18 12,26 22,23 Z" fill="#4F46E5"/>
+    <!-- 右页 -->
+    <path d="M 22,36 C 32,36 40,28 40,14 L 40,4 C 40,18 32,26 22,23 Z" fill="#4338CA"/>
+    <!-- 模拟书页文字的线条 (增加细节) -->
+    <rect x="8" y="10" width="10" height="2" rx="1" fill="white" opacity="0.4"/>
+    <rect x="8" y="15" width="8" height="2" rx="1" fill="white" opacity="0.4"/>
+    <rect x="26" y="10" width="10" height="2" rx="1" fill="white" opacity="0.4"/>
+    <rect x="26" y="15" width="8" height="2" rx="1" fill="white" opacity="0.4"/>
+    <!-- 书签/折角细节 (可选，增加立体感) -->
+    <path d="M 22,23 L 22,36" stroke="#312E81" stroke-width="1" opacity="0.3"/>
+  </g>
+  <!-- 文字部分 -->
+  <text x="65" y="38" font-size="32" fill="#1F2937" class="logo-text">阅读</text>
+  <!-- 可选：下划线或装饰点，体现连接/网络 -->
+  <circle cx="185" cy="35" r="3" fill="#4F46E5" opacity="0.8"/>
+  <circle cx="195" cy="35" r="3" fill="#4F46E5" opacity="0.5"/>
+</svg>

@@ -1,0 +1,60 @@
+[package]
+name = "reader-rust"
+version = "1.0.8"
+edition = "2021"
+
+# The desktop app is a workspace member so it shares this target/ directory, but
+# `default-members` keeps bare `cargo build` / `cargo test` (and the Dockerfile)
+# building the server only. Build the desktop app with `-p reader-desktop`.
+[workspace]
+members = ["desktop/src-tauri"]
+default-members = ["."]
+
+[dependencies]
+tauri = { version = "2" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "brotli", "deflate", "blocking", "cookies"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+config = "0.14"
+dotenvy = "0.15"
+thiserror = "1"
+anyhow = "1"
+aes = "0.8"
+bytes = "1"
+cbc = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+encoding_rs = "0.8"
+md-5 = "0.10"
+hex = "0.4"
+serde_with = "3"
+scraper = "0.20"
+jsonpath_lib = "0.3"
+regex = "1"
+rquickjs = { version = "0.7", features = ["futures"] }
+tower-http = { version = "0.5", features = ["trace", "cors", "request-id", "fs"] }
+http = "1"
+http-body-util = "0.1"
+urlencoding = "2"
+serde_urlencoded = "0.7"
+futures = "0.3"
+rand = "0.8"
+once_cell = "1"
+tokio-stream = "0.1"
+feed-rs = "1"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+sxd-xpath = "0.4"
+sxd-document = "0.3"
+quick-xml = "0.31"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+# Only used by tests/*.rs to spin up local mock upstream sites. The app itself
+# is pure IPC — no HTTP server.
+axum = { version = "0.7", features = ["json", "multipart"] }
+tokio = { version = "1", features = ["full"] }

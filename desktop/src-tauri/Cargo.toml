@@ -1,0 +1,26 @@
+[package]
+name = "reader-desktop"
+version = "1.0.8"
+edition = "2021"
+description = "阅读 — Windows desktop shell around the reader-rust server"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+reader-rust = { path = "../.." }
+# `custom-protocol` embeds the frontendDist assets into the binary and makes
+# WebviewUrl::App load them; without it the app tries the devUrl (localhost:5173)
+# even in release builds.
+tauri = { version = "2", features = ["custom-protocol", "tray-icon"] }
+tauri-plugin-single-instance = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# This crate is Windows-only (see src/win.rs), so windows-sys is an unconditional
+# dependency rather than a cfg-gated one.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

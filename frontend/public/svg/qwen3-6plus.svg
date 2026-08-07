@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 120" width="400" height="120">
+  <defs>
+    <!-- 渐变定义 -->
+    <linearGradient id="bookGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A90D9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#357ABD;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="pageGrad1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#E8F0FE;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#D0E2FF;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="pageGrad2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#F5F0E8;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#EBE0D0;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#3A3A5C;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#5C5C8A;stop-opacity:1" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#00000020"/>
+    </filter>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <!-- 背景圆形装饰 -->
+  <circle cx="55" cy="55" r="48" fill="#F0F4FF" opacity="0.6"/>
+  <!-- 书本图标 -->
+  <g transform="translate(10, 15)" filter="url(#shadow)">
+    <!-- 书本封面 - 左 -->
+    <path d="M45,15 Q30,12 10,18 L10,68 Q30,62 45,65 Z" 
+          fill="url(#bookGrad)" opacity="0.9"/>
+    <!-- 书本封面 - 右 -->
+    <path d="M45,15 Q60,12 80,18 L80,68 Q60,62 45,65 Z" 
+          fill="url(#bookGrad)" opacity="0.9"/>
+    <!-- 左页 -->
+    <path d="M45,18 Q32,15 14,21 L14,64 Q32,58 45,61 Z" 
+          fill="url(#pageGrad1)"/>
+    <!-- 右页 -->
+    <path d="M45,18 Q58,15 76,21 L76,64 Q58,58 45,61 Z" 
+          fill="url(#pageGrad2)"/>
+    <!-- 书脊 -->
+    <line x1="45" y1="15" x2="45" y2="65" stroke="#357ABD" stroke-width="2" opacity="0.5"/>
+    <!-- 左页文字线条 -->
+    <line x1="20" y1="28" x2="40" y2="25" stroke="#B0C4DE" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="20" y1="34" x2="40" y2="31" stroke="#B0C4DE" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="20" y1="40" x2="38" y2="37" stroke="#B0C4DE" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="20" y1="46" x2="35" y2="43" stroke="#B0C4DE" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="20" y1="52" x2="30" y2="50" stroke="#B0C4DE" stroke-width="1.5" stroke-linecap="round"/>
+    <!-- 右页文字线条 -->
+    <line x1="50" y1="25" x2="70" y2="28" stroke="#C4B5A0" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="50" y1="31" x2="70" y2="34" stroke="#C4B5A0" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="50" y1="37" x2="70" y2="40" stroke="#C4B5A0" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="50" y1="43" x2="65" y2="46" stroke="#C4B5A0" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="50" y1="49" x2="58" y2="51" stroke="#C4B5A0" stroke-width="1.5" stroke-linecap="round"/>
+    <!-- 书签 -->
+    <path d="M45,15 L45,30 L42,26 L38,32 L38,15 Z" 
+          fill="#E85D75" opacity="0.9"/>
+    <!-- 小装饰 - 星光 -->
+    <circle cx="78" cy="10" r="2" fill="#FFD700" filter="url(#glow)"/>
+    <circle cx="12" cy="12" r="1.5" fill="#FFD700" opacity="0.7"/>
+    <circle cx="85" cy="55" r="1.2" fill="#FFD700" opacity="0.5"/>
+  </g>
+  <!-- 文字部分 -->
+  <g transform="translate(110, 10)">
+    <!-- "阅读" 主标题 -->
+    <text x="0" y="58" font-family="'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif" 
+          font-size="48" font-weight="bold" fill="url(#textGrad)" letter-spacing="6">
+      阅读
+    </text>
+    <!-- 拼音/英文副标题 -->
+    <text x="4" y="82" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" 
+          font-size="12" fill="#8888AA" letter-spacing="4">
+      YUE DU · 畅享阅读之美
+    </text>
+    <!-- 装饰线 -->
+    <line x1="4" y1="70" x2="220" y2="70" stroke="#D0D0E8" stroke-width="0.8"/>
+    <!-- 小装饰点 -->
+    <circle cx="220" cy="70" r="2" fill="#4A90D9"/>
+    <circle cx="4" cy="70" r="1.5" fill="#E85D75"/>
+  </g>
+  <!-- 右侧装饰 - 翻开的书页小图标 -->
+  <g transform="translate(345, 20)" opacity="0.4">
+    <path d="M15,5 Q10,3 2,6 L2,25 Q10,22 15,24 Q20,22 28,25 L28,6 Q20,3 15,5 Z" 
+          fill="none" stroke="#4A90D9" stroke-width="1.5"/>
+    <line x1="15" y1="5" x2="15" y2="24" stroke="#4A90D9" stroke-width="1"/>
+  </g>
+  <!-- 底部装饰线 -->
+  <line x1="15" y1="110" x2="385" y2="110" stroke="#E8E8F0" stroke-width="0.5"/>
+  <circle cx="200" cy="110" r="2.5" fill="#4A90D9" opacity="0.6"/>
+  <circle cx="185" cy="110" r="1.5" fill="#E85D75" opacity="0.4"/>
+  <circle cx="215" cy="110" r="1.5" fill="#E85D75" opacity="0.4"/>
+</svg>

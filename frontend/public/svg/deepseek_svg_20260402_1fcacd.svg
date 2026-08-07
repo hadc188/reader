@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 130" width="100%" height="100%">
+  <defs>
+    <!-- 背景渐变：深色科技感，适合阅读应用的沉浸式体验 -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B" />
+      <stop offset="100%" stop-color="#0F172A" />
+    </linearGradient>
+    
+    <!-- 书籍阴影，增加立体感 -->
+    <filter id="drop-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+
+    <!-- 星星光芒效果 -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="1" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Logo 背景 -->
+  <rect x="0" y="0" width="120" height="120" rx="24" fill="url(#bgGradient)" />
+
+  <!-- 书籍元素组 -->
+  <g filter="url(#drop-shadow)">
+    <!-- 底层书页（右下角） -->
+    <path d="M 60,80 C 80,55 105,60 105,60 L 105,95 C 90,90 70,90 60,90 Z" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1" />
+    <!-- 底层书页（左下角） -->
+    <path d="M 60,80 C 40,55 15,60 15,60 L 15,95 C 30,90 50,90 60,90 Z" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1" />
+
+    <!-- 上层书页（右侧翻页） -->
+    <path d="M 60,65 C 80,40 105,45 105,45 L 105,80 C 90,75 70,75 60,75 Z" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1" />
+    <!-- 上层书页（左侧翻页） -->
+    <path d="M 60,65 C 40,40 15,45 15,45 L 15,80 C 30,75 50,75 60,75 Z" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1" />
+
+    <!-- 书籍中缝阴影 -->
+    <line x1="60" y1="90" x2="60" y2="65" stroke="#CBD5E1" stroke-width="1.5" stroke-linecap="round" />
+
+    <!-- 书签（从书籍底部伸出） -->
+    <path d="M 56,90 L 56,100 L 60,97 L 64,100 L 64,90 Z" fill="#F59E0B" />
+  </g>
+
+  <!-- 魔法元素：代表小说世界的想象力与故事性 -->
+  <g filter="url(#glow)">
+    <!-- 中央大星星 -->
+    <path d="M 60,40 L 62,50 L 72,52 L 62,54 L 60,64 L 58,54 L 48,52 L 58,50 Z" fill="#FBBF24" />
+    
+    <!-- 左上小星星 -->
+    <path d="M 35,30 L 36,34 L 40,35 L 36,36 L 35,40 L 34,36 L 30,35 L 34,34 Z" fill="#FBBF24" opacity="0.9" />
+    
+    <!-- 右上小星星 -->
+    <path d="M 85,30 L 86,34 L 90,35 L 86,36 L 85,40 L 84,36 L 80,35 L 84,34 Z" fill="#FBBF24" opacity="0.9" />
+
+    <!-- 漂浮粒子（灵感迸发的小光点） -->
+    <circle cx="25" cy="70" r="2" fill="#94A3B8" />
+    <circle cx="95" cy="70" r="2" fill="#94A3B8" />
+    <circle cx="30" cy="85" r="1.5" fill="#64748B" />
+    <circle cx="90" cy="85" r="1.5" fill="#64748B" />
+    <circle cx="78" cy="58" r="1.5" fill="#94A3B8" />
+    <circle cx="42" cy="58" r="1.5" fill="#94A3B8" />
+  </g>
+
+  <!-- 品牌文字 -->
+  <!-- 主标题：阅读 -->
+  <text x="60" y="118" font-family="'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF" text-anchor="middle" letter-spacing="2">阅读</text>
+  
+</svg>

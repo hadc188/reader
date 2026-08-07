@@ -1,0 +1,119 @@
+<template>
+  <div class="titlebar" :class="{ 'theme-dark': appStore.theme === 'dark' }">
+    <div class="titlebar-drag" data-tauri-drag-region @dblclick="toggleMaximize">
+      <span class="titlebar-title" data-tauri-drag-region>阅读</span>
+    </div>
+    <div class="titlebar-controls">
+      <button class="tb-btn" title="最小化" @click="minimize">
+        <svg viewBox="0 0 12 12" width="12" height="12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+      </button>
+      <button class="tb-btn" :title="isMaximized ? '还原' : '最大化'" @click="toggleMaximize">
+        <svg v-if="isMaximized" viewBox="0 0 12 12" width="12" height="12"><rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2" /><path d="M4.5 2.5V4M9.5 4.5H8M4.5 7.5H8" stroke="currentColor" stroke-width="1.2" /></svg>
+        <svg v-else viewBox="0 0 12 12" width="12" height="12"><rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2" /></svg>
+      </button>
+      <button class="tb-btn close" title="关闭" @click="close">
+        <svg viewBox="0 0 12 12" width="12" height="12"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+      </button>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { useAppStore } from '../stores/app'
+
+const appStore = useAppStore()
+const appWindow = getCurrentWindow()
+const isMaximized = ref(false)
+
+async function minimize() {
+  await appWindow.minimize()
+}
+async function toggleMaximize() {
+  const m = await appWindow.isMaximized()
+  if (m) {
+    await appWindow.unmaximize()
+    isMaximized.value = false
+  } else {
+    await appWindow.maximize()
+    isMaximized.value = true
+  }
+}
+async function close() {
+  await appWindow.close()
+}
+
+onMounted(async () => {
+  isMaximized.value = await appWindow.isMaximized()
+  const unlisten = await appWindow.onResized(() => {
+    void appWindow.isMaximized().then((m) => { isMaximized.value = m })
+  })
+  cleanup = () => void unlisten()
+})
+let cleanup: () => void = () => undefined
+onBeforeUnmount(() => cleanup())
+</script>
+
+<style scoped>
+.titlebar {
+  /* In normal flow: #app is a flex column, so this pushes .app-body below it
+     instead of floating over the page (position:fixed overlapped the reader). */
+  position: relative;
+  flex-shrink: 0;
+  height: var(--titlebar-height, 32px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: calc(var(--z-modal) + 20);
+  background: var(--color-bg-elevated);
+  border-bottom: 1px solid var(--color-border-light);
+  user-select: none;
+}
+
+.titlebar-drag {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  padding-left: 12px;
+}
+
+.titlebar-title {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+
+.titlebar-controls {
+  display: flex;
+  height: 100%;
+}
+
+.tb-btn {
+  width: 46px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.tb-btn:hover {
+  background: var(--color-bg-hover);
+}
+
+.tb-btn.close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+@media (max-width: 640px) {
+  .titlebar {
+    height: 40px;
+  }
+}
+</style>

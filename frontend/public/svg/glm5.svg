@@ -1,0 +1,70 @@
+<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 主渐变色：温暖的橙红色，象征阅读的热情 -->
+    <linearGradient id="bookGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FF6B4A"/>
+      <stop offset="100%" style="stop-color:#E74C3C"/>
+    </linearGradient>
+    <!-- 深色渐变：用于底部装饰 -->
+    <linearGradient id="darkGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#2C3E50"/>
+      <stop offset="100%" style="stop-color:#1A252F"/>
+    </linearGradient>
+    <!-- 叶子装饰渐变 -->
+    <linearGradient id="leafGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#27AE60"/>
+      <stop offset="100%" style="stop-color:#1E8449"/>
+    </linearGradient>
+  </defs>
+  <!-- 背景圆形 -->
+  <circle cx="100" cy="100" r="90" fill="#FFF9F5"/>
+  <circle cx="100" cy="100" r="85" fill="none" stroke="url(#bookGradient)" stroke-width="3" opacity="0.3"/>
+  <!-- 左侧书页 -->
+  <path d="M50 55 
+           Q50 50, 55 50 
+           L95 50 
+           Q100 50, 100 55
+           L100 130
+           Q100 135, 95 135
+           L55 135
+           Q50 135, 50 130
+           Z" 
+        fill="#FFFFFF" stroke="url(#bookGradient)" stroke-width="2.5"/>
+  <!-- 左侧书页上的文字线条 -->
+  <g opacity="0.6">
+    <line x1="58" y1="65" x2="92" y2="65" stroke="#E74C3C" stroke-width="2" stroke-linecap="round"/>
+    <line x1="58" y1="78" x2="88" y2="78" stroke="#E74C3C" stroke-width="2" stroke-linecap="round"/>
+    <line x1="58" y1="91" x2="85" y2="91" stroke="#E74C3C" stroke-width="2" stroke-linecap="round"/>
+    <line x1="58" y1="104" x2="90" y2="104" stroke="#E74C3C" stroke-width="2" stroke-linecap="round"/>
+    <line x1="58" y1="117" x2="78" y2="117" stroke="#E74C3C" stroke-width="2" stroke-linecap="round"/>
+  </g>
+  <!-- 右侧书页（略微翻开） -->
+  <path d="M100 50
+           Q100 50, 105 50
+           L145 50
+           Q150 50, 150 55
+           L150 130
+           Q150 135, 145 135
+           L105 135
+           Q100 135, 100 130
+           Z" 
+        fill="url(#bookGradient)" stroke="#E74C3C" stroke-width="2.5"/>
+  <!-- 右侧书页上的文字线条（白色） -->
+  <g opacity="0.5">
+    <line x1="108" y1="65" x2="142" y2="65" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+    <line x1="108" y1="78" x2="138" y2="78" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+    <line x1="108" y1="91" x2="145" y2="91" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+    <line x1="108" y1="104" x2="135" y2="104" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+    <line x1="108" y1="117" x2="130" y2="117" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+  </g>
+  <!-- 书脊 -->
+  <line x1="100" y1="50" x2="100" y2="135" stroke="url(#darkGradient)" stroke-width="3" stroke-linecap="round"/>
+  <!-- 书签 -->
+  <path d="M125 50 L125 75 L120 68 L115 75 L115 50" fill="#F39C12" stroke="#E67E22" stroke-width="1"/>
+  <!-- 装饰：小叶子/成长象征 -->
+  <path d="M145 140 Q155 135, 165 140 Q160 150, 150 148 Q145 145, 145 140" 
+        fill="url(#leafGradient)" opacity="0.8"/>
+  <!-- 网站名称 "阅读" -->
+  <text x="100" y="168" text-anchor="middle" font-family="'Microsoft YaHei', 'PingFang SC', sans-serif" 
+        font-size="26" font-weight="bold" fill="url(#darkGradient)">阅读</text>
+</svg>

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 100" width="320" height="100">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4776E6" />
+      <stop offset="100%" stop-color="#8E54E9" />
+    </linearGradient>
+    
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.15" />
+    </filter>
+  </defs>
+
+  <rect x="10" y="10" width="80" height="80" rx="20" fill="url(#bgGrad)" filter="url(#shadow)" />
+
+  <circle cx="50" cy="22" r="3" fill="#FFFFFF" opacity="0.9" />
+  <circle cx="33" cy="28" r="1.5" fill="#FFFFFF" opacity="0.6" />
+  <circle cx="68" cy="25" r="2" fill="#FFFFFF" opacity="0.8" />
+  <circle cx="25" cy="40" r="1" fill="#FFFFFF" opacity="0.4" />
+  <circle cx="75" cy="38" r="1" fill="#FFFFFF" opacity="0.4" />
+
+  <path d="M 46 40 L 54 40 L 54 62 L 50 58 L 46 62 Z" fill="#FFC371" />
+
+  <path d="M 50 64 Q 35 69 20 54 L 20 37 Q 35 52 50 47 Z" fill="#FFFFFF" opacity="0.4" />
+  <path d="M 50 64 Q 65 69 80 54 L 80 37 Q 65 52 50 47 Z" fill="#FFFFFF" opacity="0.4" />
+
+  <path d="M 50 70 Q 35 75 20 60 L 20 35 Q 35 50 50 45 Z" fill="#FFFFFF" opacity="0.95" />
+  <path d="M 50 70 Q 65 75 80 60 L 80 35 Q 65 50 50 45 Z" fill="#FFFFFF" opacity="0.95" />
+
+  <line x1="50" y1="45" x2="50" y2="70" stroke="#E0E5EC" stroke-width="1.5" stroke-linecap="round" />
+
+  <g transform="translate(110, 0)">
+    <text x="0" y="58" font-family="'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif" font-size="42" font-weight="bold" fill="#2C3E50" letter-spacing="2">
+      阅读
+    </text>
+    
+    <text x="4" y="80" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#8A9BA8" letter-spacing="5.5">
+      NOVELS
+    </text>
+  </g>
+</svg>

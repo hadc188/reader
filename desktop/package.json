@@ -1,0 +1,13 @@
+{
+  "name": "reader-desktop",
+  "private": true,
+  "version": "1.0.8",
+  "scripts": {
+    "icon": "tauri icon ../frontend/public/icon-master-1024.png",
+    "dev": "tauri dev",
+    "build": "node ../scripts/build-desktop.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

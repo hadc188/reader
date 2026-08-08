@@ -3736,7 +3736,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "reader-desktop"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "reader-rust",
@@ -3750,7 +3750,7 @@ dependencies = [
 
 [[package]]
 name = "reader-rust"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -4201,7 +4201,7 @@ dependencies = [
 
 [[package]]
 name = "scopeguard"
-version = "1.2.0"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 

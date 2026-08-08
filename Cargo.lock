@@ -3736,7 +3736,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "reader-desktop"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "reader-rust",
@@ -3750,7 +3750,7 @@ dependencies = [
 
 [[package]]
 name = "reader-rust"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "aes",
  "anyhow",

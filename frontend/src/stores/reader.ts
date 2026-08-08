@@ -326,7 +326,7 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function convertContent(text: string) {
-    if (!text || !chineseConverter.value) return text
+    if (!text || config.chineseMode !== 'traditional' || !chineseConverter.value) return text
     return chineseConverter.value(text)
   }
 

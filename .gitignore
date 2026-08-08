@@ -37,3 +37,4 @@ test-results/
 # Debug scratch files
 toc_tmp.html
 *.tmp.html
+.ace-tool/

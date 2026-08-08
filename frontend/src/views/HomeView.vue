@@ -122,7 +122,6 @@
         @click="handleBookClick"
         @info="handleBookInfo"
         @delete="handleDeleteBook"
-        @ai="handleBookAi"
         @select="shelfStore.toggleSelection($event.bookUrl)"
         @reorder="handleReorderBooks"
         />
@@ -262,14 +261,6 @@ async function handleBookClick(book: Book | SearchBook) {
 function handleBookInfo(book: Book | SearchBook) {
   selectedBook.value = book
   showDetail.value = true
-}
-
-function handleBookAi(book: Book | SearchBook) {
-  const currentBook = book as Book
-  router.push({
-    name: 'ai-book',
-    query: { bookUrl: currentBook.bookUrl },
-  })
 }
 
 async function handleDeleteBook(book: Book | SearchBook) {

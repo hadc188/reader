@@ -70,15 +70,6 @@
         <button class="m-btn" @click="$emit('info')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4M12 8h.01" /></svg>
         </button>
-        <button class="m-btn" @click="$emit('ai')" title="AI资料" aria-label="AI资料">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M6 3h8l4 4v14H6z" />
-            <path d="M14 3v5h5" />
-            <path d="m8 16 2-5 2 5" />
-            <path d="M8.7 14h2.6" />
-            <path d="M15 11v5" />
-          </svg>
-        </button>
         <button class="m-btn" @click="$emit('scrollTop')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
         </button>
@@ -144,7 +135,6 @@ defineEmits<{
   bookmark: []
   search: []
   info: []
-  ai: []
   tts: []
   progress: []
 }>()

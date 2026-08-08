@@ -4,7 +4,6 @@ pub mod protocol;
 use crate::app::config::AppConfig;
 use tauri::ipc::Invoke;
 use crate::service::{
-    ai_book_service::AiBookService, ai_model_service::AiModelService,
     book_group_service::BookGroupService, book_service::BookService,
     book_source_service::BookSourceService, json_document_service::JsonDocumentService,
     local_epub_book::LocalEpubBookService, local_txt_book::LocalTxtBookService,
@@ -23,8 +22,6 @@ pub struct AppState {
     pub local_txt_book_service: Arc<LocalTxtBookService>,
     pub local_epub_book_service: Arc<LocalEpubBookService>,
     pub json_document_service: Arc<JsonDocumentService>,
-    pub ai_book_service: Arc<AiBookService>,
-    pub ai_model_service: Arc<AiModelService>,
     pub reading_stats_service: Arc<ReadingStatsService>,
     pub update_service: Arc<UpdateService>,
 }
@@ -33,13 +30,6 @@ pub struct AppState {
 pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::health,
-        commands::ai_book::get_ai_book_memory,
-        commands::ai_book::save_ai_book_memory,
-        commands::ai_book::delete_ai_book_memory,
-        commands::ai_model::get_ai_model_config,
-        commands::ai_model::save_ai_model_config,
-        commands::ai_proxy::ai_proxy,
-        commands::ai_proxy::ai_proxy_image,
         commands::book::search_book,
         commands::book::search_book_multi,
         commands::book::explore_book,
@@ -124,5 +114,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::webdav::upload_file_to_webdav,
         commands::webdav::delete_webdav_file,
         commands::webdav::delete_webdav_file_list,
+        commands::webdav::get_webdav_home,
+        commands::webdav::open_webdav_folder,
     ]
 }

@@ -452,17 +452,23 @@ function formatEditor() {
 
 async function saveEditor() {
   try {
-    const parsed = JSON.parse(editorText.value) as BookSource
-    if (!parsed.bookSourceName?.trim()) {
-      throw new Error('书源名称不能为空')
+    const raw = JSON.parse(editorText.value)
+    const parsed = (Array.isArray(raw) ? raw : [raw]) as BookSource[]
+    if (!parsed.length) {
+      throw new Error('书源内容为空')
     }
-    if (!parsed.bookSourceUrl?.trim()) {
-      throw new Error('书源链接不能为空')
+    for (const source of parsed) {
+      if (!source.bookSourceName?.trim()) {
+        throw new Error('书源名称不能为空')
+      }
+      if (!source.bookSourceUrl?.trim()) {
+        throw new Error('书源链接不能为空')
+      }
     }
-    await saveBookSource(parsed)
-    appStore.showToast('保存书源成功', 'success')
+    await saveBookSources(parsed)
+    appStore.showToast(`保存书源成功（${parsed.length} 个）`, 'success')
     await loadSources()
-    const latest = sources.value.find((item) => item.bookSourceUrl === parsed.bookSourceUrl)
+    const latest = sources.value.find((item) => item.bookSourceUrl === parsed[0].bookSourceUrl)
     if (latest) {
       editSource(latest)
     }

@@ -106,7 +106,6 @@ impl UserService {
             enable_webdav: false,
             token_map: None,
             enable_local_store: false,
-            enable_ai_model: false,
             is_admin: user_count == 0,
         };
         self.upsert_user_row(&user).await?;
@@ -219,7 +218,6 @@ impl UserService {
             enable_webdav: false,
             token_map: None,
             enable_local_store: false,
-            enable_ai_model: false,
             is_admin: false,
         };
         self.upsert_user_row(&user).await?;
@@ -300,10 +298,6 @@ impl UserService {
                 .bind(u)
                 .execute(&self.pool)
                 .await?;
-            sqlx::query("DELETE FROM ai_book_memories WHERE user_ns=?1")
-                .bind(u)
-                .execute(&self.pool)
-                .await?;
             let user_dir = self.data_root.join(u);
             if user_dir.exists() {
                 let _ = fs::remove_dir_all(user_dir).await;
@@ -317,7 +311,6 @@ impl UserService {
         username: &str,
         enable_webdav: Option<bool>,
         enable_local_store: Option<bool>,
-        enable_ai_model: Option<bool>,
     ) -> Result<Vec<Value>, AppError> {
         let mut user = self
             .find_user(username)
@@ -328,9 +321,6 @@ impl UserService {
         }
         if let Some(v) = enable_local_store {
             user.enable_local_store = v;
-        }
-        if let Some(v) = enable_ai_model {
-            user.enable_ai_model = v;
         }
         self.upsert_user_row(&user).await?;
         self.get_user_list().await
@@ -387,27 +377,6 @@ impl UserService {
         if let Some(token) = access_token {
             if let Ok(Some(user)) = self.check_auth(token).await {
                 return Ok(user.is_admin);
-            }
-        }
-        Ok(false)
-    }
-
-    pub async fn can_use_ai_model(
-        &self,
-        access_token: Option<&str>,
-        secure_key: Option<&str>,
-    ) -> Result<bool, AppError> {
-        if !self.cfg.secure {
-            return Ok(true);
-        }
-        if let Some(key) = secure_key {
-            if self.secure_key_matches(key) {
-                return Ok(true);
-            }
-        }
-        if let Some(token) = access_token {
-            if let Ok(Some(user)) = self.check_auth(token).await {
-                return Ok(user.is_admin || user.enable_ai_model);
             }
         }
         Ok(false)
@@ -515,7 +484,6 @@ impl UserService {
             "accessToken": format!("{}:{}", user.username, user.token),
             "enableWebdav": user.enable_webdav,
             "enableLocalStore": user.enable_local_store,
-            "enableAiModel": user.enable_ai_model,
             "createdAt": user.created_at,
             "isAdmin": user.is_admin,
         })
@@ -553,7 +521,7 @@ impl UserService {
     async fn load_users_raw(&self) -> Result<HashMap<String, User>, AppError> {
         let rows = sqlx::query(
             "SELECT username, password, salt, token, last_login_at, created_at, enable_webdav, \
-             enable_local_store, enable_ai_model, is_admin FROM users ORDER BY created_at ASC, username ASC",
+             enable_local_store, is_admin FROM users ORDER BY created_at ASC, username ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -592,7 +560,7 @@ impl UserService {
     async fn find_user(&self, username: &str) -> Result<Option<User>, AppError> {
         let row = sqlx::query(
             "SELECT username, password, salt, token, last_login_at, created_at, enable_webdav, \
-             enable_local_store, enable_ai_model, is_admin FROM users WHERE username=?1",
+             enable_local_store, is_admin FROM users WHERE username=?1",
         )
         .bind(username)
         .fetch_optional(&self.pool)
@@ -616,18 +584,17 @@ impl UserService {
             enable_webdav: row.get::<i64, _>("enable_webdav") != 0,
             token_map: None,
             enable_local_store: row.get::<i64, _>("enable_local_store") != 0,
-            enable_ai_model: row.get::<i64, _>("enable_ai_model") != 0,
             is_admin: row.get::<i64, _>("is_admin") != 0,
         }
     }
 
     async fn upsert_user_row(&self, user: &User) -> Result<(), AppError> {
         sqlx::query(
-            "INSERT INTO users (username, password, salt, token, last_login_at, created_at, enable_webdav, enable_local_store, enable_ai_model, is_admin) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+            "INSERT INTO users (username, password, salt, token, last_login_at, created_at, enable_webdav, enable_local_store, is_admin) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
              ON CONFLICT(username) DO UPDATE SET password=excluded.password, salt=excluded.salt, token=excluded.token, \
              last_login_at=excluded.last_login_at, created_at=excluded.created_at, enable_webdav=excluded.enable_webdav, \
-             enable_local_store=excluded.enable_local_store, enable_ai_model=excluded.enable_ai_model, is_admin=excluded.is_admin",
+             enable_local_store=excluded.enable_local_store, is_admin=excluded.is_admin",
         )
         .bind(&user.username)
         .bind(&user.password)
@@ -637,7 +604,6 @@ impl UserService {
         .bind(user.created_at)
         .bind(bool_to_i64(user.enable_webdav))
         .bind(bool_to_i64(user.enable_local_store))
-        .bind(bool_to_i64(user.enable_ai_model))
         .bind(bool_to_i64(user.is_admin))
         .execute(&self.pool)
         .await?;
@@ -884,7 +850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrates_legacy_users_json_to_sqlite_and_keeps_ai_permission() {
+    async fn migrates_legacy_users_json_to_sqlite() {
         let (service, temp_dir) = create_user_service().await;
         let salt = "salt1234".to_string();
         let password = gen_encrypted_password("password123", &salt);
@@ -897,7 +863,6 @@ mod tests {
                 "token": token,
                 "lastLoginAt": now_ms(),
                 "createdAt": 100,
-                "enableAiModel": true,
                 "isAdmin": false
             }
         });
@@ -910,11 +875,6 @@ mod tests {
 
         service.migrate_legacy_users_from_json().await.unwrap();
 
-        let access_token = "reader1:legacy-token";
-        assert!(service
-            .can_use_ai_model(Some(access_token), None)
-            .await
-            .unwrap());
         assert!(service.load_users().await.unwrap().get("reader1").is_some());
         let _ = fs::remove_dir_all(temp_dir).await;
     }
@@ -1086,14 +1046,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_users_without_admin_promote_earliest_account_for_ai_model_access() {
+    async fn legacy_users_without_admin_promote_earliest_account() {
         let (service, temp_dir) = create_user_service().await;
 
-        let first_login = service
+        let _first_login = service
             .login("reader1", "password123", false, None)
             .await
             .unwrap();
-        let first_access_token = first_login["accessToken"].as_str().unwrap().to_string();
         let _ = service
             .login("reader2", "password123", false, None)
             .await
@@ -1106,92 +1065,10 @@ mod tests {
         users.get_mut("reader2").unwrap().created_at = 200;
         service.save_users(&users).await.unwrap();
 
-        assert!(service
-            .can_use_ai_model(Some(&first_access_token), None)
-            .await
-            .unwrap());
-
         let users = service.load_users().await.unwrap();
         assert!(users.get("reader1").unwrap().is_admin);
         assert!(!users.get("reader2").unwrap().is_admin);
 
-        let _ = fs::remove_dir_all(temp_dir).await;
-    }
-
-    #[tokio::test]
-    async fn ai_model_permission_reads_legacy_snake_case_user_fields() {
-        let (service, temp_dir) = create_user_service().await;
-        let salt = "salt1234".to_string();
-        let password = gen_encrypted_password("password123", &salt);
-        let users = serde_json::json!({
-            "reader1": {
-                "username": "reader1",
-                "password": password,
-                "salt": salt,
-                "token": "legacy-token",
-                "last_login_at": now_ms(),
-                "created_at": 100,
-                "enable_ai_model": true,
-                "is_admin": false
-            }
-        });
-        fs::create_dir_all(service.users_path.parent().unwrap())
-            .await
-            .unwrap();
-        fs::write(&service.users_path, serde_json::to_string(&users).unwrap())
-            .await
-            .unwrap();
-        service.migrate_legacy_users_from_json().await.unwrap();
-
-        assert!(service
-            .can_use_ai_model(Some("reader1:legacy-token"), None)
-            .await
-            .unwrap());
-
-        let _ = fs::remove_dir_all(temp_dir).await;
-    }
-
-    #[tokio::test]
-    async fn ai_model_permission_grant_allows_existing_session_token() {
-        let (service, temp_dir) = create_user_service().await;
-
-        let login = service
-            .login("reader1", "password123", false, None)
-            .await
-            .unwrap();
-        let access_token = login["accessToken"].as_str().unwrap().to_string();
-
-        service
-            .update_user("reader1", None, None, Some(true))
-            .await
-            .unwrap();
-
-        assert!(service
-            .can_use_ai_model(Some(&access_token), None)
-            .await
-            .unwrap());
-
-        let _ = fs::remove_dir_all(temp_dir).await;
-    }
-
-    #[tokio::test]
-    async fn session_refresh_does_not_overwrite_permission_changes() {
-        let (service, temp_dir) = create_user_service().await;
-
-        service
-            .login("reader1", "password123", false, None)
-            .await
-            .unwrap();
-        let mut stale_user = service.find_user("reader1").await.unwrap().unwrap();
-        sqlx::query("UPDATE users SET enable_ai_model=1 WHERE username='reader1'")
-            .execute(&service.pool)
-            .await
-            .unwrap();
-
-        service.save_new_session(&mut stale_user).await.unwrap();
-
-        let user = service.find_user("reader1").await.unwrap().unwrap();
-        assert!(user.enable_ai_model);
         let _ = fs::remove_dir_all(temp_dir).await;
     }
 
@@ -1224,17 +1101,6 @@ mod tests {
         .execute(&service.pool)
         .await
         .unwrap();
-        sqlx::query(
-            "INSERT INTO ai_book_memories (user_ns, book_key, book_url, json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .bind("reader1")
-        .bind("book-key")
-        .bind("book-url")
-        .bind("{}")
-        .bind(now_ts())
-        .execute(&service.pool)
-        .await
-        .unwrap();
 
         service
             .delete_users(&["reader1".to_string()])
@@ -1250,10 +1116,6 @@ mod tests {
                 "SELECT COUNT(*) AS count FROM json_documents WHERE namespace='reader1'",
                 "json_documents",
             ),
-            (
-                "SELECT COUNT(*) AS count FROM ai_book_memories WHERE user_ns='reader1'",
-                "ai_book_memories",
-            ),
         ] {
             let row = sqlx::query(sql).fetch_one(&service.pool).await.unwrap();
             assert_eq!(row.get::<i64, _>("count"), 0, "{column} should be empty");
@@ -1263,7 +1125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_auth_refreshes_keep_ai_model_permission() {
+    async fn concurrent_auth_refreshes_keep_session_token() {
         let (service, temp_dir) = create_user_service().await;
 
         let _admin = service
@@ -1275,17 +1137,13 @@ mod tests {
             .await
             .unwrap();
         let access_token = login["accessToken"].as_str().unwrap().to_string();
-        service
-            .update_user("reader1", None, None, Some(true))
-            .await
-            .unwrap();
 
         let mut handles = Vec::new();
         for _ in 0..64 {
             let service = service.clone();
             let token = access_token.clone();
             handles.push(tokio::spawn(async move {
-                service.can_use_ai_model(Some(&token), None).await.unwrap()
+                service.check_auth(&token).await.unwrap().is_some()
             }));
         }
         for handle in handles {
@@ -1294,7 +1152,6 @@ mod tests {
 
         let users = service.load_users().await.unwrap();
         let user = users.get("reader1").unwrap();
-        assert!(user.enable_ai_model);
         let (_, raw_token) = parse_access_token(&access_token).unwrap();
         assert!(user
             .token_map

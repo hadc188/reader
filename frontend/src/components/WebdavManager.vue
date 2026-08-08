@@ -8,8 +8,8 @@
         <section class="webdav-modal">
           <header class="modal-header">
             <div>
-              <h2>服务器备份与文件管理</h2>
-              <p class="subtitle">将书架、书源、RSS、书签、净化规则和本地阅读配置备份到服务器</p>
+              <h2>本地备份与文件管理</h2>
+              <p class="subtitle">将书架、书源、RSS、书签、净化规则和本地阅读配置备份到本地</p>
             </div>
             <button class="icon-btn" @click="close" aria-label="关闭">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -24,6 +24,14 @@
           </div>
 
           <template v-else>
+            <div class="backup-location">
+              <span class="backup-location-label">备份目录</span>
+              <code class="backup-location-path">{{ backupPath || '加载中...' }}</code>
+              <button class="action-btn" :disabled="!backupPath" @click="openFolder">
+                在文件夹中打开
+              </button>
+            </div>
+
             <div class="toolbar">
               <div class="toolbar-left">
                 <button class="action-btn primary" :disabled="working" @click="createBackup">
@@ -131,6 +139,8 @@ import {
   getWebdavFileBlob,
   getWebdavFileList,
   getWebdavFileText,
+  getWebdavHome,
+  openWebdavFolder,
   type WebdavFileEntry,
   uploadFilesToWebdav,
   uploadTextToWebdav,
@@ -160,6 +170,7 @@ const selectedPaths = ref<string[]>([])
 const loading = ref(false)
 const working = ref(false)
 const errorMessage = ref('')
+const backupPath = ref('')
 
 // Single-user desktop: WebDAV backup is always available.
 const webdavAvailable = computed(() => true)
@@ -173,6 +184,9 @@ watch(
   (visible) => {
     if (visible && webdavAvailable.value) {
       void loadFiles(currentPath.value)
+      getWebdavHome()
+        .then((home) => { backupPath.value = home.path })
+        .catch(() => { backupPath.value = '' })
     }
     if (!visible) {
       errorMessage.value = ''
@@ -183,6 +197,14 @@ watch(
 
 function close() {
   emit('update:modelValue', false)
+}
+
+async function openFolder() {
+  try {
+    await openWebdavFolder()
+  } catch (error) {
+    appStore.showToast((error as Error).message || '打开文件夹失败', 'error')
+  }
 }
 
 function isBackupFile(name: string) {
@@ -244,7 +266,7 @@ async function loadFiles(path = '/') {
     }))
     entries.value = rows
   } catch (error) {
-    errorMessage.value = (error as Error).message || '无法读取服务器备份文件列表'
+    errorMessage.value = (error as Error).message || '无法读取本地备份文件列表'
     entries.value = []
   } finally {
     loading.value = false
@@ -271,7 +293,7 @@ async function handleUpload(event: Event) {
       files.map((file) => ({ file, name: file.name })),
       currentPath.value,
     )
-    appStore.showToast('文件已上传到服务器', 'success')
+    appStore.showToast('文件已上传到本地', 'success')
     await loadFiles(currentPath.value)
   } catch (error) {
     appStore.showToast((error as Error).message || '上传失败', 'error')
@@ -517,6 +539,38 @@ async function restoreBackup(entry: EntryRow) {
 .path-bar,
 .notice {
   margin: var(--space-4) var(--space-6) 0;
+}
+
+.backup-location {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-4) var(--space-6) 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+  font-size: var(--text-sm);
+}
+
+.backup-location-label {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
+.backup-location-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text);
+}
+
+.backup-location .action-btn {
+  flex-shrink: 0;
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-xs);
 }
 
 .path-bar {

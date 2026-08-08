@@ -228,28 +228,6 @@
       </div>
 
       <template v-else>
-        <div class="setting-row">
-          <label>模型来源</label>
-          <div class="btn-group">
-            <button
-              class="opt-btn"
-              :class="{ active: store.speechConfig.openaiSource === 'browser' }"
-              @click="store.setOpenAISpeechSource('browser')"
-            >
-              自己配置
-            </button>
-            <button
-              class="opt-btn"
-              :class="{ active: store.speechConfig.openaiSource === 'server' }"
-              :disabled="serverModelLoaded && !canUseServerModel"
-              @click="selectOpenAISpeechSource('server')"
-            >
-              后端配置
-            </button>
-          </div>
-        </div>
-
-        <template v-if="store.speechConfig.openaiSource === 'browser'">
         <div class="setting-row setting-row-top">
           <label>服务地址</label>
           <input
@@ -309,16 +287,6 @@
             <option value="pcm">pcm</option>
           </select>
         </div>
-        </template>
-
-        <div v-else class="server-speech-note">
-          <template v-if="canUseServerModel">
-            使用管理员配置的 OpenAI Speech 模型、音色和音频格式。请求通过后端代理转发，浏览器不会保存后端 API Key。
-          </template>
-          <template v-else>
-            当前账号没有使用后端模型配置的权限，请让管理员在用户管理中开启“AI 模型”，或切回自己配置。
-          </template>
-        </div>
 
         <div class="setting-row setting-row-top">
           <label>请求模式</label>
@@ -341,9 +309,7 @@
         </div>
 
         <div class="setting-hint">
-          少字多请求会按短句细分并预加载更多片段；多字少请求会合并较短段落，只预加载下一段。
-          <template v-if="store.speechConfig.openaiSource === 'browser'">URL 和 Key 仅保存在当前浏览器。</template>
-          <template v-else>后端配置由管理员维护，权限不足时朗读请求会失败。</template>
+          少字多请求会按短句细分并预加载更多片段；多字少请求会合并较短段落，只预加载下一段。URL 和 Key 仅保存在当前浏览器。
         </div>
       </template>
 
@@ -393,18 +359,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useReaderStore, themePresets, fontPresets } from '../../stores/reader'
-import { useAiBookStore } from '../../stores/aiBook'
-import { useAppStore } from '../../stores/app'
 
 const store = useReaderStore()
-const aiBookStore = useAiBookStore()
-const appStore = useAppStore()
 const config = computed(() => store.config)
 const theme = computed(() => store.currentTheme)
-const serverModelLoaded = ref(false)
-const canUseServerModel = computed(() => Boolean(aiBookStore.serverModelConfig?.canUseServerModel))
 
 function step(key: 'fontSize' | 'fontWeight' | 'pageWidth' | 'animateDuration' | 'scrollPixel' | 'pageSpeed', delta: number, min: number, max: number) {
   const val = Math.max(min, Math.min(max, (config.value[key] as number) + delta))
@@ -431,30 +391,8 @@ function handleVoiceChange(event: Event) {
   store.setVoiceName(target?.value || '')
 }
 
-async function selectOpenAISpeechSource(source: 'browser' | 'server') {
-  if (source === 'browser') {
-    store.setOpenAISpeechSource('browser')
-    return
-  }
-  if (!serverModelLoaded.value) {
-    await aiBookStore.loadServerModelConfig({ force: true })
-    serverModelLoaded.value = true
-  }
-  if (!canUseServerModel.value) {
-    store.setOpenAISpeechSource('browser')
-    appStore.showToast('当前账号没有使用后端模型配置的权限', 'warning')
-    return
-  }
-  store.setOpenAISpeechSource('server')
-}
-
 onMounted(async () => {
   store.fetchVoices()
-  await aiBookStore.loadServerModelConfig({ force: true })
-  serverModelLoaded.value = true
-  if (store.speechConfig.openaiSource === 'server' && !canUseServerModel.value) {
-    store.setOpenAISpeechSource('browser')
-  }
 })
 </script>
 
@@ -551,17 +489,6 @@ onMounted(async () => {
   font-size: 12px;
   line-height: 1.5;
   opacity: 0.65;
-}
-
-.server-speech-note {
-  margin-left: 90px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(201, 127, 58, 0.18);
-  background: rgba(201, 127, 58, 0.08);
-  font-size: 12px;
-  line-height: 1.6;
-  color: inherit;
 }
 
 /* Theme swatches */
@@ -741,10 +668,6 @@ onMounted(async () => {
   .setting-hint {
     padding-left: 0;
     margin-top: -12px;
-  }
-
-  .server-speech-note {
-    margin-left: 0;
   }
 }
 </style>

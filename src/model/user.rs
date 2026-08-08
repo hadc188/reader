@@ -18,8 +18,6 @@ pub struct User {
     pub token_map: Option<HashMap<String, i64>>,
     #[serde(alias = "enable_local_store")]
     pub enable_local_store: bool,
-    #[serde(alias = "enable_ai_model")]
-    pub enable_ai_model: bool,
     #[serde(alias = "is_admin")]
     pub is_admin: bool,
 }

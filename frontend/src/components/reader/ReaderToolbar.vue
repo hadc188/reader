@@ -9,16 +9,7 @@
     <button class="tb-btn" @click="$emit('info')" title="书籍信息">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4M12 8h.01" /></svg>
     </button>
-    <button class="tb-btn" @click="$emit('ai')" title="AI资料">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M6 3h8l4 4v14H6z" />
-        <path d="M14 3v5h5" />
-        <path d="m8 16 2-5 2 5" />
-        <path d="M8.7 14h2.6" />
-        <path d="M15 11v5" />
-      </svg>
-    </button>
-    <button class="tb-btn" :class="{ spinning: store.loading }" @click="store.refreshContent()" title="刷新">
+<button class="tb-btn" :class="{ spinning: store.loading }" @click="store.refreshContent()" title="刷新">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 16h5v5" /></svg>
     </button>
     <button class="tb-btn" :class="{ active: store.isAutoScrolling }" @click="store.toggleAutoReading()" title="自动翻页">
@@ -75,7 +66,6 @@ defineEmits<{
   bookmark: []
   search: []
   info: []
-  ai: []
   tts: []
   prev: []
   next: []

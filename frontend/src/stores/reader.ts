@@ -2,7 +2,6 @@
 import { ref, computed, reactive, watch } from 'vue'
 import { useAppStore } from './app'
 import { useBookshelfStore } from './bookshelf'
-import { useAiBookStore } from './aiBook'
 import {
   getChapterList,
   getBookContent,
@@ -189,7 +188,6 @@ export const useReaderStore = defineStore('reader', () => {
   type ReaderPanel = 'catalog' | 'settings' | 'bookshelf' | 'source' | 'bookmark' | 'rule' | 'cache' | null
   const appStore = useAppStore()
   const shelfStore = useBookshelfStore()
-  const aiBookStore = useAiBookStore()
   const book = ref<Book | null>(null)
   const chapters = ref<BookChapter[]>([])
   const currentIndex = ref(0)
@@ -505,10 +503,7 @@ export const useReaderStore = defineStore('reader', () => {
   const systemTtsNativeEventsReliable = ref(false)
   const voiceList = ref<SpeechSynthesisVoice[]>([])
   const speechConfig = reactive<SpeechConfig>(loadSpeechConfig())
-  const openAISpeechConfigured = computed(() => {
-    if (speechConfig.openaiSource === 'server') return true
-    return !!speechConfig.openaiBaseUrl.trim()
-  })
+  const openAISpeechConfigured = computed(() => !!speechConfig.openaiBaseUrl.trim())
   const speechProviderLabel = computed(() => speechConfig.provider === 'openai' ? 'OpenAI Speech' : '系统语音')
   const speechStopAt = ref(0)
   let speechStopTimer: number | null = null
@@ -637,7 +632,6 @@ export const useReaderStore = defineStore('reader', () => {
 
   function buildOpenAIAudioCacheKey(rawText: string) {
     return [
-      speechConfig.openaiSource,
       speechConfig.openaiBaseUrl.trim(),
       speechConfig.openaiApiKey.trim(),
       speechConfig.openaiModel,
@@ -650,7 +644,6 @@ export const useReaderStore = defineStore('reader', () => {
 
   async function fetchOpenAIAudioBlob(rawText: string, signal?: AbortSignal) {
     return requestOpenAISpeechAudio({
-      source: speechConfig.openaiSource,
       baseUrl: speechConfig.openaiBaseUrl,
       apiKey: speechConfig.openaiApiKey || undefined,
       input: rawText.slice(0, 4096),
@@ -956,22 +949,6 @@ export const useReaderStore = defineStore('reader', () => {
       appStore.showToast(error.message, 'warning')
       options.onError?.(error)
       return
-    }
-    if (speechConfig.openaiSource === 'server') {
-      const serverConfig = await aiBookStore.loadServerModelConfig()
-      if (!serverConfig?.canUseServerModel) {
-        const error = new Error('当前账号没有使用后端模型配置的权限')
-        appStore.showToast(error.message, 'warning')
-        options.onError?.(error)
-        return
-      }
-      if (!serverConfig.config.speech.enabled) {
-        const error = new Error('后端 OpenAI Speech 未启用')
-        appStore.showToast(error.message, 'warning')
-        options.onError?.(error)
-        return
-      }
-      if (!isCurrentTTSSession(sessionId)) return
     }
 
     isSpeechLoading.value = true
@@ -1472,18 +1449,7 @@ export const useReaderStore = defineStore('reader', () => {
 
   async function nextChapter() {
     if (hasNext.value) {
-      const completedBook = book.value ? { ...book.value } : null
-      const completedChapter = currentChapter.value ? { ...currentChapter.value } : null
-      const completedContent = content.value
       await loadChapter(currentIndex.value + 1)
-      if (completedBook && completedChapter && completedContent) {
-        void aiBookStore.autoUpdateCompletedChapter({
-          book: completedBook,
-          chapter: completedChapter,
-          chapterContent: completedContent,
-          chapters: chapters.value,
-        })
-      }
     }
   }
 

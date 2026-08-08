@@ -38,7 +38,6 @@
         @click="handleBookClick"
         @info="handleBookInfo"
         @delete="handleRecentDelete"
-        @ai="handleBookAi"
       />
     </div>
 
@@ -143,15 +142,6 @@ function handleBookInfo(book: Book | SearchBook) {
 
 async function handleRecentDelete(book: Book | SearchBook) {
   await shelfStore.removeRecentBook(book as Book).catch(() => undefined)
-}
-
-function handleBookAi(book: Book | SearchBook) {
-  const currentBook = book as Book
-  if (currentBook.recentKind === 'rss') return
-  router.push({
-    name: 'ai-book',
-    query: { bookUrl: currentBook.bookUrl },
-  })
 }
 
 async function handleClearRecent() {

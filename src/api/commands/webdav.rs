@@ -197,6 +197,32 @@ async fn webdav_home(state: &AppState, user_ns: &str) -> Result<PathBuf, AppErro
     Ok(dir)
 }
 
+/// Return the absolute path of the local backup directory so the UI can show
+/// where backups are stored.
+#[tauri::command]
+pub async fn get_webdav_home(
+    state: tauri::State<'_, AppState>,
+) -> Result<ApiResponse<Value>, AppError> {
+    let user_ns = "default";
+    let home = webdav_home(&state, &user_ns).await?;
+    Ok(ApiResponse::ok(serde_json::json!({
+        "path": home.to_string_lossy().into_owned()
+    })))
+}
+
+/// Open the local backup directory in the system file explorer.
+#[tauri::command]
+pub async fn open_webdav_folder(
+    state: tauri::State<'_, AppState>,
+) -> Result<ApiResponse<Value>, AppError> {
+    let user_ns = "default";
+    let home = webdav_home(&state, &user_ns).await?;
+    let path = home.to_string_lossy().into_owned();
+    // Windows-only: explorer.exe opens a directory when given its path.
+    let _ = std::process::Command::new("explorer.exe").arg(&path).spawn();
+    Ok(ApiResponse::ok(serde_json::json!({ "opened": true })))
+}
+
 fn normalize_rel_path(path: &str) -> Result<Vec<String>, AppError> {
     let mut parts = Vec::new();
     for p in path.split('/') {

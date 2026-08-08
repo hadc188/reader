@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS users (
     created_at INTEGER NOT NULL DEFAULT 0,
     enable_webdav INTEGER NOT NULL DEFAULT 0,
     enable_local_store INTEGER NOT NULL DEFAULT 0,
-    enable_ai_model INTEGER NOT NULL DEFAULT 0,
     is_admin INTEGER NOT NULL DEFAULT 0
 );
 

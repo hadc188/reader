@@ -1089,7 +1089,6 @@ pub async fn delete_book(
     if !deleted {
         return Err(AppError::BadRequest("书架书籍不存在".to_string()));
     }
-    cleanup_ai_book_memories(&state, &user_ns, &removed_books).await;
     cleanup_local_book_files(&state, &user_ns, &removed_books).await;
     Ok(ApiResponse::ok(serde_json::json!("删除书籍成功")))
 }
@@ -1102,7 +1101,6 @@ pub async fn delete_books(
     let user_ns = "default";
     let removed_books = find_matching_books(&state, &user_ns, &req).await?;
     let count = state.book_service.delete_books(&user_ns, req).await?;
-    cleanup_ai_book_memories(&state, &user_ns, &removed_books).await;
     cleanup_local_book_files(&state, &user_ns, &removed_books).await;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": count})))
 }
@@ -2296,15 +2294,6 @@ async fn find_matching_books(
                 .any(|target| book_matches_delete_target(shelf_book, target))
         })
         .collect())
-}
-
-async fn cleanup_ai_book_memories(state: &AppState, user_ns: &str, books: &[Book]) {
-    for book in books {
-        if book.book_url.trim().is_empty() {
-            continue;
-        }
-        let _ = state.ai_book_service.delete(user_ns, &book.book_url).await;
-    }
 }
 
 async fn cleanup_local_book_files(state: &AppState, user_ns: &str, books: &[Book]) {

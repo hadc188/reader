@@ -1,4 +1,3 @@
-import { invokeRaw } from '../api/invoke'
 import { summarizeHttpErrorBody } from './httpError'
 
 export const DEFAULT_OPENAI_BASE_URL = 'http://localhost:8825'
@@ -12,7 +11,6 @@ export function buildOpenAISpeechUrl(baseUrl: string) {
 }
 
 export interface OpenAISpeechRequest {
-  source?: 'browser' | 'server'
   baseUrl: string
   apiKey?: string
   input: string
@@ -51,21 +49,7 @@ async function readSpeechError(response: Response) {
   }
 }
 
-export interface AiProxyResult {
-  status: number
-  contentType?: string
-  body: Uint8Array
-}
-
-function aiProxyResponse(result: AiProxyResult): Response {
-  return new Response(result.body as BlobPart, {
-    status: result.status,
-    headers: result.contentType ? { 'content-type': result.contentType } : undefined,
-  })
-}
-
 export async function requestOpenAISpeechAudio({
-  source = 'browser',
   baseUrl,
   apiKey,
   input,
@@ -82,24 +66,15 @@ export async function requestOpenAISpeechAudio({
     response_format: format || 'mp3',
     speed,
   }
-  const response = source === 'server'
-    ? aiProxyResponse(await invokeRaw<AiProxyResult>('ai_proxy', {
-      req: {
-        useServerConfig: true,
-        kind: 'speech',
-        path: '/v1/audio/speech',
-        body,
-      },
-    }))
-    : await fetch(buildOpenAISpeechUrl(baseUrl), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...buildAuthHeaders(apiKey),
-      },
-      body: JSON.stringify(body),
-      signal,
-    })
+  const response = await fetch(buildOpenAISpeechUrl(baseUrl), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildAuthHeaders(apiKey),
+    },
+    body: JSON.stringify(body),
+    signal,
+  })
 
   if (!response.ok) {
     throw new Error(await readSpeechError(response))

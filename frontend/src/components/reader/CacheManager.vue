@@ -15,7 +15,7 @@
     <div class="cache-body">
       <div v-if="!isLocalBookInServer" class="summary-grid">
         <div class="summary-card">
-          <span class="summary-label">服务端缓存</span>
+          <span class="summary-label">本地缓存</span>
           <strong>{{ serverCachedCount }}</strong>
           <small>已缓存章节</small>
         </div>
@@ -43,17 +43,17 @@
 
       <div v-else class="cache-sections">
         <div v-if="isLocalBookInServer" class="info-card">
-          <p>本地书已存放在服务端书架文件中，不需要额外缓存；阅读时会直接读取上传后的本地文件。</p>
+          <p>本地书已存放在应用书架文件中，不需要额外缓存；阅读时会直接读取上传后的本地文件。</p>
         </div>
 
         <template v-else>
           <div class="info-card">
-            <p>服务端缓存保存在后端存储目录；浏览器缓存保存在当前设备的 IndexedDB。断网时阅读页会优先读取浏览器已缓存章节。</p>
+            <p>本地缓存保存在应用存储目录；浏览器缓存保存在当前设备的 IndexedDB。断网时阅读页会优先读取浏览器已缓存章节。</p>
           </div>
 
           <section class="cache-section">
             <div class="section-head">
-              <h4>缓存到服务端</h4>
+              <h4>缓存到本地</h4>
               <button class="link-btn" @click="refreshStats">刷新</button>
             </div>
             <div class="option-list">
@@ -66,12 +66,12 @@
                 <span class="sub">中度离线阅读</span>
               </button>
               <button class="cache-opt primary" @click="startServerCaching(0)">
-                <span class="label">全本缓存到服务端</span>
-                <span class="sub">保存到服务器磁盘</span>
+                <span class="label">全本缓存到本地</span>
+                <span class="sub">保存到应用磁盘</span>
               </button>
               <button class="cache-opt danger" @click="clearServerCache">
-                <span class="label">清除服务端缓存</span>
-                <span class="sub">删除当前书所有服务端缓存</span>
+                <span class="label">清除本地缓存</span>
+                <span class="sub">删除当前书所有本地缓存</span>
               </button>
             </div>
           </section>
@@ -160,7 +160,7 @@ function startServerCaching(count: number) {
   stopWorking()
   working.value = true
   progress.value = 0
-  currentStatus.value = '连接服务端缓存任务...'
+  currentStatus.value = '连接本地缓存任务...'
   currentChapterName.value = ''
 
   const total = count === 0
@@ -181,16 +181,16 @@ function startServerCaching(count: number) {
       if (total > 0) {
         progress.value = Math.min(100, Math.round((Math.max(0, completed) / total) * 100))
       }
-      currentStatus.value = `服务端缓存中 (${data.cachedCount || 0} 已缓存 / ${data.successCount || 0} 新增)`
+      currentStatus.value = `本地缓存中 (${data.cachedCount || 0} 已缓存 / ${data.successCount || 0} 新增)`
     } catch {
-      currentStatus.value = '服务端缓存处理中...'
+      currentStatus.value = '本地缓存处理中...'
     }
   }
 
   sse.addEventListener('end', async (event) => {
     try {
       const data = event.data as { cachedCount?: number; successCount?: number }
-      currentStatus.value = `服务端缓存完成，累计 ${data.cachedCount || 0} 章`
+      currentStatus.value = `本地缓存完成，累计 ${data.cachedCount || 0} 章`
       progress.value = 100
     } finally {
       closeSSE()
@@ -202,7 +202,7 @@ function startServerCaching(count: number) {
   })
 
   sse.onerror = async () => {
-    currentStatus.value = '服务端缓存已中断'
+    currentStatus.value = '本地缓存已中断'
     closeSSE()
     await refreshStats()
     window.setTimeout(() => {
@@ -256,7 +256,7 @@ async function startBrowserCaching(count: number) {
 async function clearServerCache() {
   if (!store.book || isLocalBookInServer.value) return
   await deleteBookCache(store.book.bookUrl)
-  appStore.showToast('服务端缓存已清除', 'success')
+  appStore.showToast('本地缓存已清除', 'success')
   await refreshStats()
 }
 

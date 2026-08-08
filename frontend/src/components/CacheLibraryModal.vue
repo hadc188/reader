@@ -9,7 +9,7 @@
           <div class="modal-head">
             <div>
               <h2>缓存管理</h2>
-              <p>查看并清理所有书籍的服务端缓存与浏览器缓存</p>
+              <p>查看并清理所有书籍的本地缓存与浏览器缓存</p>
             </div>
             <div class="head-actions">
               <button class="ghost-btn" @click="refreshData">刷新</button>
@@ -47,14 +47,14 @@
                 <h3>{{ item.name }}</h3>
                 <p>{{ item.author || '未知作者' }}</p>
                 <div class="cache-stats">
-                  <span>服务端 {{ item.serverCachedCount }} 章</span>
+                  <span>本地 {{ item.serverCachedCount }} 章</span>
                   <span>浏览器 {{ item.browserCachedCount }} 章</span>
                 </div>
               </div>
               <div class="cache-actions">
-                <button @click="cacheServer(item.book)">{{ cacheActionLabel('服务器') }}</button>
+                <button @click="cacheServer(item.book)">{{ cacheActionLabel('本地') }}</button>
                 <button @click="cacheBrowser(item.book)">{{ cacheActionLabel('浏览器') }}</button>
-                <button @click="clearServer(item.book)">清服务端</button>
+                <button @click="clearServer(item.book)">清本地</button>
                 <button @click="clearBrowser(item.book)">清浏览器</button>
               </div>
             </div>
@@ -120,7 +120,7 @@ function close() {
   emit('update:modelValue', false)
 }
 
-function cacheActionLabel(target: '服务器' | '浏览器') {
+function cacheActionLabel(target: '本地' | '浏览器') {
   return cacheCount.value === 0 ? `缓存全本到${target}` : `缓存后续${cacheCount.value}章到${target}`
 }
 
@@ -146,12 +146,12 @@ function cacheServer(book: Book) {
   const sse = cacheBookSSE({ bookUrl: book.bookUrl, count: cacheCount.value, concurrentCount: 8 })
   sse.addEventListener('end', async () => {
     sse.close()
-    appStore.showToast(`"${book.name}" 已缓存到服务器`, 'success')
+    appStore.showToast(`"${book.name}" 已缓存到本地`, 'success')
     await refreshData()
   })
   sse.onerror = () => {
     sse.close()
-    appStore.showToast(`"${book.name}" 服务端缓存失败`, 'error')
+    appStore.showToast(`"${book.name}" 本地缓存失败`, 'error')
   }
 }
 
@@ -167,7 +167,7 @@ async function cacheBrowser(book: Book) {
 
 async function clearServer(book: Book) {
   await deleteBookCache(book.bookUrl)
-  appStore.showToast(`"${book.name}" 服务端缓存已清除`, 'success')
+  appStore.showToast(`"${book.name}" 本地缓存已清除`, 'success')
   await refreshData()
 }
 

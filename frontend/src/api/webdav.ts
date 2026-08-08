@@ -48,3 +48,11 @@ export function deleteWebdavFile(path: string) {
 export function deleteWebdavFileList(paths: string[]) {
   return post<string>('/deleteWebdavFileList', { path: paths }).then((r) => r.data)
 }
+
+export function getWebdavHome() {
+  return get<{ path: string }>('/getWebdavHome').then((r) => r.data)
+}
+
+export function openWebdavFolder() {
+  return post<{ opened: boolean }>('/openWebdavFolder').then((r) => r.data)
+}

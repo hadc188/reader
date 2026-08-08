@@ -46,7 +46,6 @@
       @bookmark="toggleBookmark"
       @search="toggleSearch"
       @info="openInfo"
-      @ai="openAiBook"
       @tts="handleTTS"
       @prev="prevChapter"
       @next="nextChapter"
@@ -65,7 +64,6 @@
       @bookmark="toggleBookmark"
       @search="openSearch"
       @info="openInfo"
-      @ai="openAiBook"
       @tts="handleTTS"
       @progress="openCachePanel"
     />
@@ -86,7 +84,6 @@
       :supports-pitch="store.speechConfig.provider === 'system'"
       :openai-model="store.speechConfig.openaiModel"
       :openai-voice="store.speechConfig.openaiVoice"
-      :openai-source="store.speechConfig.openaiSource"
       :stop-after-minutes="store.speechConfig.stopAfterMinutes"
       :timer-text="speechTimerText"
       @close="closeTTSPanel"
@@ -1600,7 +1597,6 @@ function changeVoice(name: string) {
 }
 
 function changeOpenAIVoice(voiceId: string) {
-  if (store.speechConfig.openaiSource === 'server') return
   store.setOpenAISpeechVoice(voiceId)
   ttsPanelDismissed.value = false
   showTTSPanel.value = true
@@ -1653,14 +1649,6 @@ async function openInfo() {
   } catch {
     appStore.showToast('获取书籍详情失败，已显示当前缓存信息', 'warning')
   }
-}
-
-function openAiBook() {
-  if (!store.book) return
-  router.push({
-    name: 'ai-book',
-    query: { bookUrl: store.book.bookUrl },
-  })
 }
 
 onBeforeRouteLeave(() => {

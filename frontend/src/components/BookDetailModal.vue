@@ -191,6 +191,24 @@ function loadSourceCandidates() {
   sourcesLoading.value = true
   sourceCandidates.value = []
   selectedSource.value = null
+  // Always include the current source as the first candidate, so the user can
+  // see it and switch back to it. The backend may omit it (e.g. when serving a
+  // stale cache saved before the current source was included), so we seed it
+  // here and let the SSE stream dedup against it.
+  const base = b as Book
+  if (base.origin) {
+    sourceCandidates.value.push({
+      name: base.name,
+      author: base.author,
+      bookUrl: base.bookUrl,
+      origin: base.origin,
+      coverUrl: base.coverUrl,
+      intro: base.intro,
+      kind: base.kind,
+      lastChapter: base.latestChapterTitle,
+    } as SearchBook)
+    selectedSource.value = sourceCandidates.value[0]
+  }
   const stream = getAvailableBookSourceSSE({
     url: b.bookUrl,
     name: b.name,

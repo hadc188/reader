@@ -8,8 +8,8 @@ export const useSourceStore = defineStore('source', () => {
   const loading = ref(false)
   let loadingTask: Promise<void> | null = null
 
-  async function fetchSources() {
-    if (loadingTask) return loadingTask
+  async function fetchSources(force = false) {
+    if (loadingTask && !force) return loadingTask
     loading.value = true
     loadingTask = getBookSources()
       .then((list) => {

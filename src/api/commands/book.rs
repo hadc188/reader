@@ -1902,10 +1902,8 @@ pub async fn get_available_book_source_sse(
                 .load_book_sources_cache(&user_ns, url)
                 .await?
             {
-                let current_origin = book.origin.clone();
                 let cached = take_available_source_cached_matches(
                     cached,
-                    (!current_origin.trim().is_empty()).then_some(current_origin.as_str()),
                     AVAILABLE_SOURCE_SSE_RESULT_LIMIT,
                 );
                 if cached.is_empty() {
@@ -1990,7 +1988,6 @@ pub async fn get_available_book_source_sse(
                                 list,
                                 &target_name,
                                 &target_author,
-                                Some(&book.origin),
                                 &mut seen,
                                 AVAILABLE_SOURCE_SSE_RESULT_LIMIT - emitted,
                             );
@@ -2459,7 +2456,6 @@ fn normalize_available_book_name(value: &str) -> String {
 
 fn take_available_source_cached_matches(
     cached: Vec<SearchBook>,
-    excluded_origin: Option<&str>,
     limit: usize,
 ) -> Vec<SearchBook> {
     let mut matches = Vec::new();
@@ -2467,12 +2463,6 @@ fn take_available_source_cached_matches(
     for book in cached {
         if matches.len() >= limit {
             break;
-        }
-        if excluded_origin
-            .map(|origin| book.origin == origin)
-            .unwrap_or(false)
-        {
-            continue;
         }
         if seen.insert(available_source_sse_result_key(&book)) {
             matches.push(book);
@@ -2485,7 +2475,6 @@ fn take_available_source_sse_matches(
     books: Vec<SearchBook>,
     target_name: &str,
     target_author: &str,
-    excluded_origin: Option<&str>,
     seen: &mut std::collections::HashSet<String>,
     limit: usize,
 ) -> Vec<SearchBook> {
@@ -2499,12 +2488,6 @@ fn take_available_source_sse_matches(
             break;
         }
         if !available_source_matches_target(&book, target_name, target_author) {
-            continue;
-        }
-        if excluded_origin
-            .map(|origin| book.origin == origin)
-            .unwrap_or(false)
-        {
             continue;
         }
         if seen.insert(available_source_sse_result_key(&book)) {
@@ -2648,7 +2631,7 @@ mod tests {
     }
 
     #[test]
-    fn available_book_source_cache_ignores_current_source_only_results() {
+    fn available_book_source_cache_includes_current_source() {
         let cached = vec![SearchBook {
             name: "深空彼岸".to_string(),
             author: "作者：辰东".to_string(),
@@ -2657,10 +2640,10 @@ mod tests {
             ..SearchBook::default()
         }];
 
-        let matches =
-            take_available_source_cached_matches(cached, Some("https://m.22biqu.com/"), 5);
+        let matches = take_available_source_cached_matches(cached, 5);
 
-        assert!(matches.is_empty());
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].origin, "https://m.22biqu.com/");
     }
 
     #[test]
@@ -2692,15 +2675,15 @@ mod tests {
             books,
             "Book",
             "Author",
-            Some("current-source"),
             &mut seen,
             5,
         );
 
         assert_eq!(matches.len(), 5);
         assert_eq!(matches[0].origin, "source-1");
-        assert_eq!(matches[1].origin, "source-3");
-        assert_eq!(matches[4].origin, "source-6");
+        assert_eq!(matches[1].origin, "current-source");
+        assert_eq!(matches[2].origin, "source-3");
+        assert_eq!(matches[4].origin, "source-5");
         assert_eq!(seen.len(), 5);
     }
 }

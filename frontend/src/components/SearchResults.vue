@@ -266,9 +266,9 @@ watch([searchScope, sourceGroups, sourceOptions], () => {
 }, { immediate: true })
 
 onMounted(async () => {
-  if (sourceStore.sources.length === 0) {
-    await sourceStore.fetchSources().catch(() => undefined)
-  }
+  // Always refresh the source list on mount so the group/source dropdowns
+  // reflect any add/delete/edit done in the source manager since last visit.
+  await sourceStore.fetchSources(true).catch(() => undefined)
   ensureSearchSelection()
 })
 

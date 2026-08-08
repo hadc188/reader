@@ -137,6 +137,7 @@ import {
   unpinBookSource,
 } from '../api/source'
 import { useAppStore } from '../stores/app'
+import { useSourceStore } from '../stores/source'
 import type { BookSource } from '../types'
 import {
   filterBookSources,
@@ -168,6 +169,7 @@ const emit = defineEmits<{
 }>()
 
 const appStore = useAppStore()
+const sourceStore = useSourceStore()
 
 const sources = ref<BookSource[]>([])
 const loading = ref(false)
@@ -252,6 +254,9 @@ async function loadSources() {
     appStore.showToast((e as Error).message, 'error')
   } finally {
     loading.value = false
+    // Keep the shared source store in sync so the search page's group/source
+    // dropdowns reflect add/delete/edit done here.
+    sourceStore.fetchSources().catch(() => undefined)
   }
 }
 
@@ -297,6 +302,7 @@ async function removeSource(source: BookSource) {
       createSource()
     }
     appStore.showToast('已删除', 'success')
+    sourceStore.fetchSources().catch(() => undefined)
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
   }
@@ -319,6 +325,7 @@ async function removeSelectedSources() {
       createSource()
     }
     appStore.showToast(`已删除 ${targets.length} 个书源`, 'success')
+    sourceStore.fetchSources().catch(() => undefined)
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '批量删除失败', 'error')
   }

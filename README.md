@@ -29,7 +29,7 @@
 - 阅读统计（echarts 图表）
 - 本地 TXT / EPUB 阅读
 - RSS 订阅支持
-- WebDAV 同步
+- 本地备份（书架、书源、RSS、书签、净化规则与阅读配置，可在文件夹中打开备份目录）
 - TTS 语音朗读（本地 SAPI + OpenAI 兼容 TTS）
 
 ## 技术栈
@@ -84,7 +84,7 @@ cargo test -j 4      # 必须低并发，见下方「杀软并发竞态」
 
 - **`src/api/commands/`** — 全部 `#[tauri::command]`（原 axum handler 原地转型）。
 - **`src/api/protocol.rs`** — 自定义 URI 协议 `reader`（origin `http://reader.localhost`）。
-- **`src/service/`** — 业务逻辑（book / book_source / ai_book / update / user 等）。
+- **`src/service/`** — 业务逻辑（book / book_source / book_group / local_txt / local_epub / update / user 等）。
 - **`src/parser/`** — 内容提取引擎（CSS/XPath/JSONPath/Regex/JS 模式自动识别）。
 - **`src/crawler/`** — reqwest HTTP 抓取 + URL 分析。
 - **`src/storage/`** — SQLite（sqlx + migrations）、文件缓存、存储目录。

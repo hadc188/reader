@@ -83,7 +83,7 @@ export const useAppStore = defineStore('app', () => {
       versionUpdateChecked.value = true
       if (info.shouldRemind && info.latestVersion && versionUpdateToastVersion !== info.latestVersion) {
         versionUpdateToastVersion = info.latestVersion
-        showToast(`发现服务端新版本 ${info.latestVersion}`, 'warning')
+        showToast(`发现新版本 ${info.latestVersion}`, 'warning')
       }
       return info
     } catch (error) {

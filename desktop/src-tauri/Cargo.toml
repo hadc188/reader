@@ -2,7 +2,7 @@
 name = "reader-desktop"
 version = "1.0.8"
 edition = "2021"
-description = "阅读 — Windows desktop shell around the reader-rust server"
+description = "阅读 — 阅读3.0（Legado）的 Windows 桌面移植版"
 publish = false
 
 [build-dependencies]

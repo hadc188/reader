@@ -1,6 +1,6 @@
 # Reader
 
-「阅读3.0」的 Rust 实现，当前形态为 **Tauri v2 纯单机桌面应用**：无 HTTP 服务端、无 Docker、无多用户。前端（Vue 3）与后端（Rust）跑在同一个进程中，通过 IPC 通信，打包成单个可执行文件。
+「阅读3.0」（[Legado](https://github.com/Rimchars/legado)）的 **Windows 桌面移植版**，基于 Rust + Tauri v2 构建。纯单机桌面应用：无 HTTP 服务端、无 Docker、无多用户。前端（Vue 3）与后端（Rust）跑在同一个进程中，通过 IPC 通信，打包成单个可执行文件。
 
 源自 [reader](https://github.com/hectorqin/reader)，参考 [reader-rust](https://github.com/givenge/reader-rust) 重构。
 

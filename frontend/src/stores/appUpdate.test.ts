@@ -38,7 +38,7 @@ describe('app update reminders', () => {
       currentVersion: 'v1.0.5',
       latestVersion: 'v1.0.6',
       latestName: 'v1.0.6',
-      releaseUrl: 'https://github.com/givenge/reader-rust/releases/tag/v1.0.6',
+      releaseUrl: 'https://github.com/hadc188/reader/releases/tag/v1.0.6',
       publishedAt: '2026-05-15T08:00:00Z',
       updateAvailable: true,
       shouldRemind: true,
@@ -52,7 +52,7 @@ describe('app update reminders', () => {
 
     expect(store.versionUpdate?.latestVersion).toBe('v1.0.6')
     expect(store.hasVersionUpdateReminder).toBe(true)
-    expect(store.toasts.map((toast) => toast.message)).toContain('发现服务端新版本 v1.0.6')
+    expect(store.toasts.map((toast) => toast.message)).toContain('发现新版本 v1.0.6')
   })
 
   it('dismisses the current latest release reminder', async () => {
@@ -60,7 +60,7 @@ describe('app update reminders', () => {
       currentVersion: 'v1.0.5',
       latestVersion: 'v1.0.6',
       latestName: 'v1.0.6',
-      releaseUrl: 'https://github.com/givenge/reader-rust/releases/tag/v1.0.6',
+      releaseUrl: 'https://github.com/hadc188/reader/releases/tag/v1.0.6',
       publishedAt: '2026-05-15T08:00:00Z',
       updateAvailable: true,
       shouldRemind: true,
@@ -72,7 +72,7 @@ describe('app update reminders', () => {
       currentVersion: 'v1.0.5',
       latestVersion: 'v1.0.6',
       latestName: 'v1.0.6',
-      releaseUrl: 'https://github.com/givenge/reader-rust/releases/tag/v1.0.6',
+      releaseUrl: 'https://github.com/hadc188/reader/releases/tag/v1.0.6',
       publishedAt: '2026-05-15T08:00:00Z',
       updateAvailable: true,
       shouldRemind: false,

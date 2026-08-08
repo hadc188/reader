@@ -255,16 +255,16 @@ const webdavStatusMessage = computed(() => '\u652f\u6301\u5c06\u4e66\u67b6\u3001
 
 const versionUpdateTitle = computed(() => {
   const info = appStore.versionUpdate
-  if (appStore.versionUpdateLoading && !info) return '正在检查服务端版本'
-  if (!info) return '服务端版本检查'
+  if (appStore.versionUpdateLoading && !info) return '正在检查新版本'
+  if (!info) return '版本检查'
   if (info.error && !info.latestVersion) return '版本检查失败'
-  if (info.updateAvailable) return `发现服务端新版本 ${info.latestVersion}`
-  return '服务端已是最新版本'
+  if (info.updateAvailable) return `发现新版本 ${info.latestVersion}`
+  return '已是最新版本'
 })
 const versionUpdateMessage = computed(() => {
   const info = appStore.versionUpdate
   if (appStore.versionUpdateLoading && !info) return '正在从 GitHub Release 获取最新版本。'
-  if (!info) return '管理员可检查 GitHub Release，发现新版后会在设置入口提示。'
+  if (!info) return '可检查 GitHub Release，发现新版后会在设置入口提示。'
   if (info.error && !info.latestVersion) return info.error
   if (info.updateAvailable && info.shouldRemind) {
     return `当前 ${info.currentVersion}，最新 ${info.latestVersion}。`

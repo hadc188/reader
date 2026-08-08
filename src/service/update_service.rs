@@ -11,7 +11,7 @@ use crate::util::time::now_ts;
 const APP_NAMESPACE: &str = "_app";
 const UPDATE_CACHE_NAME: &str = "version-update-cache";
 const UPDATE_PREFERENCES_NAME: &str = "version-update-preferences";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/givenge/reader-rust/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/hadc188/reader/releases/latest";
 const UPDATE_CACHE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 
 #[derive(Clone)]

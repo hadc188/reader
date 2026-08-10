@@ -77,6 +77,7 @@
       :is-speaking="store.isSpeaking"
       :is-loading="store.isSpeechLoading"
       :is-paused="store.isPaused"
+      :progress="store.speechProgress"
       :voices="store.voiceList"
       :voice-name="store.speechConfig.voiceName"
       :rate="store.speechConfig.speechRate"
@@ -325,16 +326,7 @@ function debugPositionLog(message: string, payload?: unknown) {
 
 const config = computed(() => store.config)
 const theme = computed(() => store.currentTheme)
-const chromeTheme = computed(() => {
-  if (store.isNight || appStore.theme === 'dark') {
-    return {
-      ...store.currentTheme,
-      popup: 'var(--color-bg-elevated)',
-      fontColor: 'var(--color-text)',
-    }
-  }
-  return store.currentTheme
-})
+const chromeTheme = computed(() => store.currentTheme)
 
 const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
@@ -1564,6 +1556,11 @@ function closeTTSPanel() {
 function toggleSpeechFromPanel() {
   ttsPanelDismissed.value = false
   showTTSPanel.value = true
+  if (store.isPaused) {
+    cancelSpeechTransition()
+    store.pauseTTS()
+    return
+  }
   if (!store.isSpeaking) {
     startSpeech()
     return

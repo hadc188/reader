@@ -30,7 +30,7 @@
 - 本地 TXT / EPUB 阅读
 - RSS 订阅支持
 - 本地备份（书架、书源、RSS、书签、净化规则与阅读配置，可在文件夹中打开备份目录）
-- TTS 语音朗读（本地 SAPI + OpenAI 兼容 TTS）
+- TTS 语音朗读（Windows 系统语音 + 多种 API 兼容格式）
 
 ## 技术栈
 
@@ -43,6 +43,26 @@
 从 [Releases](https://github.com/hadc188/reader/releases) 下载 Windows 安装包（`*-setup.exe`）或便携版（`*-win-x64.zip`）。
 
 便携版解压后直接运行 `Reader.exe`，数据默认存放在 exe 同级的 `data/` 目录（只读目录时回退到 `%LOCALAPPDATA%\reader\data`）。
+
+## 听书设置
+
+在小说阅读页打开右侧「阅读设置」，在「朗读引擎」中选择系统语音或 API 语音：
+
+- **系统语音**：使用 Windows 已安装的语音，可设置音色、语速、语调和定时停止。
+- **API 语音**：请求由桌面端发出，支持 OpenAI、Fish、ElevenLabs、Azure 兼容格式，可设置语速、音频格式和定时停止。
+
+API 语音需要填写服务商提供的配置：
+
+| 接口格式 | 服务地址示例 | 模型或语言代码 | 语音音色 |
+| --- | --- | --- | --- |
+| OpenAI 兼容格式 | `https://api.openai.com` | 服务商提供的 TTS 模型 | 音色名称 |
+| Fish 兼容格式 | `https://api.fish.audio` | 服务商提供的 TTS 模型 | 音色 ID |
+| ElevenLabs 兼容格式 | `https://api.elevenlabs.io` | 服务商提供的 TTS 模型 | Voice ID |
+| Azure 兼容格式 | Azure 语音资源地址 | 语言代码，如 `zh-CN` | 音色名称 |
+
+服务地址可填写 API 根地址或完整的语音接口地址；HTTP 代理为可选项，只用于 API 语音请求。请求模式中，「少字多请求」切换段落更及时，「多字少请求」可减少请求次数，并按播放进度估算当前高亮段落。
+
+> 访问密钥保存在本机阅读配置中，备份阅读配置时也会写入备份文件，请勿分享包含密钥的备份。
 
 ## 开发
 

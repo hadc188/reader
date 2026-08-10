@@ -92,11 +92,6 @@ rmSync(join(stageDir, 'data'), { recursive: true, force: true })
 
 const zipPath = join(outRoot, `reader-portable-v${version}-win-x64.zip`)
 rmSync(zipPath, { force: true })
-run('powershell.exe', [
-  '-NoProfile',
-  '-NonInteractive',
-  '-Command',
-  `Compress-Archive -Path '${join(stageDir, '*')}' -DestinationPath '${zipPath}' -Force`,
-])
+run('tar.exe', ['-a', '-c', '-f', zipPath, '-C', stageDir, '.'])
 
 console.log(`\n完成:\n  安装包 ${nsisOut}\n  压缩包 ${zipPath}`)

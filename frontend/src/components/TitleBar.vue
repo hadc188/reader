@@ -1,5 +1,9 @@
 <template>
-  <div class="titlebar" :class="{ 'theme-dark': appStore.theme === 'dark' }">
+  <div
+    class="titlebar"
+    :class="{ 'reader-titlebar': isReader }"
+    :style="titlebarStyle"
+  >
     <div class="titlebar-drag" data-tauri-drag-region @dblclick="toggleMaximize">
       <span class="titlebar-title" data-tauri-drag-region>阅读</span>
     </div>
@@ -19,13 +23,25 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { useAppStore } from '../stores/app'
+import { useReaderStore } from '../stores/reader'
 
-const appStore = useAppStore()
+const readerStore = useReaderStore()
+const route = useRoute()
 const appWindow = getCurrentWindow()
 const isMaximized = ref(false)
+const isReader = computed(() => route.name === 'reader')
+const titlebarStyle = computed(() => isReader.value
+  ? {
+      background: readerStore.currentTheme.body,
+      color: readerStore.currentTheme.fontColor,
+    }
+  : {
+      background: 'var(--color-bg-elevated)',
+      color: 'var(--color-text-secondary)',
+    })
 
 async function minimize() {
   await appWindow.minimize()
@@ -66,9 +82,15 @@ onBeforeUnmount(() => cleanup())
   align-items: center;
   justify-content: space-between;
   z-index: calc(var(--z-modal) + 20);
+  color: var(--color-text-secondary);
   background: var(--color-bg-elevated);
   border-bottom: 1px solid var(--color-border-light);
   user-select: none;
+  transition: background var(--duration-normal), color var(--duration-normal), border-color var(--duration-normal);
+}
+
+.titlebar.reader-titlebar {
+  border-bottom-color: transparent;
 }
 
 .titlebar-drag {
@@ -81,8 +103,9 @@ onBeforeUnmount(() => cleanup())
 
 .titlebar-title {
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: inherit;
   font-weight: 600;
+  opacity: 0.58;
 }
 
 .titlebar-controls {
@@ -98,12 +121,19 @@ onBeforeUnmount(() => cleanup())
   justify-content: center;
   background: transparent;
   border: none;
-  color: var(--color-text-secondary);
+  color: inherit;
   cursor: pointer;
+  opacity: 0.72;
+  transition: background var(--duration-fast), opacity var(--duration-fast);
 }
 
 .tb-btn:hover {
   background: var(--color-bg-hover);
+  opacity: 1;
+}
+
+.reader-titlebar .tb-btn:hover {
+  background: rgba(127, 127, 127, 0.14);
 }
 
 .tb-btn.close:hover {

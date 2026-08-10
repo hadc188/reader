@@ -17,9 +17,12 @@
       </div>
       <div class="tts-btns">
         <button @click="$emit('prev')">上一段</button>
-        <button :disabled="isLoading" @click="$emit('toggle-play')">{{ isLoading ? '加载中' : (!isSpeaking ? '开始' : (isPaused ? '恢复' : '暂停')) }}</button>
+        <button :disabled="isLoading" @click="$emit('toggle-play')">{{ isLoading ? '加载中' : (isPaused ? '恢复' : (isSpeaking ? '暂停' : '开始')) }}</button>
         <button @click="$emit('stop')">停止</button>
         <button @click="$emit('next')">下一段</button>
+      </div>
+      <div v-if="isSpeaking || isLoading || isPaused" class="tts-progress" role="progressbar" :aria-valuenow="progressPercent" aria-valuemin="0" aria-valuemax="100">
+        <div class="tts-progress-fill" :style="{ width: `${progressPercent}%` }"></div>
       </div>
       <select v-if="provider === 'system'" class="tts-voice-select" :value="voiceName" @change="$emit('voice-change', ($event.target as HTMLSelectElement).value)">
         <option value="">系统默认</option>
@@ -28,6 +31,7 @@
         </option>
       </select>
       <input
+        v-if="provider === 'openai'"
         class="tts-voice-select"
         type="text"
         :value="openaiVoice"
@@ -63,9 +67,10 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { ThemePreset } from '../../stores/reader'
 
-defineProps<{
+const props = defineProps<{
   show: boolean
   theme: ThemePreset | { popup: string; fontColor: string }
   chapterTitle?: string
@@ -74,6 +79,7 @@ defineProps<{
   isSpeaking: boolean
   isLoading: boolean
   isPaused: boolean
+  progress: number
   voices: SpeechSynthesisVoice[]
   voiceName: string
   rate: number
@@ -84,6 +90,8 @@ defineProps<{
   stopAfterMinutes: number
   timerText: string
 }>()
+
+const progressPercent = computed(() => Math.round(Math.max(0, Math.min(1, props.progress)) * 100))
 
 defineEmits<{
   close: []
@@ -175,6 +183,20 @@ defineEmits<{
   border-radius: 10px;
   cursor: pointer;
   min-width: 0;
+}
+
+.tts-progress {
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(127, 127, 127, 0.24);
+}
+
+.tts-progress-fill {
+  height: 100%;
+  background: #c97f3a;
+  transition: width 160ms linear;
 }
 
 .tts-voice-select {

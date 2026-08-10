@@ -15,6 +15,25 @@ interface AutoPlaybackConfig {
   lineHeight: number
 }
 
+interface SpeechSegment {
+  text: string
+  nextParagraph: HTMLElement | null
+  paragraphs: HTMLElement[]
+}
+
+export function getSpeechProgressItemIndex(lengths: number[], progress: number) {
+  if (!lengths.length) return -1
+  const normalizedLengths = lengths.map((length) => Math.max(1, length))
+  const totalLength = normalizedLengths.reduce((sum, length) => sum + length, 0)
+  const position = Math.max(0, Math.min(1, progress)) * totalLength
+  let accumulated = 0
+  for (let index = 0; index < normalizedLengths.length; index += 1) {
+    accumulated += normalizedLengths[index]
+    if (position < accumulated || index === normalizedLengths.length - 1) return index
+  }
+  return normalizedLengths.length - 1
+}
+
 export function useReaderAutoPlayback(
   store: ReaderStore,
   config: ComputedRef<AutoPlaybackConfig>,
@@ -31,7 +50,7 @@ export function useReaderAutoPlayback(
   let speechRestartTimer: number | null = null
   let isSpeechTransitioning = false
   let currentSpeechParagraph: HTMLElement | null = null
-  let currentSpeechSegments: { text: string; nextParagraph: HTMLElement | null }[] = []
+  let currentSpeechSegments: SpeechSegment[] = []
   let currentSpeechSegmentIndex = 0
 
   function isSafariSpeechDelayBrowser() {
@@ -168,25 +187,28 @@ export function useReaderAutoPlayback(
     return chunks.length ? chunks : [rawText]
   }
 
-  function buildMergedSpeechSegment(paragraph: HTMLElement | null) {
+  function buildMergedSpeechSegment(paragraph: HTMLElement | null): SpeechSegment {
     const currentText = paragraph?.innerText.trim() || ''
     if (!currentText) {
       return {
         text: '',
         nextParagraph: getNextParagraph(),
+        paragraphs: [],
       }
     }
 
     const list = getFilteredParagraphs()
     const startIndex = paragraph ? list.indexOf(paragraph) : -1
-    if (startIndex < 0) {
+    if (!paragraph || startIndex < 0) {
       return {
         text: currentText,
         nextParagraph: getNextParagraph(),
+        paragraphs: [],
       }
     }
 
     const mergedTexts: string[] = [currentText]
+    const mergedParagraphs: HTMLElement[] = [paragraph]
     let mergedLength = currentText.length
     let cursorIndex = startIndex + 1
 
@@ -200,6 +222,7 @@ export function useReaderAutoPlayback(
         break
       }
       mergedTexts.push(nextText)
+      mergedParagraphs.push(list[cursorIndex])
       mergedLength += nextText.length
       cursorIndex += 1
     }
@@ -207,6 +230,7 @@ export function useReaderAutoPlayback(
     return {
       text: mergedTexts.join('\n'),
       nextParagraph: list[cursorIndex] || null,
+      paragraphs: mergedParagraphs,
     }
   }
 
@@ -216,7 +240,7 @@ export function useReaderAutoPlayback(
     currentSpeechSegmentIndex = 0
   }
 
-  function buildOpenAISpeechSegments(paragraph: HTMLElement) {
+  function buildOpenAISpeechSegments(paragraph: HTMLElement): SpeechSegment[] {
     if (store.speechConfig.openaiRequestMode === 'merged') {
       const merged = buildMergedSpeechSegment(paragraph)
       return merged.text ? [merged] : []
@@ -227,14 +251,16 @@ export function useReaderAutoPlayback(
     return paragraphChunks.map((text, index) => ({
       text,
       nextParagraph: index < paragraphChunks.length - 1 ? paragraph : nextParagraph,
+      paragraphs: [paragraph],
     }))
   }
 
-  function ensureSpeechChunkState(paragraph: HTMLElement) {
+  function ensureSpeechChunkState(paragraph: HTMLElement): SpeechSegment {
     if (store.speechConfig.provider !== 'openai') {
       return {
         text: paragraph.innerText.trim(),
         nextParagraph: getNextParagraphFrom(paragraph),
+        paragraphs: [paragraph],
       }
     }
 
@@ -247,6 +273,7 @@ export function useReaderAutoPlayback(
     return currentSpeechSegments[currentSpeechSegmentIndex] || {
       text: '',
       nextParagraph: getNextParagraphFrom(paragraph),
+      paragraphs: [paragraph],
     }
   }
 
@@ -286,7 +313,9 @@ export function useReaderAutoPlayback(
   }
 
   function clearReadingClass() {
-    scrollContainerRef.value?.querySelectorAll('.reading').forEach((el) => el.classList.remove('reading'))
+    scrollContainerRef.value?.querySelectorAll('.reading').forEach((el) => {
+      el.classList.remove('reading')
+    })
   }
 
   function showParagraph(paragraph: HTMLElement | null, smooth = true) {
@@ -305,6 +334,18 @@ export function useReaderAutoPlayback(
     if (paragraph) {
       paragraph.classList.add('reading')
     }
+  }
+
+  function updateMergedReadingParagraph(segment: SpeechSegment, progress: number) {
+    if (store.speechConfig.provider !== 'openai') return
+    if (store.speechConfig.openaiRequestMode !== 'merged') return
+    if (segment.paragraphs.length <= 1) return
+    const lengths = segment.paragraphs.map((paragraph) => paragraph.innerText.trim().length)
+    const index = getSpeechProgressItemIndex(lengths, progress)
+    const paragraph = segment.paragraphs[index] || null
+    if (!paragraph || paragraph.classList.contains('reading')) return
+    markReadingParagraph(paragraph)
+    showParagraph(paragraph)
   }
 
   function runAutoScroll() {
@@ -524,6 +565,9 @@ export function useReaderAutoPlayback(
       chunkCount: currentSpeechSegments.length,
     })
     store.startTTS(chunk.text, {
+      onProgress: (progress) => {
+        updateMergedReadingParagraph(chunk, progress)
+      },
       onEnd: () => {
         logSpeech('chunk onEnd', {
           provider: store.speechConfig.provider,

@@ -103,6 +103,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::rss::read_rss_source_file,
         commands::rss::get_rss_articles,
         commands::rss::get_rss_content,
+        commands::speech::request_speech_audio,
         commands::update::get_version_update,
         commands::update::dismiss_version_update,
         commands::user::save_user_config,

@@ -1,5 +1,14 @@
 ﻿<template>
-  <div class="read-settings" :style="{ background: theme.popup, color: theme.fontColor }">
+  <div
+    class="read-settings"
+    :class="{ 'is-dark': isDarkSettings }"
+    :style="{
+      background: theme.popup,
+      color: theme.fontColor,
+      '--settings-popup': theme.popup,
+      '--settings-font': theme.fontColor,
+    }"
+  >
     <div class="settings-header">
       <h3 class="settings-title">设置</h3>
       <button class="reset-btn" @click="store.resetConfig()">重置为默认配置</button>
@@ -15,11 +24,11 @@
             v-for="(t, i) in themePresets"
             :key="i"
             class="swatch"
-            :class="{ active: store.themeIndex === i && !store.isNight }"
+            :class="{ active: isThemeActive(i) }"
             :style="{ background: t.body }"
             @click="store.setThemeIndex(i)"
           >
-            <svg v-if="store.themeIndex === i && !store.isNight" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6 9 17l-5-5" /></svg>
+            <svg v-if="isThemeActive(i)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6 9 17l-5-5" /></svg>
           </button>
         </div>
       </div>
@@ -213,7 +222,7 @@
         <label>朗读引擎</label>
         <div class="btn-group">
           <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'system' }" @click="store.setSpeechProvider('system')">系统语音</button>
-          <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'openai' }" @click="store.setSpeechProvider('openai')">OpenAI Speech</button>
+          <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'openai' }" @click="store.setSpeechProvider('openai')">API 语音</button>
         </div>
       </div>
 
@@ -229,35 +238,59 @@
 
       <template v-else>
         <div class="setting-row setting-row-top">
+          <label>接口格式</label>
+          <select
+            class="voice-select"
+            :value="store.speechConfig.apiFormat"
+            @change="store.setSpeechApiFormat(($event.target as HTMLSelectElement).value as SpeechApiFormat)"
+          >
+            <option v-for="option in speechApiFormatOptions" :key="option.value" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+        </div>
+
+        <div class="setting-row setting-row-top">
           <label>服务地址</label>
           <input
             class="voice-select"
             type="url"
             :value="store.speechConfig.openaiBaseUrl"
-            placeholder="http://localhost:8825"
+            :placeholder="selectedSpeechApiFormat.baseUrlPlaceholder"
             @input="store.setOpenAISpeechBaseUrl(($event.target as HTMLInputElement).value)"
           >
         </div>
 
         <div class="setting-row setting-row-top">
-          <label>API Key</label>
+          <label>HTTP 代理</label>
+          <input
+            class="voice-select"
+            type="url"
+            :value="store.speechConfig.speechProxyUrl"
+            placeholder="可选，例如 http://127.0.0.1:7890"
+            @input="store.setSpeechProxyUrl(($event.target as HTMLInputElement).value)"
+          >
+        </div>
+
+        <div class="setting-row setting-row-top">
+          <label>访问密钥</label>
           <input
             class="voice-select"
             type="password"
             :value="store.speechConfig.openaiApiKey"
-            placeholder="sk-..."
+            placeholder="请输入服务密钥"
             autocomplete="off"
             @input="store.setOpenAISpeechApiKey(($event.target as HTMLInputElement).value)"
           >
         </div>
 
         <div class="setting-row setting-row-top">
-          <label>语音模型</label>
+          <label>{{ selectedSpeechApiFormat.modelLabel }}</label>
           <input
             class="voice-select"
             type="text"
             :value="store.speechConfig.openaiModel"
-            placeholder="gpt-4o-mini-tts"
+            :placeholder="selectedSpeechApiFormat.modelPlaceholder"
             @input="store.setOpenAISpeechModel(($event.target as HTMLInputElement).value)"
           >
         </div>
@@ -268,7 +301,7 @@
             class="voice-select"
             type="text"
             :value="store.speechConfig.openaiVoice"
-            placeholder="alloy"
+            :placeholder="selectedSpeechApiFormat.voicePlaceholder"
             @input="store.setOpenAISpeechVoice(($event.target as HTMLInputElement).value)"
           >
         </div>
@@ -278,13 +311,11 @@
           <select
             class="voice-select"
             :value="store.speechConfig.openaiFormat"
-            @change="store.setOpenAISpeechFormat(($event.target as HTMLSelectElement).value as 'mp3' | 'wav' | 'opus' | 'flac' | 'pcm')"
+            @change="store.setOpenAISpeechFormat(($event.target as HTMLSelectElement).value as SpeechAudioFormat)"
           >
-            <option value="mp3">mp3</option>
-            <option value="wav">wav</option>
-            <option value="opus">opus</option>
-            <option value="flac">flac</option>
-            <option value="pcm">pcm</option>
+            <option v-for="format in selectedSpeechApiFormat.supportedFormats" :key="format" :value="format">
+              {{ format }}
+            </option>
           </select>
         </div>
 
@@ -309,7 +340,7 @@
         </div>
 
         <div class="setting-hint">
-          少字多请求会按短句细分并预加载更多片段；多字少请求会合并较短段落，只预加载下一段。URL 和 Key 仅保存在当前浏览器。
+          请按服务商文档填写地址、模型和音色。网络无法直连时可填写本机 HTTP 代理。服务地址、代理和密钥仅保存在当前设备。
         </div>
       </template>
 
@@ -360,11 +391,25 @@
 
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { useReaderStore, themePresets, fontPresets } from '../../stores/reader'
+import { useReaderStore, themePresets, nightThemeIndex, fontPresets } from '../../stores/reader'
+import {
+  getSpeechApiFormatOption,
+  speechApiFormatOptions,
+  type SpeechApiFormat,
+  type SpeechAudioFormat,
+} from '../../utils/openaiSpeech'
 
 const store = useReaderStore()
 const config = computed(() => store.config)
 const theme = computed(() => store.currentTheme)
+const isDarkSettings = computed(() => store.isNight || theme.value.name === '暗灰')
+const selectedSpeechApiFormat = computed(() => getSpeechApiFormatOption(store.speechConfig.apiFormat))
+
+function isThemeActive(index: number) {
+  return index === nightThemeIndex
+    ? store.isNight
+    : !store.isNight && store.themeIndex === index
+}
 
 function step(key: 'fontSize' | 'fontWeight' | 'pageWidth' | 'animateDuration' | 'scrollPixel' | 'pageSpeed', delta: number, min: number, max: number) {
   const val = Math.max(min, Math.min(max, (config.value[key] as number) + delta))
@@ -398,12 +443,23 @@ onMounted(async () => {
 
 <style scoped>
 .read-settings {
+  --settings-field-bg: rgba(255, 255, 255, 0.58);
+  --settings-field-bg-hover: rgba(255, 255, 255, 0.78);
+  --settings-field-border: rgba(55, 42, 31, 0.14);
+  --settings-field-placeholder: rgba(55, 42, 31, 0.46);
   width: 100%;
   height: 100%;
   overflow-y: auto;
   padding: 24px;
   transition: background 0.3s, color 0.3s;
   -webkit-overflow-scrolling: touch;
+}
+
+.read-settings.is-dark {
+  --settings-field-bg: rgba(255, 255, 255, 0.055);
+  --settings-field-bg-hover: rgba(255, 255, 255, 0.085);
+  --settings-field-border: rgba(255, 255, 255, 0.15);
+  --settings-field-placeholder: rgba(255, 255, 255, 0.38);
 }
 
 .settings-header {
@@ -478,9 +534,36 @@ onMounted(async () => {
   min-width: 0;
   padding: 10px 12px;
   border-radius: 12px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--settings-field-border);
+  outline: none;
+  background: var(--settings-field-bg);
   color: inherit;
+  caret-color: var(--color-primary, #c97f3a);
+  transition: background 0.18s, border-color 0.18s, box-shadow 0.18s;
+}
+
+.voice-select:hover {
+  background: var(--settings-field-bg-hover);
+  border-color: color-mix(in srgb, var(--settings-font) 28%, transparent);
+}
+
+.voice-select:focus {
+  background: var(--settings-field-bg-hover);
+  border-color: var(--color-primary, #c97f3a);
+  box-shadow: 0 0 0 3px rgba(201, 127, 58, 0.16);
+}
+
+.voice-select::placeholder {
+  color: var(--settings-field-placeholder);
+}
+
+.voice-select option {
+  background: var(--settings-popup);
+  color: var(--settings-font);
+}
+
+.read-settings.is-dark .voice-select {
+  color-scheme: dark;
 }
 
 .setting-hint {

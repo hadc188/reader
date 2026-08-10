@@ -6,6 +6,7 @@ pub mod debug;
 pub mod reading_stats;
 pub mod replace_rule;
 pub mod rss;
+pub mod speech;
 pub mod update;
 pub mod user;
 pub mod webdav;

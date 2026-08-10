@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAppStore } from './app'
-import { useReaderStore } from './reader'
+import { nightThemeIndex, useReaderStore } from './reader'
 import { getBookContent } from '../api/bookshelf'
 import { getBrowserCachedChapter } from '../utils/browserCache'
+import { requestOpenAISpeechAudio } from '../utils/openaiSpeech'
 
 vi.mock('../api/bookshelf', () => ({
   getChapterList: vi.fn(),
@@ -34,10 +35,16 @@ vi.mock('../utils/recentBooks', () => ({
 
 vi.mock('../utils/openaiSpeech', () => ({
   DEFAULT_OPENAI_BASE_URL: 'https://api.openai.com/v1',
+  inferSpeechApiFormat: vi.fn(() => 'openai'),
+  getSpeechApiFormatOption: vi.fn(() => ({ supportedFormats: ['mp3', 'wav', 'opus', 'flac', 'pcm'] })),
   requestOpenAISpeechAudio: vi.fn(),
 }))
 
 describe('reader local txt chapters', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   beforeEach(() => {
     setActivePinia(createPinia())
     const storage = new Map<string, string>()
@@ -75,5 +82,102 @@ describe('reader local txt chapters', () => {
       bookSourceUrl: 'local-txt',
       refresh: 0,
     })
+  })
+
+  it('keeps the app appearance unchanged when selecting a reading theme', () => {
+    const appStore = useAppStore()
+    appStore.setTheme('dark')
+    const readerStore = useReaderStore()
+
+    readerStore.setThemeIndex(2)
+
+    expect(appStore.theme).toBe('dark')
+    expect(readerStore.isNight).toBe(false)
+    expect(readerStore.currentTheme).toEqual({
+      name: '琥珀',
+      body: '#f5e6ce',
+      content: '#faf0e4',
+      fontColor: '#5b4636',
+      popup: '#faf0e4',
+    })
+  })
+
+  it('returns to the previous daytime theme after leaving the night theme', () => {
+    const readerStore = useReaderStore()
+    readerStore.setThemeIndex(2)
+
+    readerStore.setThemeIndex(nightThemeIndex)
+
+    expect(readerStore.isNight).toBe(true)
+    expect(readerStore.themeIndex).toBe(2)
+    expect(readerStore.currentTheme.name).toBe('暗夜')
+
+    readerStore.toggleNight()
+
+    expect(readerStore.isNight).toBe(false)
+    expect(readerStore.themeIndex).toBe(2)
+    expect(readerStore.currentTheme.name).toBe('琥珀')
+  })
+
+  it('keeps API audio active and resumes from the paused position', async () => {
+    const audioInstances: MockAudio[] = []
+
+    class MockAudio {
+      src: string
+      paused = true
+      ended = false
+      duration = 10
+      currentTime = 0
+      onplay: (() => void) | null = null
+      onpause: (() => void) | null = null
+      onloadedmetadata: (() => void) | null = null
+      ontimeupdate: (() => void) | null = null
+      onended: (() => void) | null = null
+      onerror: (() => void) | null = null
+
+      constructor(src: string) {
+        this.src = src
+        audioInstances.push(this)
+      }
+
+      async play() {
+        this.paused = false
+        this.onplay?.()
+      }
+
+      pause() {
+        this.paused = true
+        this.onpause?.()
+      }
+    }
+
+    vi.stubGlobal('Audio', MockAudio)
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:test-audio'),
+      revokeObjectURL: vi.fn(),
+    })
+    vi.mocked(requestOpenAISpeechAudio).mockResolvedValue(new Blob(['audio']))
+
+    const readerStore = useReaderStore()
+    readerStore.setSpeechProvider('openai')
+    readerStore.startTTS('测试朗读')
+
+    await vi.waitFor(() => expect(readerStore.isSpeaking).toBe(true))
+    const audio = audioInstances[0]
+    audio.currentTime = 4
+    audio.ontimeupdate?.()
+    expect(readerStore.speechProgress).toBeCloseTo(0.4)
+
+    readerStore.pauseTTS()
+    expect(readerStore.isSpeaking).toBe(true)
+    expect(readerStore.isPaused).toBe(true)
+    expect(audio.currentTime).toBe(4)
+
+    readerStore.pauseTTS()
+    await vi.waitFor(() => expect(readerStore.isPaused).toBe(false))
+    expect(readerStore.isSpeaking).toBe(true)
+    expect(audio.currentTime).toBe(4)
+
+    readerStore.stopTTS()
   })
 })

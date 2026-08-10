@@ -43,19 +43,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useReaderStore } from '../../stores/reader'
-import { useAppStore } from '../../stores/app'
 
 const store = useReaderStore()
-const appStore = useAppStore()
-const theme = computed(() => {
-  if (store.isNight || appStore.theme === 'dark') {
-    return {
-      ...store.currentTheme,
-      popup: 'var(--color-bg-elevated)',
-    }
-  }
-  return store.currentTheme
-})
+const theme = computed(() => store.currentTheme)
 
 defineProps<{
   isSpeaking?: boolean

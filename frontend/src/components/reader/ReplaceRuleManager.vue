@@ -75,7 +75,7 @@
           </div>
           <div class="form-row">
             <label><input type="checkbox" v-model="editingRule.isRegex"> 正则模式</label>
-            <label>排序: <input type="number" v-model="editingRule.order" style="width: 60px"></label>
+            <label>排序: <input class="order-input" type="number" v-model="editingRule.order"></label>
           </div>
         </div>
         <div class="edit-footer">
@@ -329,8 +329,8 @@ input:checked + .slider:before { transform: translateX(16px); }
 .form-item { display: flex; flex-direction: column; gap: 6px; }
 .form-item label { font-size: 12px; opacity: 0.7; }
 .form-item input, .form-item textarea {
-  background: rgba(0,0,0,0.05);
-  border: 1px solid rgba(0,0,0,0.05);
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
   padding: 8px 12px;
   border-radius: 8px;
   color: inherit;
@@ -367,6 +367,24 @@ input:checked + .slider:before { transform: translateX(16px); }
 }
 
 .form-row { display: flex; align-items: center; gap: 20px; font-size: 13px; }
+
+.order-input {
+  width: 64px;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 8px;
+  outline: none;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+  color-scheme: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.order-input:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(201, 127, 58, 0.16);
+}
 
 .edit-footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }
 .edit-footer button { padding: 8px 20px; border-radius: 8px; border: 1px solid var(--color-border); background: transparent; color: inherit; cursor: pointer; }

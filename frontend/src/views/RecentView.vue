@@ -190,7 +190,7 @@ async function handleClearRecent() {
   width: 100%;
   border: 1px solid var(--color-border-light);
   background: var(--color-bg-elevated);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   padding: 12px 14px;
   font-size: var(--text-sm);
   color: var(--color-text);
@@ -203,7 +203,7 @@ async function handleClearRecent() {
 .recent-title {
   font-size: var(--text-2xl);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .recent-count {
@@ -229,7 +229,7 @@ async function handleClearRecent() {
 
 .filter-chip {
   padding: 8px 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--color-border-light);
   background: var(--color-bg-elevated);
   color: var(--color-text-secondary);
@@ -245,7 +245,7 @@ async function handleClearRecent() {
 
 .recent-clear-btn {
   padding: 10px 16px;
-  border-radius: 999px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--color-border-light);
   background: var(--color-bg-elevated);
   color: var(--color-text-secondary);

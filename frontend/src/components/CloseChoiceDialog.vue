@@ -32,17 +32,18 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useAppStore } from '../stores/app'
 
 const appStore = useAppStore()
-const appWindow = getCurrentWindow()
+const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+const appWindow = isTauri ? getCurrentWindow() : null
 
 async function hideToTray() {
   appStore.resolveCloseChoice('tray')
-  await appWindow.hide()
+  await appWindow?.hide()
 }
 
 async function quit() {
   appStore.resolveCloseChoice('quit')
   // destroy() exits the app without re-triggering the close-requested handler.
-  await appWindow.destroy()
+  await appWindow?.destroy()
 }
 
 function dismiss() {

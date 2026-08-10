@@ -202,8 +202,8 @@ const sourceCount = computed(() => {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 0 0, rgba(201, 127, 58, 0.08), transparent 34%),
-    linear-gradient(90deg, rgba(201, 127, 58, 0.035), transparent 42%);
+    radial-gradient(circle at 0 0, rgba(var(--color-primary-rgb), 0.07), transparent 34%),
+    linear-gradient(90deg, rgba(var(--color-primary-rgb), 0.03), transparent 42%);
   opacity: 0;
   transition: opacity var(--duration-normal) var(--ease-out);
   pointer-events: none;
@@ -211,9 +211,7 @@ const sourceCount = computed(() => {
 
 .book-card:hover {
   border-color: var(--color-primary-border);
-  box-shadow:
-    0 12px 26px rgba(39, 32, 22, 0.09),
-    0 1px 7px rgba(39, 32, 22, 0.04);
+  box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
 
@@ -262,7 +260,7 @@ const sourceCount = computed(() => {
   justify-content: center;
   padding: var(--space-2);
   background:
-    linear-gradient(160deg, rgba(212, 129, 42, 0.12), rgba(70, 134, 121, 0.08)),
+    linear-gradient(160deg, rgba(var(--color-primary-rgb), 0.12), rgba(52, 127, 146, 0.08)),
     var(--color-bg-sunken);
   text-align: center;
   gap: var(--space-1);
@@ -297,7 +295,7 @@ const sourceCount = computed(() => {
   min-width: 18px;
   text-align: center;
   line-height: 15px;
-  box-shadow: 0 6px 14px rgba(201, 127, 58, 0.28);
+  box-shadow: 0 6px 14px rgba(var(--color-primary-rgb), 0.24);
   z-index: 1;
 }
 
@@ -436,7 +434,7 @@ const sourceCount = computed(() => {
 .book-name {
   margin: 0;
   font-size: 16px;
-  font-weight: 800;
+  font-weight: 700;
   color: var(--color-text);
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -511,18 +509,18 @@ const sourceCount = computed(() => {
 }
 
 .source-name {
-  background: rgba(201, 127, 58, 0.12);
+  background: rgba(var(--color-primary-rgb), 0.12);
   color: var(--color-primary);
 }
 
 .source-count {
-  background: rgba(201, 127, 58, 0.18);
+  background: rgba(var(--color-primary-rgb), 0.18);
   color: var(--color-primary);
   font-weight: 700;
 }
 
 .source-group {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--color-bg-hover);
   color: var(--color-text-secondary);
 }
 
@@ -540,7 +538,7 @@ const sourceCount = computed(() => {
   min-height: 25px;
   padding: 0 10px;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--color-bg-hover);
   color: var(--color-text-secondary);
   font-size: 11.5px;
   line-height: 1;
@@ -548,7 +546,7 @@ const sourceCount = computed(() => {
 }
 
 .cache-chip.primary {
-  background: rgba(201, 127, 58, 0.13);
+  background: rgba(var(--color-primary-rgb), 0.13);
   color: var(--color-primary);
 }
 

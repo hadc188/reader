@@ -242,7 +242,6 @@ function getLabelStyle(key: NavKey) {
   const { stretch } = getItemDistortion(key)
   if (!stretch) return undefined
   return {
-    letterSpacing: `${-0.03 * stretch}em`,
     transform: `scale(${1 - stretch * 0.05}, ${1 + stretch * 0.05})`,
   }
 }
@@ -261,10 +260,10 @@ onBeforeUnmount(() => {
 .bottom-nav-shell {
   position: fixed;
   left: 50%;
-  bottom: calc(18px + var(--safe-area-bottom));
+  bottom: calc(12px + var(--safe-area-bottom));
   transform: translateX(-50%);
   z-index: calc(var(--z-sticky) + 2);
-  width: min(720px, calc(100vw - 24px));
+  width: min(560px, calc(100vw - 24px));
 }
 
 .bottom-nav {
@@ -272,55 +271,39 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   align-items: center;
-  gap: 8px;
-  padding: 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.75);
-  box-shadow:
-    0 18px 40px rgba(0, 0, 0, 0.10),
-    inset 0 1px 0 rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(22px) saturate(165%);
-  -webkit-backdrop-filter: blur(22px) saturate(165%);
+  gap: 4px;
+  padding: 5px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-bg-elevated) 93%, transparent);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
 }
 
 .bottom-nav-shell.theme-dark .bottom-nav {
-  background: rgba(28, 29, 34, 0.82);
-  border-color: rgba(255, 255, 255, 0.08);
-  box-shadow:
-    0 18px 40px rgba(0, 0, 0, 0.36),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--color-bg-elevated) 91%, transparent);
+  border-color: var(--color-border);
+  box-shadow: var(--shadow-lg);
 }
 
 .nav-indicator {
   position: absolute;
-  top: 8px;
-  bottom: 8px;
+  top: 5px;
+  bottom: 5px;
   left: 0;
-  border-radius: 999px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(244, 244, 246, 0.68)),
-    rgba(255, 255, 255, 0.36);
-  border: 1px solid rgba(255, 255, 255, 0.95);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    0 10px 24px rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-full);
+  background: var(--color-primary-bg);
+  border: 1px solid var(--color-primary-border);
+  box-shadow: none;
   transition: transform 380ms cubic-bezier(0.2, 0.85, 0.22, 1), width 380ms cubic-bezier(0.2, 0.85, 0.22, 1);
   will-change: transform;
 }
 
 .bottom-nav-shell.theme-dark .nav-indicator {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(150, 190, 255, 0.015)),
-    rgba(255, 255, 255, 0.02);
-  border-color: rgba(255, 255, 255, 0.22);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.3),
-    inset 0 -14px 24px rgba(120, 170, 255, 0.02),
-    0 8px 18px rgba(0, 0, 0, 0.08),
-    0 0 0 1px rgba(255, 255, 255, 0.035);
-  backdrop-filter: blur(32px) saturate(200%) brightness(1.08);
-  -webkit-backdrop-filter: blur(32px) saturate(200%) brightness(1.08);
+  background: var(--color-primary-bg);
+  border-color: var(--color-primary-border);
+  box-shadow: none;
 }
 
 .nav-item {
@@ -329,17 +312,17 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  min-height: 58px;
-  border-radius: 999px;
-  color: #22242a;
+  gap: 7px;
+  min-height: 46px;
+  border-radius: var(--radius-full);
+  color: var(--color-text-secondary);
   font-size: var(--text-sm);
-  font-weight: 600;
+  font-weight: 500;
   transition: color 180ms ease, transform 180ms ease;
 }
 
 .bottom-nav-shell.theme-dark .nav-item {
-  color: rgba(245, 246, 248, 0.88);
+  color: var(--color-text-secondary);
 }
 
 .nav-item svg {
@@ -354,11 +337,11 @@ onBeforeUnmount(() => {
 }
 
 .nav-item.active {
-  color: #179a57;
+  color: var(--color-primary);
 }
 
 .bottom-nav-shell.theme-dark .nav-item.active {
-  color: #59d38e;
+  color: var(--color-primary);
 }
 
 .nav-item:active {
@@ -367,17 +350,17 @@ onBeforeUnmount(() => {
 
 @media (max-width: 640px) {
   .bottom-nav-shell {
-    width: calc(100vw - 18px);
-    bottom: calc(12px + var(--safe-area-bottom));
+    width: calc(100vw - 16px);
+    bottom: calc(8px + var(--safe-area-bottom));
   }
 
   .bottom-nav {
-    gap: 4px;
-    padding: 8px;
+    gap: 2px;
+    padding: 4px;
   }
 
   .nav-item {
-    min-height: 52px;
+    min-height: 46px;
     gap: 6px;
     font-size: 13px;
   }

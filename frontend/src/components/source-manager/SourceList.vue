@@ -102,7 +102,7 @@ const emit = defineEmits<{
 .source-list-wrapper {
   min-height: 0;
   border: 1px solid var(--color-border-light);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
   display: flex;
   flex-direction: column;

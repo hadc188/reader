@@ -89,6 +89,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::reading_stats::add_reading_stats,
         commands::reading_stats::get_reading_stats_daily,
         commands::reading_stats::get_reading_stats_summary,
+        commands::reading_stats::get_reading_stats_by_book,
         commands::replace_rule::get_replace_rules,
         commands::replace_rule::save_replace_rule,
         commands::replace_rule::save_replace_rules,

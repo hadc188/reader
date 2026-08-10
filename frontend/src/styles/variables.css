@@ -16,45 +16,50 @@
   /* Custom titlebar height. Fixed-position overlays that anchor to the top of
      the window must start below this, or their header controls get hidden
      underneath the titlebar. */
-  --titlebar-height: 32px;
+  --titlebar-height: 30px;
 
   /* Brand */
-  --color-primary: #d4812a;
-  --color-primary-light: #e6a35c;
-  --color-primary-dark: #b96c1e;
-  --color-primary-bg: rgba(212, 129, 42, 0.08);
-  --color-primary-border: rgba(212, 129, 42, 0.25);
+  --color-primary: #c56f35;
+  --color-primary-light: #d8945d;
+  --color-primary-dark: #a95725;
+  --color-primary-rgb: 197, 111, 53;
+  --color-primary-bg: rgba(197, 111, 53, 0.09);
+  --color-primary-border: rgba(197, 111, 53, 0.28);
 
   /* Accent */
-  --color-accent: #4a90d9;
-  --color-success: #52c41a;
-  --color-warning: #faad14;
-  --color-danger: #f5222d;
+  --color-accent: #347f92;
+  --color-success: #27815f;
+  --color-warning: #d4972d;
+  --color-danger: #d14949;
 
   /* Neutrals */
-  --color-bg: #faf9f7;
+  --color-bg: #f5f6f7;
   --color-bg-elevated: #ffffff;
-  --color-bg-sunken: #f0eeeb;
-  --color-bg-hover: rgba(0, 0, 0, 0.03);
-  --color-bg-active: rgba(0, 0, 0, 0.06);
+  --color-bg-sunken: #eceff1;
+  --color-bg-hover: rgba(30, 38, 45, 0.045);
+  --color-bg-active: rgba(30, 38, 45, 0.08);
+  --color-surface: var(--color-bg-elevated);
 
   /* Text */
-  --color-text: #1a1a1a;
-  --color-text-secondary: #666666;
-  --color-text-tertiary: #999999;
+  --color-text: #20252a;
+  --color-text-primary: var(--color-text);
+  --color-text-secondary: #5d666e;
+  --color-text-tertiary: #8a939b;
   --color-text-inverse: #ffffff;
 
   /* Borders */
-  --color-border: #e8e6e3;
-  --color-border-light: #f0eeeb;
-  --color-divider: rgba(0, 0, 0, 0.06);
+  --color-border: #dce1e4;
+  --color-border-light: #e8ebed;
+  --color-divider: rgba(31, 39, 45, 0.075);
 
   /* Shadows */
-  --shadow-xs: 0 1px 2px rgba(140, 120, 90, 0.06);
-  --shadow-sm: 0 2px 8px rgba(140, 120, 90, 0.08);
-  --shadow-md: 0 4px 16px rgba(140, 120, 90, 0.1);
-  --shadow-lg: 0 8px 32px rgba(140, 120, 90, 0.12);
-  --shadow-xl: 0 16px 48px rgba(140, 120, 90, 0.15);
+  --shadow-xs: 0 1px 2px rgba(27, 34, 40, 0.05);
+  --shadow-sm: 0 3px 10px rgba(27, 34, 40, 0.07);
+  --shadow-md: 0 8px 22px rgba(27, 34, 40, 0.09);
+  --shadow-lg: 0 14px 36px rgba(27, 34, 40, 0.12);
+  --shadow-xl: 0 22px 56px rgba(27, 34, 40, 0.16);
+  --shadow-2xl: 0 28px 72px rgba(27, 34, 40, 0.2);
+  --focus-ring: 0 0 0 3px rgba(197, 111, 53, 0.14);
 
   /* Spacing (4px grid) */
   --space-1: 4px;
@@ -73,11 +78,12 @@
   --radius-md: 10px;
   --radius-lg: 14px;
   --radius-xl: 20px;
+  --radius-2xl: 24px;
   --radius-full: 9999px;
 
   /* Typography */
-  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-body: 'Segoe UI Variable Text', 'Microsoft YaHei UI', 'PingFang SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: 'Segoe UI Variable Display', 'Microsoft YaHei UI', 'PingFang SC', -apple-system, BlinkMacSystemFont, sans-serif;
 
   --text-xs: 0.75rem;
   --text-sm: 0.8125rem;
@@ -92,10 +98,10 @@
   --leading-relaxed: 1.75;
 
   /* Layout */
-  --header-height: 60px;
+  --header-height: 62px;
   --tabs-height: 44px;
   --sidebar-width: 360px;
-  --content-max-width: 1400px;
+  --content-max-width: 1360px;
 
   /* Transitions */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -114,29 +120,32 @@
 
 /* ─── Dark Theme ─── */
 [data-theme='dark'] {
-  --color-primary: #e6a35c;
-  --color-primary-light: #f0bc80;
-  --color-primary-dark: #d4812a;
-  --color-primary-bg: rgba(230, 163, 92, 0.1);
-  --color-primary-border: rgba(230, 163, 92, 0.3);
+  --color-primary: #df9a69;
+  --color-primary-light: #e8ad82;
+  --color-primary-dark: #c77b46;
+  --color-primary-rgb: 223, 154, 105;
+  --color-primary-bg: rgba(223, 154, 105, 0.11);
+  --color-primary-border: rgba(223, 154, 105, 0.3);
 
-  --color-bg: #141414;
-  --color-bg-elevated: #1e1e1e;
-  --color-bg-sunken: #0a0a0a;
-  --color-bg-hover: rgba(255, 255, 255, 0.04);
-  --color-bg-active: rgba(255, 255, 255, 0.08);
+  --color-bg: #151719;
+  --color-bg-elevated: #1e2124;
+  --color-bg-sunken: #111315;
+  --color-bg-hover: rgba(255, 255, 255, 0.055);
+  --color-bg-active: rgba(255, 255, 255, 0.09);
 
-  --color-text: #e8e6e3;
-  --color-text-secondary: #a0a0a0;
-  --color-text-tertiary: #6b6b6b;
+  --color-text: #e9ecef;
+  --color-text-secondary: #adb5bc;
+  --color-text-tertiary: #767f87;
 
-  --color-border: #2a2a2a;
-  --color-border-light: #222222;
-  --color-divider: rgba(255, 255, 255, 0.06);
+  --color-border: #34393d;
+  --color-border-light: #292d31;
+  --color-divider: rgba(255, 255, 255, 0.075);
 
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.25);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.35);
   --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.45);
+  --shadow-2xl: 0 28px 72px rgba(0, 0, 0, 0.55);
+  --focus-ring: 0 0 0 3px rgba(223, 154, 105, 0.16);
 }

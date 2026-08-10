@@ -530,8 +530,8 @@ watch(() => store.sources, pruneSelection)
 
 <style scoped>
 .rss-manage-view {
-  height: calc(var(--app-height, 100dvh) - var(--header-height) - 104px - var(--safe-area-top) - var(--safe-area-bottom));
-  min-height: calc(var(--app-height, 100dvh) - var(--header-height) - 104px - var(--safe-area-top) - var(--safe-area-bottom));
+  height: 100%;
+  min-height: 0;
   box-sizing: border-box;
   padding: 24px;
   display: flex;
@@ -546,7 +546,7 @@ watch(() => store.sources, pruneSelection)
 .rss-editor {
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-light);
-  border-radius: 24px;
+  border-radius: var(--radius-lg);
 }
 
 .rss-manage-hero,
@@ -595,7 +595,7 @@ watch(() => store.sources, pruneSelection)
 .visual-form textarea {
   border: 1px solid var(--color-border);
   background: var(--color-bg);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
 }
 
@@ -611,7 +611,7 @@ watch(() => store.sources, pruneSelection)
 .bulk-check {
   padding: 10px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--color-bg);
 }
 
@@ -704,7 +704,7 @@ watch(() => store.sources, pruneSelection)
   gap: 12px;
   padding: 10px 12px;
   border: 1px solid var(--color-border-light);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg);
 }
 
@@ -793,7 +793,7 @@ watch(() => store.sources, pruneSelection)
   text-align: left;
   border: 1px solid transparent;
   background: var(--color-bg);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   padding: 14px;
   margin-bottom: 10px;
   transition: all var(--duration-fast) var(--ease-out);
@@ -871,7 +871,7 @@ watch(() => store.sources, pruneSelection)
   margin-top: 10px;
   padding: 10px 12px;
   border: 1px solid rgba(201, 127, 58, 0.22);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--color-bg-elevated) 90%, var(--color-primary) 10%);
   box-shadow: var(--shadow-sm);
   color: var(--color-text-secondary);

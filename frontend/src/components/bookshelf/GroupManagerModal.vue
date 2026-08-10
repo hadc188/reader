@@ -119,7 +119,7 @@ async function deleteGroup(groupId: number, groupName: string) {
 .modal-card {
   width: min(560px, 100%);
   background: var(--color-bg-elevated);
-  border-radius: 24px;
+  border-radius: var(--radius-xl);
   box-shadow: var(--shadow-xl);
   overflow: hidden;
   max-height: calc(var(--app-height, 100dvh) - var(--safe-area-top) - var(--safe-area-bottom) - 32px);
@@ -178,7 +178,7 @@ async function deleteGroup(groupId: number, groupName: string) {
 .group-input {
   flex: 1;
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   background: var(--color-bg);
 }
@@ -190,7 +190,7 @@ async function deleteGroup(groupId: number, groupName: string) {
 
 .primary-btn,
 .mini-btn {
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   padding: 10px 14px;
   cursor: pointer;

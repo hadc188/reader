@@ -135,34 +135,6 @@
           <section class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <path d="M12 8v4l3 3" />
-                <circle cx="12" cy="12" r="9" />
-              </svg>
-              &#38405;&#35835;&#32479;&#35745;
-            </h3>
-            <div class="stats-grid">
-              <div class="status-card">
-                <span>{{ appStore.readingStatsSummary.totalTimeText }}</span>
-                <small>&#32047;&#35745;&#38405;&#35835;&#26102;&#38271;</small>
-              </div>
-              <div class="status-card">
-                <span>{{ appStore.readingStatsSummary.openedBooks }}</span>
-                <small>&#25171;&#24320;&#36807;&#30340;&#20070;&#31821;</small>
-              </div>
-              <div class="status-card">
-                <span>{{ appStore.readingStatsSummary.readChapters }}</span>
-                <small>&#38405;&#35835;&#31456;&#33410;&#25968;</small>
-              </div>
-              <div class="status-card">
-                <span>{{ appStore.readingStatsSummary.completedBooks }}</span>
-                <small>&#35835;&#23436;&#20070;&#31821;&#25968;</small>
-              </div>
-            </div>
-          </section>
-
-          <section class="drawer-section">
-            <h3 class="section-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <circle cx="12" cy="12" r="4" />
                 <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
               </svg>
@@ -348,19 +320,21 @@ async function handleCheckVersionUpdate() {
   top: var(--titlebar-height, 32px);
   right: 0;
   bottom: 0;
-  width: min(380px, 90vw);
+  width: min(420px, 94vw);
   background: var(--color-bg-elevated);
   z-index: var(--z-modal);
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-xl);
+  border-left: 1px solid var(--color-divider);
 }
 
 .drawer-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: calc(var(--space-5) + var(--safe-area-top)) calc(var(--space-6) + var(--safe-area-right)) var(--space-5) var(--space-6);
+  min-height: 62px;
+  padding: calc(var(--space-4) + var(--safe-area-top)) calc(var(--space-5) + var(--safe-area-right)) var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--color-border-light);
   flex-shrink: 0;
 }
@@ -368,7 +342,7 @@ async function handleCheckVersionUpdate() {
 .drawer-header h2 {
   font-size: var(--text-xl);
   font-weight: 700;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .close-btn {
@@ -377,7 +351,7 @@ async function handleCheckVersionUpdate() {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   color: var(--color-text-secondary);
   transition: all var(--duration-fast);
 }
@@ -397,7 +371,7 @@ async function handleCheckVersionUpdate() {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  padding: var(--space-4) calc(var(--space-6) + var(--safe-area-right)) calc(var(--space-4) + var(--safe-area-bottom)) var(--space-6);
+  padding: var(--space-2) calc(var(--space-5) + var(--safe-area-right)) calc(var(--space-5) + var(--safe-area-bottom)) var(--space-5);
 }
 
 @media (max-width: 768px) {
@@ -407,7 +381,7 @@ async function handleCheckVersionUpdate() {
 }
 
 .drawer-section {
-  padding: var(--space-4) 0;
+  padding: var(--space-5) 0;
   border-bottom: 1px solid var(--color-divider);
 }
 
@@ -422,8 +396,7 @@ async function handleCheckVersionUpdate() {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--color-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0;
   margin-bottom: var(--space-3);
 }
 
@@ -533,7 +506,7 @@ async function handleCheckVersionUpdate() {
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
   font-weight: 500;
-  background: var(--color-bg-sunken);
+  background: var(--color-bg);
   color: var(--color-text);
   border: 1px solid var(--color-border-light);
   transition: all var(--duration-fast) var(--ease-out);
@@ -599,8 +572,9 @@ async function handleCheckVersionUpdate() {
   flex-direction: column;
   gap: 4px;
   padding: var(--space-3);
-  background: var(--color-bg-sunken);
-  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
   margin-bottom: var(--space-3);
 }
 
@@ -614,8 +588,8 @@ async function handleCheckVersionUpdate() {
 }
 
 .status-card.accent {
-  background: rgba(201, 127, 58, 0.12);
-  border: 1px solid rgba(201, 127, 58, 0.18);
+  background: rgba(var(--color-primary-rgb), 0.1);
+  border-color: rgba(var(--color-primary-rgb), 0.2);
 }
 
 .status-card.muted {
@@ -625,12 +599,6 @@ async function handleCheckVersionUpdate() {
 .action-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-}
-
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
 }
 
 .feature-toggle-list {
@@ -651,7 +619,7 @@ async function handleCheckVersionUpdate() {
 .toggle-btn {
   min-height: 30px;
   padding: 0 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--color-border);
   background: transparent;
   color: var(--color-text-secondary);
@@ -671,7 +639,7 @@ async function handleCheckVersionUpdate() {
   gap: var(--space-2);
   padding: var(--space-4);
   border-radius: var(--radius-md);
-  border: 2px solid var(--color-border-light);
+  border: 1px solid var(--color-border);
   background: var(--color-bg);
   font-size: var(--text-sm);
   font-weight: 500;
@@ -681,6 +649,7 @@ async function handleCheckVersionUpdate() {
 
 .theme-option.active {
   border-color: var(--color-primary);
+  box-shadow: var(--focus-ring);
   color: var(--color-primary);
   background: var(--color-primary-bg);
 }

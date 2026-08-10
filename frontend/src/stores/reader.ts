@@ -1263,6 +1263,7 @@ export const useReaderStore = defineStore('reader', () => {
   async function loadBook(b: Book) {
     loading.value = true
     book.value = b
+    appStore.setReadingSessionBook(b.bookUrl, b.name)
     chapters.value = []
     content.value = ''
     appStore.markBookOpened(b.bookUrl)

@@ -143,16 +143,13 @@ export const useAppStore = defineStore('app', () => {
     completedBooks: string[]
   }>(initialReadingStats)
   let readingSessionStartedAt = 0
+  let readingSessionBook: { bookUrl: string; bookName: string } | null = null
 
   function persistStats() {
     localStorage.setItem(STATS_KEY, JSON.stringify(readingStats.value))
   }
 
-  function startReadingSession() {
-    if (!readingSessionStartedAt) readingSessionStartedAt = Date.now()
-  }
-
-  function stopReadingSession() {
+  function flushReadingSession() {
     if (!readingSessionStartedAt) return
     const delta = Math.max(0, Math.round((Date.now() - readingSessionStartedAt) / 1000))
     readingStats.value.totalSeconds += delta
@@ -160,8 +157,39 @@ export const useAppStore = defineStore('app', () => {
     persistStats()
     // Sync to the server-side reading_stats table (best-effort).
     if (delta > 0) {
-      void addReadingStats({ seconds: delta }).catch(() => undefined)
+      void addReadingStats({
+        seconds: delta,
+        bookUrl: readingSessionBook?.bookUrl,
+        bookName: readingSessionBook?.bookName,
+      }).catch(() => undefined)
     }
+  }
+
+  function setReadingSessionBook(bookUrl?: string, bookName?: string) {
+    const normalizedUrl = bookUrl?.trim() || ''
+    const nextBook = normalizedUrl
+      ? { bookUrl: normalizedUrl, bookName: bookName?.trim() || '未命名书籍' }
+      : null
+
+    if (readingSessionBook?.bookUrl === nextBook?.bookUrl) {
+      readingSessionBook = nextBook
+      return
+    }
+
+    const wasRunning = readingSessionStartedAt > 0
+    if (wasRunning) flushReadingSession()
+    readingSessionBook = nextBook
+    if (wasRunning) readingSessionStartedAt = Date.now()
+  }
+
+  function startReadingSession(bookUrl?: string, bookName?: string) {
+    setReadingSessionBook(bookUrl, bookName)
+    if (!readingSessionStartedAt) readingSessionStartedAt = Date.now()
+  }
+
+  function stopReadingSession() {
+    flushReadingSession()
+    readingSessionBook = null
   }
 
   function markBookOpened(bookUrl: string) {
@@ -283,7 +311,7 @@ export const useAppStore = defineStore('app', () => {
     showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager,
     isOnline, pwaReady, pwaUpdateAvailable, deferredInstallPrompt, waitingServiceWorker,
     setOnlineStatus, setPwaReady, setPwaUpdateAvailable, setDeferredInstallPrompt, setWaitingServiceWorker, installPwa, applyPwaUpdate,
-    readingStats, readingStatsSummary, startReadingSession, stopReadingSession, markBookOpened, markChapterRead,
+    readingStats, readingStatsSummary, startReadingSession, stopReadingSession, setReadingSessionBook, markBookOpened, markChapterRead,
     toasts, showToast,
     confirmState, confirmDialog, resolveConfirm,
     closeChoice, askCloseChoice, resolveCloseChoice,

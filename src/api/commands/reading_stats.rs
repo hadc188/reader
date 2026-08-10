@@ -1,6 +1,6 @@
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
-use crate::service::reading_stats_service::DailyReadingStats;
+use crate::service::reading_stats_service::{BookReadingStats, DailyReadingStats};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -9,6 +9,8 @@ pub struct AddReadingStatsRequest {
     pub seconds: Option<i64>,
     pub characters: Option<i64>,
     pub date: Option<String>,
+    pub book_url: Option<String>,
+    pub book_name: Option<String>,
 }
 
 /// Accumulate reading time/characters for the current user on a date.
@@ -25,6 +27,8 @@ pub async fn add_reading_stats(
             req.seconds.unwrap_or(0),
             req.characters.unwrap_or(0),
             req.date.as_deref(),
+            req.book_url.as_deref(),
+            req.book_name.as_deref(),
         )
         .await?;
     Ok(ApiResponse::ok(serde_json::json!({ "saved": true })))
@@ -50,4 +54,18 @@ pub async fn get_reading_stats_summary(
     let user_ns = "default";
     let summary = state.reading_stats_service.get_summary(user_ns).await?;
     Ok(ApiResponse::ok(summary))
+}
+
+#[tauri::command]
+pub async fn get_reading_stats_by_book(
+    state: tauri::State<'_, AppState>,
+    start: String,
+    end: String,
+) -> Result<ApiResponse<Vec<BookReadingStats>>, AppError> {
+    let user_ns = "default";
+    let books = state
+        .reading_stats_service
+        .get_by_book(user_ns, &start, &end)
+        .await?;
+    Ok(ApiResponse::ok(books))
 }

@@ -5,8 +5,11 @@
     :style="{
       background: theme.body,
       color: theme.fontColor,
+      colorScheme: readerColorScheme,
       fontFamily: currentFontFamily,
-      '--color-primary': '#c97f3a'
+      '--color-primary': '#c97f3a',
+      '--reader-selection-bg': theme.fontColor,
+      '--reader-selection-color': theme.content,
     }"
     @click="handleBackgroundClick"
     @contextmenu.prevent="handleContextMenu"
@@ -17,7 +20,11 @@
         <div v-if="store.activePanel" class="reader-overlay" @click="store.closePanel()"></div>
       </Transition>
       <Transition name="slide-left">
-        <div v-if="store.activePanel" class="reader-drawer" :style="{ background: chromeTheme.popup }">
+        <div
+          v-if="store.activePanel"
+          class="reader-drawer"
+          :style="{ background: chromeTheme.popup, colorScheme: readerColorScheme }"
+        >
           <ReaderCatalog
             v-if="store.activePanel === 'catalog' || store.activePanel === 'bookmark'"
             :initial-tab="store.activePanel === 'bookmark' ? 'bookmarks' : 'chapters'"
@@ -327,6 +334,7 @@ function debugPositionLog(message: string, payload?: unknown) {
 const config = computed(() => store.config)
 const theme = computed(() => store.currentTheme)
 const chromeTheme = computed(() => store.currentTheme)
+const readerColorScheme = computed(() => store.isNight || theme.value.name === '暗灰' ? 'dark' : 'light')
 
 const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
@@ -1655,7 +1663,6 @@ onBeforeRouteLeave(() => {
 
 onMounted(async () => {
   syncViewportSize()
-  appStore.startReadingSession()
   if (!store.book) {
     const restored = await store.restorePersistedSession()
     if (!restored) {
@@ -1664,6 +1671,7 @@ onMounted(async () => {
     }
     appStore.showToast('已恢复最近阅读的离线章节', 'success')
   }
+  appStore.startReadingSession(store.book?.bookUrl, store.book?.name)
   loadSavedReadingPosition()
   window.addEventListener('keydown', handleKeydown)
   document.addEventListener('mouseup', handleMouseUpSelection)
@@ -2054,6 +2062,12 @@ watch(
   background: rgba(201, 127, 58, 0.12);
   border-radius: 10px;
   box-shadow: inset 0 0 0 1px rgba(201, 127, 58, 0.18);
+}
+
+.reader-view::selection,
+.reader-view :deep(*)::selection {
+  color: var(--reader-selection-color);
+  background: var(--reader-selection-bg);
 }
 
 :deep(.chapter-text p.reader-indent) {

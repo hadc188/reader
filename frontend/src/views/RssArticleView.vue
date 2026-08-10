@@ -100,8 +100,8 @@ function formatRelativeTime(value?: string) {
 
 <style scoped>
 .rss-article-view {
-  height: calc(var(--app-height, 100dvh) - var(--header-height) - 104px - var(--safe-area-top) - var(--safe-area-bottom));
-  min-height: calc(var(--app-height, 100dvh) - var(--header-height) - 104px - var(--safe-area-top) - var(--safe-area-bottom));
+  height: 100%;
+  min-height: 0;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -119,7 +119,7 @@ function formatRelativeTime(value?: string) {
   overflow: hidden;
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-light);
-  border-radius: 24px;
+  border-radius: var(--radius-lg);
 }
 
 .article-page-head {
@@ -186,7 +186,7 @@ function formatRelativeTime(value?: string) {
 .content-html :deep(img) {
   max-width: 100%;
   height: auto;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
 }
 
 .content-html :deep(video),
@@ -222,7 +222,7 @@ function formatRelativeTime(value?: string) {
 
   .article-page-card {
     padding: 14px;
-    border-radius: 20px;
+    border-radius: var(--radius-lg);
   }
 
   .article-page-head h1 {

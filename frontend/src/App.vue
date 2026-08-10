@@ -1,5 +1,5 @@
 <template>
-  <div id="app">
+  <div class="app-shell">
     <TitleBar />
     <div class="app-body">
       <AppTopBar v-if="showHeader" />
@@ -59,6 +59,7 @@ onMounted(() => {
 // so the user can pick hide-to-tray or quit.
 let closeUnlisten: (() => void) | undefined
 onMounted(() => {
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
   listen<unknown>('close-requested', () => {
     void appStore.askCloseChoice().then((choice) => {
       if (choice === 'quit') {
@@ -87,7 +88,7 @@ body {
   overflow: hidden;
 }
 
-#app {
+.app-shell {
   height: var(--app-height, 100dvh);
   overflow: hidden;
   display: flex;
@@ -115,6 +116,6 @@ body {
 }
 
 .app-main.with-bottom-nav {
-  padding-bottom: calc(104px + var(--safe-area-bottom));
+  padding-bottom: calc(76px + var(--safe-area-bottom));
 }
 </style>

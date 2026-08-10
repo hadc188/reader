@@ -804,7 +804,7 @@ watch(() => props.modelValue, (v) => {
     width: 100%;
     height: calc(var(--app-height, 100dvh) - 16px);
     max-height: calc(var(--app-height, 100dvh) - 16px);
-    border-radius: 24px;
+    border-radius: var(--radius-xl);
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
@@ -845,7 +845,7 @@ watch(() => props.modelValue, (v) => {
   }
 
   .source-modal {
-    border-radius: 20px;
+    border-radius: var(--radius-lg);
   }
 }
 </style>

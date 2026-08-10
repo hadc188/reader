@@ -362,7 +362,7 @@ async function handleRefreshBooks() {
 .shelf-title {
   font-size: var(--text-2xl);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .book-count {
@@ -425,7 +425,7 @@ async function handleRefreshBooks() {
 }
 
 .group-tabs {
-  border-bottom: 2px solid var(--color-border-light);
+  border-bottom: 1px solid var(--color-border-light);
   margin-bottom: var(--space-2);
 }
 
@@ -450,7 +450,7 @@ async function handleRefreshBooks() {
   position: relative;
   transition: color var(--duration-fast);
   border-bottom: 2px solid transparent;
-  margin-bottom: -2px;
+  margin-bottom: -1px;
 }
 
 .tab-item:hover {
@@ -466,7 +466,7 @@ async function handleRefreshBooks() {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding-bottom: calc(104px + var(--space-6));
+  padding-bottom: calc(76px + var(--space-6));
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
@@ -477,13 +477,13 @@ async function handleRefreshBooks() {
 
 .batch-toolbar {
   position: fixed;
-  bottom: calc(104px + var(--space-4));
+  bottom: calc(76px + var(--space-4));
   left: 50%;
   transform: translateX(-50%);
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border);
   box-shadow: var(--shadow-xl);
-  border-radius: var(--radius-2xl);
+  border-radius: var(--radius-xl);
   padding: var(--space-3) var(--space-6);
   display: flex;
   align-items: center;
@@ -603,7 +603,7 @@ async function handleRefreshBooks() {
 
   .batch-toolbar {
     width: calc(100% - var(--space-8));
-    bottom: calc(104px + var(--space-3));
+    bottom: calc(76px + var(--space-3));
     gap: var(--space-4);
     justify-content: space-between;
   }

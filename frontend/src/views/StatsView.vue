@@ -36,38 +36,50 @@
         <div ref="chartRef" class="chart"></div>
       </div>
 
-      <div class="ticket-card">
-        <h3 class="chart-title">阅读书票</h3>
-        <div ref="ticketRef" class="ticket">
-          <div class="ticket-inner">
-            <div class="ticket-title">我的阅读书票</div>
-            <div class="ticket-stats">
-              <div class="ticket-stat">
-                <span class="ticket-num">{{ formatDuration(summary.totalSeconds) }}</span>
-                <small>累计阅读</small>
+      <section class="book-stats-card">
+        <header class="book-stats-head">
+          <div>
+            <h2>分书阅读时长</h2>
+            <p>{{ activeRangeLabel }}</p>
+          </div>
+          <span class="book-total">{{ bookStats.length }} 本</span>
+        </header>
+
+        <div v-if="bookStats.length" class="book-stats-list">
+          <div v-for="(book, index) in bookStats" :key="book.bookUrl" class="book-stat-row">
+            <span class="book-rank">{{ index + 1 }}</span>
+            <div class="book-stat-main">
+              <div class="book-stat-meta">
+                <strong :title="book.bookName">{{ book.bookName }}</strong>
+                <small>最近阅读 {{ formatBookDate(book.lastReadDate) }}</small>
               </div>
-              <div class="ticket-stat">
-                <span class="ticket-num">{{ formatNumber(summary.totalCharacters) }}</span>
-                <small>阅读字数</small>
-              </div>
-              <div class="ticket-stat">
-                <span class="ticket-num">{{ summary.activeDays }}</span>
-                <small>活跃天数</small>
+              <div class="book-progress" aria-hidden="true">
+                <span :style="{ width: `${bookProgressWidth(book.seconds)}%` }"></span>
               </div>
             </div>
-            <div class="ticket-footer">阅读 · 让世界更辽阔</div>
+            <div class="book-stat-value">
+              <strong>{{ formatDuration(book.seconds) }}</strong>
+              <small>占本期 {{ bookShare(book.seconds) }}%</small>
+            </div>
           </div>
         </div>
-        <button class="share-btn" @click="shareTicket">保存书票图片</button>
-      </div>
+        <div v-else class="book-stats-empty">当前时间范围内暂无按书阅读记录</div>
+      </section>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
-import { getReadingStatsDaily, getReadingStatsSummary, type ReadingStatsSummary } from '../api/readingStats'
+import {
+  getReadingStatsByBook,
+  getReadingStatsDaily,
+  getReadingStatsSummary,
+  type BookReadingStats,
+  type ReadingStatsSummary,
+} from '../api/readingStats'
+import { useAppStore } from '../stores/app'
 
 const ranges = [
   { days: 7, label: '近7天' },
@@ -76,17 +88,39 @@ const ranges = [
 ]
 
 const activeRange = ref(30)
+const appStore = useAppStore()
 const chartRef = ref<HTMLElement | null>(null)
-const ticketRef = ref<HTMLElement | null>(null)
 const summary = ref<ReadingStatsSummary>({ totalSeconds: 0, totalCharacters: 0, activeDays: 0 })
+const bookStats = ref<BookReadingStats[]>([])
 let chart: echarts.ECharts | null = null
 
+const activeRangeLabel = computed(() => ranges.find((range) => range.days === activeRange.value)?.label || '')
+const maxBookSeconds = computed(() => Math.max(0, ...bookStats.value.map((book) => book.seconds)))
+const trackedBookSeconds = computed(() => bookStats.value.reduce((total, book) => total + book.seconds, 0))
+
 function formatDuration(seconds: number) {
+  if (seconds <= 0) return '0分钟'
+  if (seconds < 60) return '少于1分钟'
   const mins = Math.floor(seconds / 60)
   const hours = Math.floor(mins / 60)
   const remMins = mins % 60
   if (hours > 0) return `${hours}小时${remMins}分`
   return `${Math.max(1, mins)}分钟`
+}
+
+function formatBookDate(value: string) {
+  const parts = value.split('-')
+  return parts.length === 3 ? `${parts[1]}/${parts[2]}` : value
+}
+
+function bookProgressWidth(seconds: number) {
+  if (!maxBookSeconds.value) return 0
+  return Math.max(4, Math.round((seconds / maxBookSeconds.value) * 100))
+}
+
+function bookShare(seconds: number) {
+  if (!trackedBookSeconds.value) return 0
+  return Math.round((seconds / trackedBookSeconds.value) * 100)
 }
 
 function formatNumber(n: number) {
@@ -103,11 +137,13 @@ function dateStr(offsetDays: number) {
 async function loadStats() {
   const end = dateStr(0)
   const start = dateStr(activeRange.value - 1)
-  const [daily, sum] = await Promise.all([
+  const [daily, sum, books] = await Promise.all([
     getReadingStatsDaily(start, end),
     getReadingStatsSummary(),
+    getReadingStatsByBook(start, end),
   ])
   summary.value = sum
+  bookStats.value = books
   renderChart(daily, start, end)
 }
 
@@ -128,24 +164,29 @@ function renderChart(daily: { date: string; seconds: number }[], start: string, 
     cur.setDate(cur.getDate() + 1)
   }
 
+  const styles = getComputedStyle(document.documentElement)
+  const primary = styles.getPropertyValue('--color-primary').trim()
+  const textTertiary = styles.getPropertyValue('--color-text-tertiary').trim()
+  const divider = styles.getPropertyValue('--color-divider').trim()
+
   chart.setOption({
     grid: { left: 8, right: 8, top: 20, bottom: 8, containLabel: true },
     tooltip: { trigger: 'axis' },
     xAxis: {
       type: 'category',
       data: dates,
-      axisLabel: { fontSize: 10, color: '#999' },
-      axisLine: { lineStyle: { color: '#e5e5e5' } },
+      axisLabel: { fontSize: 10, color: textTertiary },
+      axisLine: { lineStyle: { color: divider } },
     },
     yAxis: {
       type: 'value',
-      axisLabel: { fontSize: 10, color: '#999' },
-      splitLine: { lineStyle: { color: '#f0f0f0' } },
+      axisLabel: { fontSize: 10, color: textTertiary },
+      splitLine: { lineStyle: { color: divider } },
     },
     series: [{
       type: 'bar',
       data: minutes,
-      itemStyle: { color: '#179a57', borderRadius: [3, 3, 0, 0] },
+      itemStyle: { color: primary, borderRadius: [3, 3, 0, 0] },
       barMaxWidth: 18,
     }],
   })
@@ -154,38 +195,6 @@ function renderChart(daily: { date: string; seconds: number }[], start: string, 
 function setRange(days: number) {
   activeRange.value = days
   void loadStats()
-}
-
-function shareTicket() {
-  const el = ticketRef.value
-  if (!el) return
-  // Render the ticket to a canvas and download as PNG.
-  const canvas = document.createElement('canvas')
-  const scale = 2
-  canvas.width = el.offsetWidth * scale
-  canvas.height = el.offsetHeight * scale
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return
-  ctx.scale(scale, scale)
-  ctx.fillStyle = '#fff'
-  ctx.fillRect(0, 0, el.offsetWidth, el.offsetHeight)
-  // Simple text-based ticket (kept dependency-free).
-  ctx.fillStyle = '#179a57'
-  ctx.font = 'bold 20px sans-serif'
-  ctx.fillText('我的阅读书票', 20, 40)
-  ctx.fillStyle = '#333'
-  ctx.font = '14px sans-serif'
-  ctx.fillText(`累计阅读：${formatDuration(summary.value.totalSeconds)}`, 20, 80)
-  ctx.fillText(`阅读字数：${formatNumber(summary.value.totalCharacters)}`, 20, 110)
-  ctx.fillText(`活跃天数：${summary.value.activeDays}`, 20, 140)
-  ctx.fillStyle = '#999'
-  ctx.font = '12px sans-serif'
-  ctx.fillText('阅读 · 让世界更辽阔', 20, 180)
-
-  const a = document.createElement('a')
-  a.download = `阅读书票-${dateStr(0)}.png`
-  a.href = canvas.toDataURL('image/png')
-  a.click()
 }
 
 onMounted(() => {
@@ -197,6 +206,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', () => chart?.resize())
   chart?.dispose()
   chart = null
+})
+
+watch(() => appStore.theme, () => {
+  void loadStats()
 })
 </script>
 
@@ -230,7 +243,7 @@ onBeforeUnmount(() => {
 .stats-title {
   font-size: var(--text-2xl);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .stats-range {
@@ -240,7 +253,7 @@ onBeforeUnmount(() => {
 
 .range-chip {
   padding: 8px 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--color-border-light);
   background: var(--color-bg-elevated);
   color: var(--color-text-secondary);
@@ -264,7 +277,7 @@ onBeforeUnmount(() => {
 
 .stat-card {
   border: 1px solid var(--color-border-light);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-elevated);
   padding: 16px;
   display: flex;
@@ -283,14 +296,158 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.chart-card,
-.ticket-card {
+.chart-card {
   border: 1px solid var(--color-border-light);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-elevated);
   padding: 16px;
   margin-bottom: var(--space-4);
   flex-shrink: 0;
+}
+
+.book-stats-card {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  margin-bottom: var(--space-4);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.book-stats-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: 16px;
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.book-stats-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.book-stats-head p {
+  margin: 3px 0 0;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.book-total {
+  flex-shrink: 0;
+  padding: 4px 9px;
+  border-radius: var(--radius-md);
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.book-stats-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.book-stat-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.book-stat-row:last-child {
+  border-bottom: none;
+}
+
+.book-rank {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.book-stat-row:first-child .book-rank {
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+}
+
+.book-stat-main {
+  min-width: 0;
+}
+
+.book-stat-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.book-stat-meta strong {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.book-stat-meta small {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.book-progress {
+  height: 4px;
+  margin-top: 9px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-sunken);
+}
+
+.book-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+}
+
+.book-stat-value {
+  min-width: 86px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.book-stat-value strong {
+  color: var(--color-text);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.book-stat-value small {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.book-stats-empty {
+  padding: 44px 20px;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  text-align: center;
 }
 
 .chart-title {
@@ -305,65 +462,6 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
-.ticket {
-  border-radius: 12px;
-  background: linear-gradient(135deg, #179a57, #0e6b3c);
-  color: #fff;
-  padding: 20px;
-}
-
-.ticket-inner {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.ticket-title {
-  font-size: 18px;
-  font-weight: 700;
-}
-
-.ticket-stats {
-  display: flex;
-  gap: 24px;
-}
-
-.ticket-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.ticket-num {
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.ticket-stat small {
-  font-size: 12px;
-  opacity: 0.85;
-}
-
-.ticket-footer {
-  font-size: 12px;
-  opacity: 0.8;
-}
-
-.share-btn {
-  margin-top: 12px;
-  padding: 10px 16px;
-  border-radius: 999px;
-  border: 1px solid var(--color-border-light);
-  background: var(--color-bg);
-  color: var(--color-primary);
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-
-.share-btn:hover {
-  background: var(--color-bg-hover);
-}
-
 @media (max-width: 640px) {
   .stats-header {
     align-items: flex-start;
@@ -372,6 +470,22 @@ onBeforeUnmount(() => {
 
   .stats-cards {
     grid-template-columns: 1fr;
+  }
+
+  .book-stat-row {
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    gap: 9px;
+    padding: 12px;
+  }
+
+  .book-stat-meta {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .book-stat-value {
+    min-width: 74px;
   }
 }
 </style>

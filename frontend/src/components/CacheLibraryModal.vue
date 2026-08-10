@@ -202,7 +202,7 @@ async function clearBrowser(book: Book) {
   max-height: 82vh;
   overflow: auto;
   background: var(--color-bg-elevated);
-  border-radius: 24px;
+  border-radius: var(--radius-xl);
   padding: 24px;
   box-shadow: var(--shadow-xl);
 }
@@ -234,7 +234,7 @@ async function clearBrowser(book: Book) {
 .cache-actions button {
   border: 1px solid var(--color-border);
   background: transparent;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
   cursor: pointer;
 }
@@ -275,7 +275,7 @@ async function clearBrowser(book: Book) {
   gap: 16px;
   padding: 14px 16px;
   border: 1px solid var(--color-border-light);
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-sunken);
 }
 
@@ -324,7 +324,7 @@ async function clearBrowser(book: Book) {
   justify-content: space-between;
   gap: 16px;
   border: 1px solid var(--color-border-light);
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   padding: 18px;
 }
 

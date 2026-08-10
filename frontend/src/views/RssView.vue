@@ -226,8 +226,8 @@ async function handleOpenArticle(article: RssArticle & { variable?: string }) {
 
 <style scoped>
 .rss-view {
-  height: calc(var(--app-height, 100dvh) - var(--header-height) - 104px - var(--safe-area-top) - var(--safe-area-bottom));
-  min-height: calc(var(--app-height, 100dvh) - var(--header-height) - 104px - var(--safe-area-top) - var(--safe-area-bottom));
+  height: 100%;
+  min-height: 0;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -241,7 +241,7 @@ async function handleOpenArticle(article: RssArticle & { variable?: string }) {
 .article-content-panel {
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-light);
-  border-radius: 24px;
+  border-radius: var(--radius-lg);
 }
 
 .rss-toolbar {
@@ -306,7 +306,7 @@ async function handleOpenArticle(article: RssArticle & { variable?: string }) {
   max-width: 18ch;
   border: 1px solid var(--color-border);
   background: var(--color-bg);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 4px 8px;
 }
 
@@ -470,7 +470,7 @@ async function handleOpenArticle(article: RssArticle & { variable?: string }) {
   width: 100%;
   text-align: left;
   padding: 14px;
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   border: 1px solid transparent;
   background: var(--color-bg);
   transition: all var(--duration-fast) var(--ease-out);
@@ -528,7 +528,7 @@ async function handleOpenArticle(article: RssArticle & { variable?: string }) {
 .content-html :deep(img) {
   max-width: 100%;
   height: auto;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
 }
 
 .content-html :deep(video),
@@ -558,8 +558,8 @@ async function handleOpenArticle(article: RssArticle & { variable?: string }) {
 
 @media (max-width: 960px) {
   .rss-view {
-    height: calc(var(--app-height, 100dvh) - var(--header-height) - 104px - var(--safe-area-top) - var(--safe-area-bottom));
-    min-height: calc(var(--app-height, 100dvh) - var(--header-height) - 104px - var(--safe-area-top) - var(--safe-area-bottom));
+    height: 100%;
+    min-height: 0;
     padding: 6px;
     gap: 4px;
     overflow: hidden;
@@ -640,7 +640,7 @@ async function handleOpenArticle(article: RssArticle & { variable?: string }) {
   .article-list-panel,
   .article-content-panel {
     padding: 8px;
-    border-radius: 20px;
+    border-radius: var(--radius-lg);
   }
 
   .panel-head {
@@ -649,7 +649,7 @@ async function handleOpenArticle(article: RssArticle & { variable?: string }) {
 
   .article-item {
     padding: 12px;
-    border-radius: 16px;
+    border-radius: var(--radius-lg);
   }
 
   .article-list-stack {

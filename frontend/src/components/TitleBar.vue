@@ -30,7 +30,8 @@ import { useReaderStore } from '../stores/reader'
 
 const readerStore = useReaderStore()
 const route = useRoute()
-const appWindow = getCurrentWindow()
+const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+const appWindow = isTauri ? getCurrentWindow() : null
 const isMaximized = ref(false)
 const isReader = computed(() => route.name === 'reader')
 const titlebarStyle = computed(() => isReader.value
@@ -44,9 +45,10 @@ const titlebarStyle = computed(() => isReader.value
     })
 
 async function minimize() {
-  await appWindow.minimize()
+  await appWindow?.minimize()
 }
 async function toggleMaximize() {
+  if (!appWindow) return
   const m = await appWindow.isMaximized()
   if (m) {
     await appWindow.unmaximize()
@@ -57,10 +59,11 @@ async function toggleMaximize() {
   }
 }
 async function close() {
-  await appWindow.close()
+  await appWindow?.close()
 }
 
 onMounted(async () => {
+  if (!appWindow) return
   isMaximized.value = await appWindow.isMaximized()
   const unlisten = await appWindow.onResized(() => {
     void appWindow.isMaximized().then((m) => { isMaximized.value = m })
@@ -84,7 +87,7 @@ onBeforeUnmount(() => cleanup())
   z-index: calc(var(--z-modal) + 20);
   color: var(--color-text-secondary);
   background: var(--color-bg-elevated);
-  border-bottom: 1px solid var(--color-border-light);
+  border-bottom: 1px solid var(--color-divider);
   user-select: none;
   transition: background var(--duration-normal), color var(--duration-normal), border-color var(--duration-normal);
 }
@@ -98,14 +101,14 @@ onBeforeUnmount(() => cleanup())
   height: 100%;
   display: flex;
   align-items: center;
-  padding-left: 12px;
+  padding-left: 14px;
 }
 
 .titlebar-title {
-  font-size: 12px;
+  font-size: 11px;
   color: inherit;
-  font-weight: 600;
-  opacity: 0.58;
+  font-weight: 500;
+  opacity: 0.52;
 }
 
 .titlebar-controls {
@@ -114,7 +117,7 @@ onBeforeUnmount(() => cleanup())
 }
 
 .tb-btn {
-  width: 46px;
+  width: 44px;
   height: 100%;
   display: flex;
   align-items: center;
@@ -123,7 +126,7 @@ onBeforeUnmount(() => cleanup())
   border: none;
   color: inherit;
   cursor: pointer;
-  opacity: 0.72;
+  opacity: 0.66;
   transition: background var(--duration-fast), opacity var(--duration-fast);
 }
 
@@ -141,9 +144,4 @@ onBeforeUnmount(() => cleanup())
   color: #fff;
 }
 
-@media (max-width: 640px) {
-  .titlebar {
-    height: 40px;
-  }
-}
 </style>

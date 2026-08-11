@@ -17,19 +17,32 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
     steps:
-      - name: Create draft release if needed
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Resolve Release target
+        id: release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" \
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            release_tag="$GITHUB_REF_NAME"
+          elif ! release_tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName' 2>/dev/null)"; then
+            echo "No published Release found" >&2
+            exit 1
+          fi
+
+          if ! gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$release_tag" \
               --repo "$GITHUB_REPOSITORY" \
               --draft \
-              --title "Reader $GITHUB_REF_NAME" \
+              --title "Reader $release_tag" \
               --generate-notes
           fi
+
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "Release target: $release_tag"
 
   build:
     name: ${{ matrix.platform }}-${{ matrix.arch }}
@@ -91,7 +104,7 @@ jobs:
 
       - name: Verify release metadata
         env:
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_tag }}
         run: node scripts/check-release-metadata.mjs
 
       - name: Install frontend dependencies
@@ -122,7 +135,7 @@ jobs:
       - name: Collect release artifacts
         env:
           TAURI_TARGET: ${{ matrix.target }}
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_tag }}
           RELEASE_PLATFORM: ${{ matrix.platform }}
           RELEASE_ARCH: ${{ matrix.arch }}
         run: node scripts/collect-desktop-artifacts.mjs
@@ -130,13 +143,12 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Reader-${{ matrix.platform }}-${{ matrix.arch }}
+          name: Reader-${{ needs.prepare-release.outputs.release_tag }}-${{ matrix.platform }}-${{ matrix.arch }}
           path: release/*
           if-no-files-found: error
 
-      - name: Upload platform files to draft release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Upload platform files to Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" release/* --clobber
+        run: gh release upload "${{ needs.prepare-release.outputs.release_tag }}" release/* --clobber

@@ -161,7 +161,7 @@ Rust 库测试：
 cargo test -j 4
 ```
 
-推送 `v*` 标签后，GitHub Actions 会分别在 Windows、macOS 和 Linux 环境中构建，并创建草稿 Release。也可以在 Actions 页面手动运行构建，此时只生成可下载的工作流产物。
+推送 `v*` 标签后，GitHub Actions 会分别在 Windows、macOS 和 Linux 环境中构建，并创建草稿 Release。也可以在 Actions 页面手动运行构建，构建结果会自动覆盖上传到与项目版本一致的最新 Release。
 
 ## 技术架构
 

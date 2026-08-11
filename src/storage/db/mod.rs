@@ -1,10 +1,10 @@
 pub mod repo;
 
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     SqlitePool,
 };
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 /// Build connect options from either a `sqlite:` URL or a bare filesystem path.
 ///
@@ -17,7 +17,15 @@ fn connect_options(database_url: &str) -> anyhow::Result<SqliteConnectOptions> {
     } else {
         SqliteConnectOptions::new().filename(database_url)
     };
-    Ok(options.create_if_missing(true).foreign_keys(true))
+    Ok(options
+        .create_if_missing(true)
+        .foreign_keys(true)
+        // Concurrent readers should not block a short user/session write.
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        // Windows can retain file locks briefly after a writer completes. Wait
+        // instead of immediately returning SQLITE_BUSY to the application.
+        .busy_timeout(Duration::from_secs(15)))
 }
 
 pub async fn init_pool(database_url: &str) -> anyhow::Result<SqlitePool> {

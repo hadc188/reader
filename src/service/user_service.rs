@@ -7,7 +7,9 @@ use serde_json::Value;
 use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::fs;
+use tokio::sync::Mutex;
 
 const TOKEN_TTL_MS: i64 = 7 * 86_400 * 1000;
 
@@ -17,6 +19,9 @@ pub struct UserService {
     users_path: PathBuf,
     data_root: PathBuf,
     pool: SqlitePool,
+    /// SQLite permits only one writer at a time. All cloned service handles
+    /// share this lock so session refreshes queue before entering write SQL.
+    user_write_lock: Arc<Mutex<()>>,
 }
 
 impl UserService {
@@ -28,10 +33,12 @@ impl UserService {
             users_path,
             data_root,
             pool,
+            user_write_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub async fn migrate_legacy_users_from_json(&self) -> Result<(), AppError> {
+        let _write_guard = self.user_write_lock.lock().await;
         if !self.users_path.exists() {
             self.ensure_admin_user().await?;
             return Ok(());
@@ -71,6 +78,7 @@ impl UserService {
         is_login: bool,
         code: Option<&str>,
     ) -> Result<Value, AppError> {
+        let _write_guard = self.user_write_lock.lock().await;
         self.ensure_admin_user().await?;
         if let Some(mut user) = self.find_user(username).await? {
             if !is_login {
@@ -114,6 +122,7 @@ impl UserService {
     }
 
     pub async fn logout(&self, access_token: &str) -> Result<(), AppError> {
+        let _write_guard = self.user_write_lock.lock().await;
         let (username, token) = parse_access_token(access_token)?;
         let user = self
             .find_user(&username)
@@ -198,6 +207,7 @@ impl UserService {
     }
 
     pub async fn add_user(&self, username: &str, password: &str) -> Result<Vec<Value>, AppError> {
+        let _write_guard = self.user_write_lock.lock().await;
         self.validate_new_user(username, password, None)?;
         if self.find_user(username).await?.is_some() {
             return Err(AppError::BadRequest("用户已存在".to_string()));
@@ -225,6 +235,7 @@ impl UserService {
     }
 
     pub async fn reset_password(&self, username: &str, password: &str) -> Result<(), AppError> {
+        let _write_guard = self.user_write_lock.lock().await;
         if password.len() < 8 {
             return Err(AppError::BadRequest("密码不能低于8位".to_string()));
         }
@@ -249,6 +260,7 @@ impl UserService {
         old_password: &str,
         new_password: &str,
     ) -> Result<(), AppError> {
+        let _write_guard = self.user_write_lock.lock().await;
         if new_password.len() < 8 {
             return Err(AppError::BadRequest("密码不能低于8位".to_string()));
         }
@@ -281,6 +293,7 @@ impl UserService {
     }
 
     pub async fn delete_users(&self, usernames: &[String]) -> Result<Vec<Value>, AppError> {
+        let _write_guard = self.user_write_lock.lock().await;
         for u in usernames {
             sqlx::query("DELETE FROM user_sessions WHERE username=?1")
                 .bind(u)
@@ -312,6 +325,7 @@ impl UserService {
         enable_webdav: Option<bool>,
         enable_local_store: Option<bool>,
     ) -> Result<Vec<Value>, AppError> {
+        let _write_guard = self.user_write_lock.lock().await;
         let mut user = self
             .find_user(username)
             .await?
@@ -327,6 +341,7 @@ impl UserService {
     }
 
     pub async fn check_auth(&self, access_token: &str) -> Result<Option<User>, AppError> {
+        let _write_guard = self.user_write_lock.lock().await;
         self.ensure_admin_user().await?;
         let (username, token) = parse_access_token(access_token)?;
         let mut user = match self.find_user(&username).await? {

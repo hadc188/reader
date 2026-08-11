@@ -632,9 +632,23 @@ export const useReaderStore = defineStore('reader', () => {
     localStorage.setItem('reader-speechConfig', JSON.stringify(speechConfig))
   }
 
+  const systemSpeechSupported = computed(() => (
+    typeof window !== 'undefined'
+      && typeof window.speechSynthesis !== 'undefined'
+      && typeof SpeechSynthesisUtterance !== 'undefined'
+  ))
+
+  function resolveSpeechSynthesis() {
+    if (!synth && typeof window !== 'undefined') {
+      synth = window.speechSynthesis
+    }
+    return synth
+  }
+
   function fetchVoices() {
-    if (!synth) return
-    voiceList.value = synth.getVoices().slice().sort((a, b) => {
+    const speech = resolveSpeechSynthesis()
+    if (!speech) return
+    voiceList.value = speech.getVoices().slice().sort((a, b) => {
       const aZh = a.lang.startsWith('zh-')
       const bZh = b.lang.startsWith('zh-')
       if (aZh && !bZh) return -1
@@ -891,7 +905,16 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function startSystemTTS(rawText: string, options: TTSOptions, sessionId: number) {
-    if (!synth) return
+    synth = resolveSpeechSynthesis()
+    if (!synth || typeof SpeechSynthesisUtterance === 'undefined') {
+      const error = new Error('当前系统不支持系统语音，请改用 API 语音')
+      isSpeechLoading.value = false
+      isSpeaking.value = false
+      isPaused.value = false
+      appStore.showToast(error.message, 'warning')
+      options.onError?.(error)
+      return
+    }
     isSpeechLoading.value = false
     if (!voiceList.value.length) {
       fetchVoices()
@@ -1725,7 +1748,7 @@ export const useReaderStore = defineStore('reader', () => {
     refreshChapters,
     isSpeaking, isSpeechLoading, isPaused, speechProgress, startTTS, pauseTTS, stopTTS,
     voiceList, speechConfig, speechStopAt, speechProviderLabel, openAISpeechConfigured,
-    systemTtsNativeEventsReliable,
+    systemTtsNativeEventsReliable, systemSpeechSupported,
     fetchVoices, setVoiceName, setSpeechProvider, setSpeechRate, setSpeechPitch, setSpeechStopTimer, clearSpeechStopTimer,
     setOpenAISpeechSource, setSpeechApiFormat, setOpenAISpeechBaseUrl, setSpeechProxyUrl, setOpenAISpeechApiKey, setOpenAISpeechModel, setOpenAISpeechVoice, setOpenAISpeechFormat, setOpenAISpeechRequestMode, preloadOpenAITTS,
     displayContent, processContentForDisplay,

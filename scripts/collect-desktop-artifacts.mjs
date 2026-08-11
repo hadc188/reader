@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -52,6 +52,16 @@ function firstBundleFile(extension) {
   throw new Error(`No ${extension} bundle found for ${target}`)
 }
 
+function copyArtifact(source, destination) {
+  if (!existsSync(source) || !statSync(source).isFile() || statSync(source).size === 0) {
+    throw new Error(`Bundle is missing or empty: ${source}`)
+  }
+  cpSync(source, destination)
+  if (!existsSync(destination) || statSync(destination).size === 0) {
+    throw new Error(`Failed to copy bundle: ${destination}`)
+  }
+}
+
 function firstExecutable() {
   const candidates = [
     join(root, 'target', target, 'release', 'reader-desktop.exe'),
@@ -65,7 +75,7 @@ function firstExecutable() {
 const prefix = `Reader-${version}-${platform}-${arch}`
 
 if (platform === 'windows') {
-  cpSync(firstBundleFile('.exe'), join(outputDir, `${prefix}-setup.exe`))
+  copyArtifact(firstBundleFile('.exe'), join(outputDir, `${prefix}-setup.exe`))
 
   const stage = join(tmpdir(), `reader-portable-${process.pid}`)
   rmSync(stage, { recursive: true, force: true })
@@ -74,7 +84,7 @@ if (platform === 'windows') {
   execFileSync('tar.exe', ['-a', '-c', '-f', join(outputDir, `${prefix}-portable.zip`), '-C', stage, 'Reader.exe'])
   rmSync(stage, { recursive: true, force: true })
 } else if (platform === 'macos') {
-  cpSync(firstBundleFile('.dmg'), join(outputDir, `${prefix}.dmg`))
+  copyArtifact(firstBundleFile('.dmg'), join(outputDir, `${prefix}.dmg`))
   const app = bundleRoots()
     .flatMap((rootPath) => findEntries(rootPath, (path) => path.toLowerCase().endsWith('.app')))
     .find(Boolean)
@@ -84,8 +94,8 @@ if (platform === 'windows') {
     join(outputDir, `${prefix}.zip`),
   ])
 } else if (platform === 'linux') {
-  cpSync(firstBundleFile('.appimage'), join(outputDir, `${prefix}.AppImage`))
-  cpSync(firstBundleFile('.deb'), join(outputDir, `${prefix}.deb`))
+  copyArtifact(firstBundleFile('.appimage'), join(outputDir, `${prefix}.AppImage`))
+  copyArtifact(firstBundleFile('.deb'), join(outputDir, `${prefix}.deb`))
 } else {
   throw new Error(`Unsupported release platform: ${platform}`)
 }

@@ -3,8 +3,9 @@
 #[cfg(target_os = "windows")]
 mod imp {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, MB_ICONERROR, MB_ICONWARNING, MB_OK,
+        MessageBoxW, MB_ICONERROR, MB_ICONWARNING, MB_OK, SW_SHOWNORMAL,
     };
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
 
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
@@ -33,7 +34,20 @@ mod imp {
     }
 
     pub fn open_external(url: &str) {
-        let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
+        let operation = wide("open");
+        let target = wide(url);
+        // SAFETY: both strings are NUL-terminated, and null optional arguments
+        // ask Windows to use the registered default browser.
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
+        }
     }
 }
 

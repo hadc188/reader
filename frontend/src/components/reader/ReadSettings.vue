@@ -221,7 +221,13 @@
       <div class="setting-row">
         <label>朗读引擎</label>
         <div class="btn-group">
-          <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'system' }" @click="store.setSpeechProvider('system')">系统语音</button>
+          <button
+            class="opt-btn"
+            :class="{ active: store.speechConfig.provider === 'system' }"
+            :disabled="!store.systemSpeechSupported"
+            :title="store.systemSpeechSupported ? '使用系统语音' : '当前系统不支持系统语音，请改用 API 语音'"
+            @click="store.setSpeechProvider('system')"
+          >系统语音</button>
           <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'openai' }" @click="store.setSpeechProvider('openai')">API 语音</button>
         </div>
       </div>

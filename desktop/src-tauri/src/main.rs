@@ -1,5 +1,8 @@
 // Release builds are GUI apps: no console window should flash on launch.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 mod portable;
 mod win;
@@ -29,7 +32,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Surface the existing window instead of starting a second instance.
             if let Some(window) = app.get_webview_window("main") {
@@ -48,8 +51,12 @@ fn main() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+
+    if let Err(err) = result {
+        win::fatal(&format!("应用运行失败：{err}"));
+        std::process::exit(1);
+    }
 }
 
 fn start(app: &mut App) -> anyhow::Result<()> {
@@ -86,34 +93,55 @@ fn start(app: &mut App) -> anyhow::Result<()> {
         // Custom title bar drawn by the frontend; this hides the native frame.
         .decorations(false)
         .center()
-        .on_navigation(|url| match url.scheme() {
-            // Exporting book sources and downloading WebDAV files navigate to
-            // blob: URLs created by the page itself.
-            "blob" | "about" => true,
-            // The app UI + custom reader scheme live under *.localhost.
-            _ => matches!(
+        .on_navigation(|url| {
+            let is_internal = matches!(
                 url.host_str(),
                 Some("tauri.localhost") | Some("reader.localhost") | Some("localhost")
-            ),
+            );
+            match url.scheme() {
+                // Exporting book sources and downloading backup files navigate
+                // to blob: URLs created by the page itself.
+                "blob" | "about" => true,
+                // Keep the application origins inside the webview. Ordinary
+                // links should use the system browser on every platform.
+                "http" | "https" if is_internal => true,
+                "http" | "https" => {
+                    win::open_external(url.as_str());
+                    false
+                }
+                _ => false,
+            }
         })
         .on_new_window(|url, _features| {
-            // The docs / GitHub links in the top bar are target="_blank".
-            win::open_external(url.as_str());
+            if matches!(url.scheme(), "http" | "https") {
+                win::open_external(url.as_str());
+            }
             NewWindowResponse::Deny
         })
         .build()?;
 
-    // The frontend resolves each intercepted close request using the persisted
-    // preference: hide to tray or destroy the window and exit.
-    let app_handle = app.handle().clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            let _ = app_handle.emit("close-requested", ());
+    // Some Linux desktop environments do not provide a status notifier. The
+    // app must still start there, and closing the window must really exit.
+    let tray_available = match setup_tray(app) {
+        Ok(()) => true,
+        Err(err) => {
+            eprintln!("阅读：系统托盘不可用：{err:#}");
+            win::warn("当前桌面环境无法创建系统托盘，关闭窗口时将直接退出应用。");
+            false
         }
-    });
+    };
 
-    setup_tray(app)?;
+    if tray_available {
+        // The frontend resolves each intercepted close request using the
+        // persisted preference: hide to tray or exit.
+        let app_handle = app.handle().clone();
+        window.on_window_event(move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = app_handle.emit("close-requested", ());
+            }
+        });
+    }
 
     Ok(())
 }
@@ -122,6 +150,10 @@ fn start(app: &mut App) -> anyhow::Result<()> {
 /// is hidden. Left-click / double-click shows the window; the menu offers show
 /// and quit.
 fn setup_tray(app: &mut App) -> anyhow::Result<()> {
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("应用图标不可用"))?;
     let show = MenuItemBuilder::with_id("show", "显示主界面").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
     let menu = tauri::menu::MenuBuilder::new(app)
@@ -130,7 +162,7 @@ fn setup_tray(app: &mut App) -> anyhow::Result<()> {
         .build()?;
 
     let tray = TrayIconBuilder::with_id("reader-tray")
-        .icon(app.default_window_icon().cloned().unwrap())
+        .icon(icon)
         .tooltip("阅读")
         .menu(&menu)
         .show_menu_on_left_click(false)

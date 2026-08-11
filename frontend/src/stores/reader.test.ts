@@ -102,6 +102,18 @@ describe('reader local txt chapters', () => {
     })
   })
 
+  it('reports unavailable system speech instead of failing silently', () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    const onError = vi.fn()
+
+    readerStore.startTTS('测试朗读', { onError })
+
+    expect(readerStore.systemSpeechSupported).toBe(false)
+    expect(onError).toHaveBeenCalledWith(expect.any(Error))
+    expect(appStore.toasts.at(-1)?.message).toContain('改用 API 语音')
+  })
+
   it('returns to the previous daytime theme after leaving the night theme', () => {
     const readerStore = useReaderStore()
     readerStore.setThemeIndex(2)

@@ -73,22 +73,35 @@ fn exe_dir() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("可执行文件没有上级目录"))
 }
 
-fn fallback_data_dir() -> anyhow::Result<PathBuf> {
-    let home = std::env::var_os(if cfg!(target_os = "windows") {
-        "LOCALAPPDATA"
-    } else {
-        "HOME"
-    })
-    .map(PathBuf::from)
-    .ok_or_else(|| anyhow!("无法定位用户数据目录"))?;
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
 
-    if cfg!(target_os = "macos") {
-        Ok(home.join("Library").join("Application Support"))
-    } else if cfg!(target_os = "windows") {
-        Ok(home)
-    } else {
-        Ok(home.join(".local").join("share"))
+#[cfg(target_os = "windows")]
+fn fallback_data_dir() -> anyhow::Result<PathBuf> {
+    env_path("LOCALAPPDATA")
+        .or_else(|| env_path("USERPROFILE").map(|path| path.join("AppData").join("Local")))
+        .or_else(|| env_path("APPDATA"))
+        .ok_or_else(|| anyhow!("无法定位 Windows 用户数据目录"))
+}
+
+#[cfg(target_os = "macos")]
+fn fallback_data_dir() -> anyhow::Result<PathBuf> {
+    env_path("HOME")
+        .map(|path| path.join("Library").join("Application Support"))
+        .ok_or_else(|| anyhow!("无法定位 macOS 用户数据目录"))
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn fallback_data_dir() -> anyhow::Result<PathBuf> {
+    if let Some(path) = env_path("XDG_DATA_HOME").filter(|path| path.is_absolute()) {
+        return Ok(path);
     }
+    env_path("HOME")
+        .map(|path| path.join(".local").join("share"))
+        .ok_or_else(|| anyhow!("无法定位 Linux 用户数据目录"))
 }
 
 /// `desktop/` in the source tree. Only meaningful for debug builds.

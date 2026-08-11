@@ -194,7 +194,6 @@ const localBookFileInputRef = ref<HTMLInputElement | null>(null)
 const localBookUploading = ref(false)
 
 onMounted(async () => {
-  await appStore.fetchUserInfo()
   await Promise.all([
     shelfStore.fetchBooks().catch(() => undefined),
     shelfStore.fetchGroups().catch(() => undefined),

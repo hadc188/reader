@@ -96,7 +96,7 @@ import type { ReplaceRule } from '../../types'
 
 const store = useReaderStore()
 const appStore = useAppStore()
-const theme = computed(() => store.currentTheme)
+const theme = computed(() => store.chromeTheme)
 const loading = ref(false)
 const editingRule = ref<ReplaceRule | null>(null)
 

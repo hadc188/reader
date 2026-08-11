@@ -7,6 +7,7 @@ import { applySystemTheme } from '../utils/systemUi'
 
 export const useAppStore = defineStore('app', () => {
   const STATS_KEY = 'reader-stats'
+  const CLOSE_TO_TRAY_KEY = 'reader-close-to-tray'
   // ─── Theme ───
   const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null
   const legacyReaderNight = localStorage.getItem('reader-isNight') === 'true'
@@ -28,6 +29,18 @@ export const useAppStore = defineStore('app', () => {
     localStorage.setItem('theme', val)
     applySystemTheme(val)
   }, { immediate: true })
+
+  // ─── Window close behavior ───
+  const closeToTray = ref(localStorage.getItem(CLOSE_TO_TRAY_KEY) === 'true')
+
+  function setCloseToTray(value: boolean) {
+    closeToTray.value = value
+    localStorage.setItem(CLOSE_TO_TRAY_KEY, String(value))
+  }
+
+  function toggleCloseToTray() {
+    setCloseToTray(!closeToTray.value)
+  }
 
   // ─── 隐藏功能（在设置里可隐藏统计、RSS 等导航入口）───
   const HIDDEN_FEATURES_KEY = 'reader-hidden-features'
@@ -68,11 +81,6 @@ export const useAppStore = defineStore('app', () => {
   let versionUpdateToastVersion = ''
   const canCheckVersionUpdate = computed(() => true)
   const hasVersionUpdateReminder = computed(() => !!versionUpdate.value?.shouldRemind)
-
-  async function fetchUserInfo() {
-    // Single-user desktop: no login, admin everything.
-    void checkVersionUpdate()
-  }
 
   async function checkVersionUpdate(force = false) {
     if (versionUpdateLoading.value) return versionUpdate.value
@@ -123,7 +131,6 @@ export const useAppStore = defineStore('app', () => {
   const showUserManager = ref(false)
   const showWebdavManager = ref(false)
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true)
-  const pwaReady = ref(false)
   const pwaUpdateAvailable = ref(false)
   const deferredInstallPrompt = ref<any>(null)
   const waitingServiceWorker = ref<ServiceWorker | null>(null)
@@ -239,10 +246,6 @@ export const useAppStore = defineStore('app', () => {
     isOnline.value = value
   }
 
-  function setPwaReady(value: boolean) {
-    pwaReady.value = value
-  }
-
   function setPwaUpdateAvailable(value: boolean) {
     pwaUpdateAvailable.value = value
   }
@@ -288,33 +291,17 @@ export const useAppStore = defineStore('app', () => {
     confirmState.value = null
   }
 
-  // ─── 关闭应用选择框（隐藏到托盘 / 直接退出 / 取消）───
-  const closeChoice = ref<null | {
-    resolve: (choice: 'tray' | 'quit' | 'cancel') => void
-  }>(null)
-
-  function askCloseChoice(): Promise<'tray' | 'quit' | 'cancel'> {
-    return new Promise((resolve) => {
-      closeChoice.value = { resolve }
-    })
-  }
-
-  function resolveCloseChoice(choice: 'tray' | 'quit' | 'cancel') {
-    closeChoice.value?.resolve(choice)
-    closeChoice.value = null
-  }
-
   return {
     theme, setTheme, toggleTheme,
+    closeToTray, setCloseToTray, toggleCloseToTray,
     versionUpdate, versionUpdateLoading, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
-    fetchUserInfo, checkVersionUpdate, dismissVersionUpdateReminder,
+    checkVersionUpdate, dismissVersionUpdateReminder,
     showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager,
-    isOnline, pwaReady, pwaUpdateAvailable, deferredInstallPrompt, waitingServiceWorker,
-    setOnlineStatus, setPwaReady, setPwaUpdateAvailable, setDeferredInstallPrompt, setWaitingServiceWorker, installPwa, applyPwaUpdate,
+    isOnline, pwaUpdateAvailable, deferredInstallPrompt, waitingServiceWorker,
+    setOnlineStatus, setPwaUpdateAvailable, setDeferredInstallPrompt, setWaitingServiceWorker, installPwa, applyPwaUpdate,
     readingStats, readingStatsSummary, startReadingSession, stopReadingSession, setReadingSessionBook, markBookOpened, markChapterRead,
     toasts, showToast,
     confirmState, confirmDialog, resolveConfirm,
-    closeChoice, askCloseChoice, resolveCloseChoice,
     hiddenFeatures, isFeatureHidden, toggleHiddenFeature,
   }
 })

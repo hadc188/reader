@@ -38,7 +38,7 @@ import { getCoverUrl } from '../../api/bookshelf'
 import type { Book } from '../../types'
 const store = useBookshelfStore()
 const readerStore = useReaderStore()
-const theme = computed(() => readerStore.currentTheme)
+const theme = computed(() => readerStore.chromeTheme)
 
 if (!store.books.length) {
   store.fetchBooks()

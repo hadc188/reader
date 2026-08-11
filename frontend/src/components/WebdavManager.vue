@@ -9,7 +9,7 @@
           <header class="modal-header">
             <div>
               <h2>本地备份与文件管理</h2>
-              <p class="subtitle">将书架、书源、RSS、书签、净化规则和本地阅读配置备份到本地</p>
+              <p class="subtitle">备份书架、书源、RSS、书签、净化规则和阅读配置，兼容 Legado 备份</p>
             </div>
             <button class="icon-btn" @click="close" aria-label="关闭">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -47,6 +47,7 @@
                   ref="fileInputRef"
                   type="file"
                   multiple
+                  accept=".json,.zip,application/json,application/zip"
                   class="hidden-input"
                   @change="handleUpload"
                 />
@@ -134,8 +135,10 @@
 import { computed, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import {
+  createWebdavBackupArchive,
   deleteWebdavFile,
   deleteWebdavFileList,
+  getWebdavBackupArchive,
   getWebdavFileBlob,
   getWebdavFileList,
   getWebdavFileText,
@@ -143,13 +146,13 @@ import {
   openWebdavFolder,
   type WebdavFileEntry,
   uploadFilesToWebdav,
-  uploadTextToWebdav,
 } from '../api/webdav'
 import {
+  createCompatibleBackupArchiveFiles,
+  parseCompatibleBackupArchive,
   createWebdavBackupPayload,
   parseWebdavBackup,
   restoreWebdavBackup,
-  serializeWebdavBackup,
 } from '../utils/webdavBackup'
 
 type EntryRow = WebdavFileEntry & { toParent?: boolean }
@@ -208,7 +211,8 @@ async function openFolder() {
 }
 
 function isBackupFile(name: string) {
-  return name.toLowerCase().endsWith('.json')
+  const lowerName = name.toLowerCase()
+  return lowerName.endsWith('.json') || lowerName.endsWith('.zip')
 }
 
 function formatSize(size: number) {
@@ -306,15 +310,15 @@ async function handleUpload(event: Event) {
 function buildBackupFilename() {
   const now = new Date()
   const pad = (value: number) => String(value).padStart(2, '0')
-  return `reader-backup-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.json`
+  return `backup${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-reader-desktop-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.zip`
 }
 
 async function createBackup() {
   working.value = true
   try {
     const payload = await createWebdavBackupPayload()
-    await uploadTextToWebdav(
-      serializeWebdavBackup(payload),
+    await createWebdavBackupArchive(
+      createCompatibleBackupArchiveFiles(payload),
       buildBackupFilename(),
       '/backups',
     )
@@ -378,17 +382,25 @@ async function removeSelected() {
 }
 
 async function restoreBackup(entry: EntryRow) {
-  const ok = await appStore.confirmDialog(`确定从 ${entry.name} 恢复数据吗？这会覆盖当前书架、书源、RSS、书签和相关本地配置。`, { title: '恢复数据', danger: true })
+  const ok = await appStore.confirmDialog(`确定从 ${entry.name} 恢复数据吗？这会覆盖当前书架、书源、RSS、书签和净化规则。`, { title: '恢复数据', danger: true })
   if (!ok) {
     return
   }
 
   working.value = true
   try {
-    const raw = await getWebdavFileText(entry.path)
-    const payload = parseWebdavBackup(raw)
-    await restoreWebdavBackup(payload)
-    appStore.showToast('恢复完成，正在刷新页面', 'success')
+    const result = entry.name.toLowerCase().endsWith('.zip')
+      ? parseCompatibleBackupArchive(await getWebdavBackupArchive(entry.path))
+      : {
+          payload: parseWebdavBackup(await getWebdavFileText(entry.path)),
+          format: 'reader' as const,
+          skippedLocalBooks: 0,
+        }
+    await restoreWebdavBackup(result.payload)
+    const skippedMessage = result.skippedLocalBooks > 0
+      ? `，已跳过 ${result.skippedLocalBooks} 本仅含安卓路径的本地书籍`
+      : ''
+    appStore.showToast(`恢复完成${skippedMessage}，正在刷新页面`, 'success')
     window.setTimeout(() => {
       window.location.reload()
     }, 800)

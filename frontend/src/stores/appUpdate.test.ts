@@ -3,10 +3,6 @@ import { createPinia, setActivePinia } from 'pinia'
 import { useAppStore } from './app'
 import { getVersionUpdate, dismissVersionUpdate } from '../api/update'
 
-vi.mock('../api/user', () => ({
-  getUserInfo: vi.fn(),
-}))
-
 vi.mock('../api/update', () => ({
   getVersionUpdate: vi.fn(),
   dismissVersionUpdate: vi.fn(),

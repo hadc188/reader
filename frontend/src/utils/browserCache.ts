@@ -74,7 +74,6 @@ async function withStore<T>(mode: IDBTransactionMode, handler: (store: IDBObject
       })
   })
 }
-
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result)
@@ -150,11 +149,5 @@ export async function listBrowserCacheSummary(): Promise<BrowserBookCacheSummary
     })
 
     return Array.from(summaryMap.values()).sort((a, b) => b.updatedAt - a.updatedAt)
-  })
-}
-
-export async function clearAllBrowserCache() {
-  return withStore('readwrite', async (store) => {
-    await requestToPromise(store.clear())
   })
 }

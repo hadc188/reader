@@ -141,7 +141,7 @@ type CandidateItem = {
 const store = useReaderStore()
 const appStore = useAppStore()
 const sourceStore = useSourceStore()
-const theme = computed(() => store.currentTheme)
+const theme = computed(() => store.chromeTheme)
 const searching = ref(false)
 const loadingMore = ref(false)
 const results = ref<SearchBook[]>([])

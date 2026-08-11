@@ -22,6 +22,10 @@ import { getBrowserCachedChapter, setBrowserCachedChapter } from '../utils/brows
 import { isLocalBook } from '../utils/localBook'
 import { saveRecentReadBook } from '../utils/recentBooks'
 import {
+  DEFAULT_READER_BACKGROUND_OPACITY,
+  normalizeReaderBackgroundOpacity,
+} from '../utils/readerBackground'
+import {
   DEFAULT_OPENAI_BASE_URL,
   getSpeechApiFormatOption,
   inferSpeechApiFormat,
@@ -32,6 +36,7 @@ import {
 
 const READER_SESSION_KEY = 'reader-last-session'
 const READER_READ_HISTORY_PREFIX = 'reader-read-history:'
+const READER_BACKGROUND_IMAGE_KEY = 'reader-background-image'
 const SERVER_PROGRESS_SCALE = 10000
 
 interface PersistedReaderSession {
@@ -63,6 +68,9 @@ export interface ReadConfig {
   chineseMode: 'simplified' | 'traditional'
   specialMode: 'normal' | 'simple'
   enablePreload: boolean
+  backgroundImage: string
+  backgroundOpacity: number
+  applyBackgroundToReader: boolean
 }
 
 const defaultConfig: ReadConfig = {
@@ -85,12 +93,27 @@ const defaultConfig: ReadConfig = {
   chineseMode: 'simplified',
   specialMode: 'normal',
   enablePreload: false,
+  backgroundImage: '',
+  backgroundOpacity: DEFAULT_READER_BACKGROUND_OPACITY,
+  applyBackgroundToReader: true,
 }
 
 function loadConfig(): ReadConfig {
   try {
     const saved = localStorage.getItem('readConfig')
-    if (saved) return { ...defaultConfig, ...JSON.parse(saved) }
+    if (saved) {
+      const parsed = JSON.parse(saved) as Partial<ReadConfig>
+      return {
+        ...defaultConfig,
+        ...parsed,
+        backgroundImage: localStorage.getItem(READER_BACKGROUND_IMAGE_KEY)
+          || (typeof parsed.backgroundImage === 'string' ? parsed.backgroundImage : ''),
+        backgroundOpacity: normalizeReaderBackgroundOpacity(parsed.backgroundOpacity),
+        applyBackgroundToReader: typeof parsed.applyBackgroundToReader === 'boolean'
+          ? parsed.applyBackgroundToReader
+          : true,
+      }
+    }
   } catch { /* ignore */ }
   return { ...defaultConfig }
 }
@@ -235,7 +258,9 @@ export const useReaderStore = defineStore('reader', () => {
   const config = reactive<ReadConfig>(loadConfig())
 
   function saveConfig() {
-    localStorage.setItem('readConfig', JSON.stringify(config))
+    const persistedConfig: Partial<ReadConfig> = { ...config }
+    delete persistedConfig.backgroundImage
+    localStorage.setItem('readConfig', JSON.stringify(persistedConfig))
   }
 
   function updateConfig<K extends keyof ReadConfig>(key: K, value: ReadConfig[K]) {
@@ -247,8 +272,28 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function resetConfig() {
+    const backgroundPreferences = {
+      backgroundImage: config.backgroundImage,
+      backgroundOpacity: config.backgroundOpacity,
+      applyBackgroundToReader: config.applyBackgroundToReader,
+    }
     Object.assign(config, defaultConfig)
+    Object.assign(config, backgroundPreferences)
     saveConfig()
+  }
+
+  function setBackgroundImage(dataUrl: string) {
+    try {
+      localStorage.setItem(READER_BACKGROUND_IMAGE_KEY, dataUrl)
+      config.backgroundImage = dataUrl
+    } catch {
+      throw new Error('背景图片保存失败，请选择尺寸更小的图片')
+    }
+  }
+
+  function clearBackgroundImage() {
+    localStorage.removeItem(READER_BACKGROUND_IMAGE_KEY)
+    config.backgroundImage = ''
   }
 
   const chineseConverter = ref<((text: string) => string) | null>(null)
@@ -283,6 +328,14 @@ export const useReaderStore = defineStore('reader', () => {
   const currentTheme = computed(() => {
     if (isNight.value) return themePresets[nightThemeIndex]
     return themePresets[themeIndex.value] || themePresets[0]
+  })
+  const chromeTheme = computed<ThemePreset>(() => {
+    const activeTheme = currentTheme.value
+    if (!config.backgroundImage || !config.applyBackgroundToReader) return activeTheme
+    return {
+      ...activeTheme,
+      popup: `color-mix(in srgb, ${activeTheme.popup} 84%, transparent)`,
+    }
   })
 
   function setThemeIndex(idx: number) {
@@ -1661,8 +1714,8 @@ export const useReaderStore = defineStore('reader', () => {
       chapterScrollProgress, setChapterScrollProgress,
       getPersistedReaderSession, restorePersistedSession,
       persistProgress, flushProgressToServer, flushProgressToServerKeepalive,
-      config, updateConfig, resetConfig, saveConfig,
-    themeIndex, isNight, currentTheme, setThemeIndex, toggleNight,
+      config, updateConfig, resetConfig, saveConfig, setBackgroundImage, clearBackgroundImage,
+    themeIndex, isNight, currentTheme, chromeTheme, setThemeIndex, toggleNight,
     autoReading, autoReadingTimer, toggleAutoReading, stopAutoReading,
     activePanel, openPanel, togglePanel, backPanel, closePanel,
     bookmarks, fetchBookmarks, addBookmark, removeBookmark, removeBookmarks,

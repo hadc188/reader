@@ -1,7 +1,10 @@
 <template>
   <div
     class="titlebar"
-    :class="{ 'reader-titlebar': isReader }"
+    :class="{
+      'reader-titlebar': isReader,
+      'has-custom-background': hasCustomBackground,
+    }"
     :style="titlebarStyle"
   >
     <div class="titlebar-drag" data-tauri-drag-region @dblclick="toggleMaximize">
@@ -34,15 +37,26 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 const appWindow = isTauri ? getCurrentWindow() : null
 const isMaximized = ref(false)
 const isReader = computed(() => route.name === 'reader')
-const titlebarStyle = computed(() => isReader.value
-  ? {
-      background: readerStore.currentTheme.body,
+const hasCustomBackground = computed(() => Boolean(readerStore.config.backgroundImage) && (
+  route.name === 'home'
+  || (isReader.value && readerStore.config.applyBackgroundToReader)
+))
+const titlebarStyle = computed(() => {
+  if (isReader.value) {
+    return {
+      background: hasCustomBackground.value
+        ? `color-mix(in srgb, ${readerStore.currentTheme.body} 24%, transparent)`
+        : readerStore.currentTheme.body,
       color: readerStore.currentTheme.fontColor,
     }
-  : {
-      background: 'var(--color-bg-elevated)',
-      color: 'var(--color-text-secondary)',
-    })
+  }
+  return {
+    background: hasCustomBackground.value
+      ? 'color-mix(in srgb, var(--color-bg-elevated) 30%, transparent)'
+      : 'var(--color-bg-elevated)',
+    color: 'var(--color-text-secondary)',
+  }
+})
 
 async function minimize() {
   await appWindow?.minimize()
@@ -94,6 +108,13 @@ onBeforeUnmount(() => cleanup())
 
 .titlebar.reader-titlebar {
   border-bottom-color: transparent;
+}
+
+.titlebar.has-custom-background {
+  border-bottom-color: color-mix(in srgb, currentColor 10%, transparent);
+  backdrop-filter: blur(4px) saturate(115%);
+  -webkit-backdrop-filter: blur(4px) saturate(115%);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
 }
 
 .titlebar-drag {

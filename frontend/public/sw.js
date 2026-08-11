@@ -1,5 +1,5 @@
-const SHELL_CACHE = 'reader-shell-v1-0-1'
-const RUNTIME_CACHE = 'reader-runtime-v1-0-1'
+const SHELL_CACHE = 'reader-shell-v1-0-2'
+const RUNTIME_CACHE = 'reader-runtime-v1-0-2'
 const SHELL_ASSETS = [
   '/',
   '/index.html',

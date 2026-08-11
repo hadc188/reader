@@ -1,5 +1,9 @@
 <template>
-  <nav class="reader-sidebar" :style="{ background: theme.popup, color: theme.fontColor }">
+  <nav
+    class="reader-sidebar"
+    :class="{ revealed: !!store.activePanel || edgeActive }"
+    :style="{ '--reader-toolbar-bg': theme.popup, color: theme.fontColor }"
+  >
     <div class="sidebar-items">
       <div class="sidebar-item" :class="{ active: store.activePanel === 'bookshelf' }" @click="store.togglePanel('bookshelf')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
@@ -41,7 +45,11 @@ import { computed } from 'vue'
 import { useReaderStore } from '../../stores/reader'
 
 const store = useReaderStore()
-const theme = computed(() => store.currentTheme)
+const theme = computed(() => store.chromeTheme)
+
+defineProps<{
+  edgeActive?: boolean
+}>()
 
 defineEmits<{
   goHome: []
@@ -55,7 +63,7 @@ defineEmits<{
   position: fixed;
   left: 0;
   top: 50%;
-  transform: translateY(-50%);
+  transform: translate(calc(-100% + 18px), -50%);
   width: 64px;
   z-index: 20;
   display: flex;
@@ -64,10 +72,51 @@ defineEmits<{
   gap: 32px;
   padding: 24px 0;
   border-radius: 0 16px 16px 0;
-  box-shadow: 2px 0 16px rgba(0,0,0,0.06);
-  border: 1px solid rgba(0,0,0,0.06);
+  background: transparent;
+  box-shadow: none;
+  border: 1px solid transparent;
   border-left: none;
-  transition: background 0.3s;
+  transition: transform 0.24s ease, background 0.2s, border-color 0.2s, box-shadow 0.2s;
+  will-change: transform;
+}
+
+.reader-sidebar::after {
+  content: '›';
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: 18px;
+  height: 68px;
+  display: grid;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+  background: var(--reader-toolbar-bg);
+  box-shadow: 3px 0 12px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  font-size: 18px;
+  opacity: 0.78;
+  transition: opacity 0.14s ease;
+}
+
+.reader-sidebar:hover,
+.reader-sidebar:focus-within,
+.reader-sidebar.revealed {
+  transform: translate(0, -50%);
+  background: var(--reader-toolbar-bg);
+  border-color: color-mix(in srgb, currentColor 10%, transparent);
+  box-shadow: 2px 0 18px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(18px) saturate(120%);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+}
+
+.reader-sidebar:hover::after,
+.reader-sidebar:focus-within::after,
+.reader-sidebar.revealed::after {
+  opacity: 0;
 }
 
 .sidebar-items {
@@ -75,6 +124,16 @@ defineEmits<{
   flex-direction: column;
   align-items: center;
   gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease;
+}
+
+.reader-sidebar:hover .sidebar-items,
+.reader-sidebar:focus-within .sidebar-items,
+.reader-sidebar.revealed .sidebar-items {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .sidebar-items.bottom {

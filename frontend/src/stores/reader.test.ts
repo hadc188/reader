@@ -119,6 +119,36 @@ describe('reader local txt chapters', () => {
     expect(readerStore.currentTheme.name).toBe('琥珀')
   })
 
+  it('persists and removes a custom reading background', () => {
+    const readerStore = useReaderStore()
+    const image = 'data:image/webp;base64,dGVzdA=='
+
+    readerStore.setBackgroundImage(image)
+    readerStore.updateConfig('backgroundOpacity', 0.6)
+    expect(readerStore.chromeTheme.popup).toBe('color-mix(in srgb, #fff 84%, transparent)')
+    readerStore.updateConfig('applyBackgroundToReader', false)
+
+    expect(readerStore.config.backgroundImage).toBe(image)
+    expect(readerStore.config.backgroundOpacity).toBe(0.6)
+    expect(readerStore.config.applyBackgroundToReader).toBe(false)
+    expect(readerStore.chromeTheme.popup).toBe('#fff')
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'reader-background-image',
+      image,
+    )
+
+    readerStore.updateConfig('fontSize', 30)
+    readerStore.resetConfig()
+    expect(readerStore.config.fontSize).toBe(18)
+    expect(readerStore.config.backgroundImage).toBe(image)
+    expect(readerStore.config.backgroundOpacity).toBe(0.6)
+    expect(readerStore.config.applyBackgroundToReader).toBe(false)
+
+    readerStore.clearBackgroundImage()
+    expect(readerStore.config.backgroundImage).toBe('')
+    expect(localStorage.removeItem).toHaveBeenCalledWith('reader-background-image')
+  })
+
   it('keeps API audio active and resumes from the paused position', async () => {
     const audioInstances: MockAudio[] = []
 

@@ -50,9 +50,7 @@ export function registerPwa(appStore: AppStore) {
 
   if (isLocalhostEnv()) {
     window.addEventListener('load', () => {
-      void clearServiceWorkerCaches().finally(() => {
-        appStore.setPwaReady(false)
-      })
+      void clearServiceWorkerCaches()
     })
     return
   }
@@ -81,8 +79,6 @@ export function registerPwa(appStore: AppStore) {
 
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').then((registration) => {
-      appStore.setPwaReady(true)
-
       if (registration.waiting) {
         bindWaitingWorker(registration.waiting)
       }
@@ -112,8 +108,6 @@ export function registerPwa(appStore: AppStore) {
         if (!navigator.onLine) return
         void checkForUpdates(registration)
       }, 5 * 60 * 1000)
-    }).catch(() => {
-      appStore.setPwaReady(false)
-    })
+    }).catch(() => undefined)
   })
 }

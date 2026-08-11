@@ -5,10 +5,8 @@ let tcStr =
 
 // 构建映射字典
 const scToTcMap = {};
-const tcToScMap = {};
 for (let i = 0; i < scStr.length; i++) {
   scToTcMap[scStr[i]] = tcStr[i];
-  tcToScMap[tcStr[i]] = scStr[i];
 }
 
 // 释放内存
@@ -21,19 +19,6 @@ export const traditionalized = function(orgStr) {
     const char = orgStr[i];
     if (char.charCodeAt(0) > 10000) {
       str += scToTcMap[char] || char;
-    } else {
-      str += char;
-    }
-  }
-  return str;
-};
-
-export const simplized = function(orgStr) {
-  let str = "";
-  for (let i = 0; i < orgStr.length; i++) {
-    const char = orgStr[i];
-    if (char.charCodeAt(0) > 10000) {
-      str += tcToScMap[char] || char;
     } else {
       str += char;
     }

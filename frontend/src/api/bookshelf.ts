@@ -9,10 +9,6 @@ export function getBookshelfWithCacheInfo() {
   return get<Book[]>('/getShelfBookWithCacheInfo').then((r) => r.data)
 }
 
-export function getShelfBook(url: string) {
-  return post<Book>('/getShelfBook', { url }).then((r) => r.data)
-}
-
 export function saveBook(book: Partial<Book>) {
   return post<Book>('/saveBook', book).then((r) => r.data)
 }

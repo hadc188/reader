@@ -1,4 +1,3 @@
-import { post } from './invoke'
 import { openSse } from './sse'
 
 /**
@@ -18,11 +17,4 @@ export function cacheBookSSE(params: {
     ...(params.refresh ? { refresh: params.refresh } : {}),
     ...(params.concurrentCount ? { concurrentCount: params.concurrentCount } : {}),
   })
-}
-
-/**
- * Delete all content cache for a book
- */
-export function deleteBookCache(bookUrl: string) {
-  return post('/deleteBookCache', { bookUrl }).then((r) => r.data)
 }

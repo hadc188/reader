@@ -86,8 +86,6 @@ pub struct BookContentRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct DeleteCacheRequest {
-    #[serde(rename = "chapterUrl")]
-    chapter_url: Option<String>,
     url: Option<String>,
     #[serde(rename = "bookUrl")]
     book_url: Option<String>,
@@ -137,8 +135,6 @@ pub struct SearchBookMultiSseRequest {
     book_source_group: Option<String>,
     #[serde(rename = "lastIndex")]
     last_index: Option<i32>,
-    #[serde(rename = "searchSize")]
-    search_size: Option<i32>,
     #[serde(rename = "concurrentCount")]
     concurrent_count: Option<i32>,
 }
@@ -2411,19 +2407,6 @@ fn is_local_book(book: &Book) -> bool {
         || is_local_epub_url(&book.book_url)
 }
 
-fn local_book_limit_exceeded(books: &[Book], incoming_book_url: &str, limit: u32) -> bool {
-    if limit == 0 {
-        return false;
-    }
-    if books
-        .iter()
-        .any(|book| is_local_book(book) && book.book_url == incoming_book_url)
-    {
-        return false;
-    }
-    books.iter().filter(|book| is_local_book(book)).count() >= limit as usize
-}
-
 fn available_source_sse_result_key(book: &SearchBook) -> String {
     format!("{}::{}", book.origin, book.book_url)
 }
@@ -2490,7 +2473,7 @@ fn take_available_source_sse_matches(
 mod tests {
     use super::{
         book_matches_delete_target, build_available_book_source_response,
-        cache_count_for_shelf_display, fallback_available_book, local_book_limit_exceeded,
+        cache_count_for_shelf_display, fallback_available_book,
         should_use_available_source_cache, take_available_source_cached_matches,
         take_available_source_sse_matches, GetAvailableBookSourceRequest,
     };
@@ -2562,32 +2545,6 @@ mod tests {
         };
 
         assert_eq!(cache_count_for_shelf_display(&book, 42), 0);
-    }
-
-    #[test]
-    fn local_book_limit_counts_txt_and_epub_but_allows_existing_book() {
-        let books = vec![
-            Book {
-                origin: "local-txt".to_string(),
-                book_url: "local-txt:abc".to_string(),
-                ..Book::default()
-            },
-            Book {
-                origin: "local-epub".to_string(),
-                book_url: "local-epub:def".to_string(),
-                ..Book::default()
-            },
-            Book {
-                origin: "https://source.test".to_string(),
-                book_url: "https://source.test/book/1".to_string(),
-                ..Book::default()
-            },
-        ];
-
-        assert!(!local_book_limit_exceeded(&books, "local-epub:new", 0));
-        assert!(local_book_limit_exceeded(&books, "local-epub:new", 2));
-        assert!(!local_book_limit_exceeded(&books, "local-epub:def", 2));
-        assert!(!local_book_limit_exceeded(&books, "local-epub:new", 3));
     }
 
     #[test]

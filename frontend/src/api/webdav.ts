@@ -8,6 +8,16 @@ export interface WebdavFileEntry {
   isDirectory: boolean
 }
 
+export interface BackupArchiveFile {
+  name: string
+  content: string
+}
+
+export interface WebdavBinaryResponse {
+  bytes: number[] | Uint8Array | ArrayBuffer
+  content_type?: string | null
+}
+
 export function getWebdavFileList(path = '/') {
   return get<WebdavFileEntry[]>('/getWebdavFileList', {
     params: { path },
@@ -15,15 +25,35 @@ export function getWebdavFileList(path = '/') {
 }
 
 export function getWebdavFileText(path: string) {
-  return get<string>('/getWebdavFile', {
+  return get<WebdavBinaryResponse>('/getWebdavFile', {
     params: { path },
-  }).then((r) => r.data as unknown as string)
+  }).then((r) => decodeWebdavFileText(r.data))
 }
 
 export function getWebdavFileBlob(path: string) {
-  return get<Blob>('/getWebdavFile', {
+  return get<WebdavBinaryResponse>('/getWebdavFile', {
     params: { path },
-  }).then((r) => r.data)
+  }).then((r) => createWebdavFileBlob(r.data))
+}
+
+export function decodeWebdavFileText(response: WebdavBinaryResponse) {
+  return new TextDecoder('utf-8', { fatal: true }).decode(toUint8Array(response.bytes))
+}
+
+export function createWebdavFileBlob(response: WebdavBinaryResponse) {
+  const bytes = toUint8Array(response.bytes)
+  const copy = new Uint8Array(bytes.byteLength)
+  copy.set(bytes)
+  return new Blob([copy.buffer], {
+    type: response.content_type || 'application/octet-stream',
+  })
+}
+
+function toUint8Array(bytes: WebdavBinaryResponse['bytes']) {
+  if (bytes instanceof Uint8Array) return bytes
+  if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes)
+  if (Array.isArray(bytes)) return Uint8Array.from(bytes)
+  throw new Error('文件数据格式无效')
 }
 
 export async function uploadFilesToWebdav(files: Array<{ file: Blob; name: string }>, path = '/') {
@@ -36,9 +66,22 @@ export async function uploadFilesToWebdav(files: Array<{ file: Blob; name: strin
   return invokeEnvelope<WebdavFileEntry[]>('upload_file_to_webdav', { path, files: uploadFiles })
 }
 
-export function uploadTextToWebdav(content: string, filename: string, path = '/') {
-  const blob = new Blob([content], { type: 'application/json;charset=utf-8' })
-  return uploadFilesToWebdav([{ file: blob, name: filename }], path)
+export function createWebdavBackupArchive(
+  files: BackupArchiveFile[],
+  filename: string,
+  path = '/backups',
+) {
+  return invokeEnvelope<WebdavFileEntry>('create_webdav_backup_archive', {
+    files,
+    filename,
+    path,
+  })
+}
+
+export function getWebdavBackupArchive(path: string) {
+  return get<Record<string, string>>('/getWebdavBackupArchive', {
+    params: { path },
+  }).then((r) => r.data)
 }
 
 export function deleteWebdavFile(path: string) {

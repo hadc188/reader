@@ -401,7 +401,7 @@ import {
 
 const store = useReaderStore()
 const config = computed(() => store.config)
-const theme = computed(() => store.currentTheme)
+const theme = computed(() => store.chromeTheme)
 const isDarkSettings = computed(() => store.isNight || theme.value.name === '暗灰')
 const selectedSpeechApiFormat = computed(() => getSpeechApiFormatOption(store.speechConfig.apiFormat))
 

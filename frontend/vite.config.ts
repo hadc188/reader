@@ -27,9 +27,6 @@ export default defineConfig({
           if (id.includes('node_modules/vue') || id.includes('node_modules/pinia') || id.includes('node_modules/vue-router')) {
             return 'vendor-core'
           }
-          if (id.includes('node_modules/axios')) {
-            return 'vendor-http'
-          }
           if (id.includes('node_modules')) {
             return 'vendor-misc'
           }

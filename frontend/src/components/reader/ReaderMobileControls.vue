@@ -107,7 +107,7 @@ import { computed } from 'vue'
 import { useReaderStore } from '../../stores/reader'
 
 const store = useReaderStore()
-const theme = computed(() => store.currentTheme)
+const theme = computed(() => store.chromeTheme)
 
 defineProps<{ 
   show: boolean

@@ -119,7 +119,7 @@ import { isLocalBook } from '../../utils/localBook'
 
 const store = useReaderStore()
 const appStore = useAppStore()
-const theme = computed(() => store.currentTheme)
+const theme = computed(() => store.chromeTheme)
 
 const working = ref(false)
 const progress = ref(0)

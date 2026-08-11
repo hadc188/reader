@@ -111,9 +111,6 @@ export interface BookSourceTestResponse {
   results: BookSourceTestResult[]
 }
 
-// ─── 书源调试 ───
-export type SourceDebugStep = 'search' | 'bookInfo' | 'toc' | 'content'
-
 export interface DebugTrace {
   requestUrl: string
   status: number
@@ -126,17 +123,6 @@ export interface BookGroup {
   groupId: number
   groupName: string
   orderNo?: number
-}
-
-// ─── 用户 ───
-export interface UserInfo {
-  username: string
-  lastLoginAt?: number
-  accessToken: string
-  enableWebdav?: boolean
-  enableLocalStore?: boolean
-  createdAt?: number
-  isAdmin?: boolean
 }
 
 // ─── 应用更新 ───

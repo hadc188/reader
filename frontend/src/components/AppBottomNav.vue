@@ -263,7 +263,7 @@ onBeforeUnmount(() => {
   bottom: calc(12px + var(--safe-area-bottom));
   transform: translateX(-50%);
   z-index: calc(var(--z-sticky) + 2);
-  width: min(560px, calc(100vw - 24px));
+  width: min(620px, calc(100vw - 24px));
 }
 
 .bottom-nav {
@@ -271,8 +271,8 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   align-items: center;
-  gap: 4px;
-  padding: 5px;
+  gap: 5px;
+  padding: 7px;
   border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--color-bg-elevated) 93%, transparent);
   border: 1px solid var(--color-border);
@@ -289,8 +289,8 @@ onBeforeUnmount(() => {
 
 .nav-indicator {
   position: absolute;
-  top: 5px;
-  bottom: 5px;
+  top: 7px;
+  bottom: 7px;
   left: 0;
   border-radius: var(--radius-full);
   background: var(--color-primary-bg);
@@ -312,11 +312,11 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  min-height: 46px;
+  gap: 8px;
+  min-height: 54px;
   border-radius: var(--radius-full);
   color: var(--color-text-secondary);
-  font-size: var(--text-sm);
+  font-size: 14px;
   font-weight: 500;
   transition: color 180ms ease, transform 180ms ease;
 }
@@ -326,8 +326,8 @@ onBeforeUnmount(() => {
 }
 
 .nav-item svg {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   flex-shrink: 0;
 }
 
@@ -355,14 +355,24 @@ onBeforeUnmount(() => {
   }
 
   .bottom-nav {
-    gap: 2px;
-    padding: 4px;
+    gap: 3px;
+    padding: 5px;
   }
 
   .nav-item {
-    min-height: 46px;
+    min-height: 52px;
     gap: 6px;
     font-size: 13px;
+  }
+
+  .nav-indicator {
+    top: 5px;
+    bottom: 5px;
+  }
+
+  .nav-item svg {
+    width: 23px;
+    height: 23px;
   }
 }
 </style>

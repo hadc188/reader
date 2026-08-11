@@ -47,8 +47,7 @@ fn data_dir() -> anyhow::Result<(PathBuf, bool)> {
         return Ok((portable, false));
     }
 
-    // Typically the app was unpacked somewhere like Program Files.
-    let fallback = local_app_data()?.join("reader").join("data");
+    let fallback = fallback_data_dir()?.join("reader").join("data");
     let first_time = !fallback.exists();
     Ok((fallback, first_time))
 }
@@ -74,10 +73,22 @@ fn exe_dir() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("可执行文件没有上级目录"))
 }
 
-fn local_app_data() -> anyhow::Result<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("环境变量 LOCALAPPDATA 未设置"))
+fn fallback_data_dir() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os(if cfg!(target_os = "windows") {
+        "LOCALAPPDATA"
+    } else {
+        "HOME"
+    })
+    .map(PathBuf::from)
+    .ok_or_else(|| anyhow!("无法定位用户数据目录"))?;
+
+    if cfg!(target_os = "macos") {
+        Ok(home.join("Library").join("Application Support"))
+    } else if cfg!(target_os = "windows") {
+        Ok(home)
+    } else {
+        Ok(home.join(".local").join("share"))
+    }
 }
 
 /// `desktop/` in the source tree. Only meaningful for debug builds.

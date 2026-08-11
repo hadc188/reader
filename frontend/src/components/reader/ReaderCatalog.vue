@@ -154,7 +154,7 @@ const emit = defineEmits<{
 
 const store = useReaderStore()
 const appStore = useAppStore()
-const theme = computed(() => store.currentTheme)
+const theme = computed(() => store.chromeTheme)
 const activeTab = ref<'chapters' | 'bookmarks'>(props.initialTab)
 const listRef = ref<HTMLElement>()
 const bookmarkEditMode = ref(false)

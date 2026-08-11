@@ -6,10 +6,6 @@ export function getBookSources() {
   return get<BookSource[]>('/getBookSources').then((r) => r.data)
 }
 
-export function getDefaultBookSourceOwner() {
-  return get<{ username: string | null }>('/getDefaultBookSourceOwner').then((r) => r.data)
-}
-
 export function loginBookSource(bookSourceUrl: string) {
   return post<{
     success: boolean
@@ -19,10 +15,6 @@ export function loginBookSource(bookSourceUrl: string) {
     bodyPreview?: string
     bodyHtml?: string
   }>('/loginBookSource', { bookSourceUrl }).then((r) => r.data)
-}
-
-export function getBookSource(bookSourceUrl: string) {
-  return post<BookSource>('/getBookSource', { bookSourceUrl }).then((r) => r.data)
 }
 
 export function saveBookSource(source: BookSource) {
@@ -69,10 +61,6 @@ export function deleteInvalidBookSources() {
   return post<{ deleted: number }>('/deleteInvalidBookSources').then((r) => r.data)
 }
 
-export function setAsDefaultBookSources(username: string) {
-  return post<{ success: boolean; count: number }>('/setAsDefaultBookSources', { username }).then((r) => r.data)
-}
-
 export function readRemoteSourceFile(url: string) {
   return post<string[]>('/readRemoteSourceFile', { url }).then((r) => r.data)
 }
@@ -82,8 +70,4 @@ export async function readSourceFile(file: File) {
     fileName: file.name,
     file: new Uint8Array(await file.arrayBuffer()),
   })
-}
-
-export function getInvalidBookSources() {
-  return post<unknown[]>('/getInvalidBookSources').then((r) => r.data)
 }

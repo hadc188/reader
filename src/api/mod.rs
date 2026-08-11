@@ -114,6 +114,8 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::webdav::get_webdav_file_list,
         commands::webdav::get_webdav_file,
         commands::webdav::upload_file_to_webdav,
+        commands::webdav::create_webdav_backup_archive,
+        commands::webdav::get_webdav_backup_archive,
         commands::webdav::delete_webdav_file,
         commands::webdav::delete_webdav_file_list,
         commands::webdav::get_webdav_home,

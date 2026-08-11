@@ -3,7 +3,7 @@
     class="reader-view"
     :class="{ 'disable-system-callout': disableSystemCallout }"
     :style="{
-      background: theme.body,
+      background: config.backgroundImage && config.applyBackgroundToReader ? 'transparent' : theme.body,
       color: theme.fontColor,
       colorScheme: readerColorScheme,
       fontFamily: currentFontFamily,
@@ -23,6 +23,7 @@
         <div
           v-if="store.activePanel"
           class="reader-drawer"
+          :class="{ 'with-custom-background': hasReaderBackground }"
           :style="{ background: chromeTheme.popup, colorScheme: readerColorScheme }"
         >
           <ReaderCatalog
@@ -39,25 +40,39 @@
       </Transition>
     </Teleport>
 
-    <!-- PC Desktop Toolbars (Always shown) -->
-    <ReaderSidebar
+    <!-- PC Desktop Toolbars -->
+    <div
       v-if="!isMobile"
-      @goHome="goHome"
-      @scrollTop="scrollToTop"
-      @scrollBottom="scrollToBottom"
-    />
-    <ReaderToolbar
+      class="reader-edge-trigger reader-edge-trigger-left"
+      @mouseenter="leftToolbarRevealed = true"
+      @mouseleave="leftToolbarRevealed = false"
+    >
+      <ReaderSidebar
+        :edge-active="leftToolbarRevealed"
+        @goHome="goHome"
+        @scrollTop="scrollToTop"
+        @scrollBottom="scrollToBottom"
+      />
+    </div>
+    <div
       v-if="!isMobile"
-      :is-speaking="store.isSpeaking"
-      :is-paused="store.isPaused"
-      @bookmark="toggleBookmark"
-      @search="toggleSearch"
-      @info="openInfo"
-      @tts="handleTTS"
-      @prev="prevChapter"
-      @next="nextChapter"
-      @progress="openCachePanel"
-    />
+      class="reader-edge-trigger reader-edge-trigger-right"
+      @mouseenter="rightToolbarRevealed = true"
+      @mouseleave="rightToolbarRevealed = false"
+    >
+      <ReaderToolbar
+        :edge-active="rightToolbarRevealed"
+        :is-speaking="store.isSpeaking"
+        :is-paused="store.isPaused"
+        @bookmark="toggleBookmark"
+        @search="toggleSearch"
+        @info="openInfo"
+        @tts="handleTTS"
+        @prev="prevChapter"
+        @next="nextChapter"
+        @progress="openCachePanel"
+      />
+    </div>
 
     <!-- Mobile Controls (Click to toggle) -->
     <ReaderMobileControls
@@ -254,6 +269,7 @@
       <div
         v-if="selectionMenu.visible"
         class="selection-menu"
+        :class="{ 'with-custom-background': hasReaderBackground }"
         @click.stop
         :style="{
           top: selectionMenu.top + 'px',
@@ -333,13 +349,16 @@ function debugPositionLog(message: string, payload?: unknown) {
 
 const config = computed(() => store.config)
 const theme = computed(() => store.currentTheme)
-const chromeTheme = computed(() => store.currentTheme)
+const chromeTheme = computed(() => store.chromeTheme)
+const hasReaderBackground = computed(() => Boolean(config.value.backgroundImage) && config.value.applyBackgroundToReader)
 const readerColorScheme = computed(() => store.isNight || theme.value.name === '暗灰' ? 'dark' : 'light')
 
 const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
 const showControls = ref(false)
 const isMobile = ref(false)
+const leftToolbarRevealed = ref(false)
+const rightToolbarRevealed = ref(false)
 let speechTimerTicker: number | null = null
 let suppressNextTapUntil = 0
 let restorePositionTimer: number | null = null
@@ -1881,6 +1900,28 @@ watch(
   -webkit-touch-callout: none;
 }
 
+.reader-edge-trigger {
+  position: fixed;
+  top: var(--titlebar-height, 32px);
+  bottom: 0;
+  width: 32px;
+  z-index: 19;
+}
+
+.reader-edge-trigger-left {
+  left: 0;
+}
+
+.reader-edge-trigger-right {
+  right: 0;
+}
+
+.reader-drawer.with-custom-background,
+.selection-menu.with-custom-background {
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+}
+
 .reader-scroll-container {
   flex: 1;
   height: 100%;
@@ -1891,6 +1932,7 @@ watch(
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
   -ms-overflow-style: none;
+  z-index: 1;
 }
 
 .reader-scroll-container.horizontal-page-mode {

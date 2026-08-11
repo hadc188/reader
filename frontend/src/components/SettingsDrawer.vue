@@ -4,7 +4,11 @@
       <div v-if="modelValue" class="drawer-overlay" @click="close"></div>
     </Transition>
     <Transition name="slide-right">
-      <aside v-if="modelValue" class="settings-drawer">
+      <aside
+        v-if="modelValue"
+        class="settings-drawer"
+        :class="{ 'with-custom-background': hasCustomBackground }"
+      >
         <div class="drawer-header">
           <h2>&#35774;&#32622;</h2>
           <button class="close-btn" @click="close">
@@ -64,12 +68,25 @@
               &#24212;&#29992;
             </h3>
             <div class="status-card">
-              <span>{{ appStore.isOnline ? '\u5728\u7ebf' : '\u79bb\u7ebf' }}</span>
-              <small>{{ appStore.pwaReady ? '\u5df2\u542f\u7528\u79bb\u7ebf\u5916\u58f3\u7f13\u5b58' : '\u79bb\u7ebf\u5916\u58f3\u672a\u542f\u7528' }}</small>
-            </div>
-            <div class="status-card">
               <span>{{ appVersion }}</span>
               <small>当前应用版本</small>
+            </div>
+            <div v-if="isDesktopApp" class="setting-switch-row">
+              <div class="setting-switch-copy">
+                <span>关闭时隐藏到系统托盘</span>
+                <small>{{ appStore.closeToTray ? '关闭窗口后继续在后台运行' : '关闭窗口后直接退出应用' }}</small>
+              </div>
+              <button
+                class="switch-control"
+                :class="{ on: appStore.closeToTray }"
+                type="button"
+                role="switch"
+                :aria-checked="appStore.closeToTray"
+                aria-label="关闭时隐藏到系统托盘"
+                @click="appStore.toggleCloseToTray()"
+              >
+                <span></span>
+              </button>
             </div>
             <template v-if="appStore.canCheckVersionUpdate">
               <div
@@ -163,6 +180,74 @@
                 &#26263;&#33394;
               </button>
             </div>
+            <div class="background-setting">
+              <div class="setting-switch-copy">
+                <span>桌面背景图</span>
+                <small>背景图片会显示在主页并覆盖标题栏</small>
+              </div>
+              <div class="background-actions">
+                <button
+                  class="background-picker"
+                  type="button"
+                  :disabled="processingBackground"
+                  @click="backgroundInputRef?.click()"
+                >
+                  <span
+                    class="background-preview"
+                    :class="{ empty: !readerStore.config.backgroundImage }"
+                    :style="readerStore.config.backgroundImage
+                      ? { backgroundImage: `url(${readerStore.config.backgroundImage})` }
+                      : undefined"
+                  ></span>
+                  <span>{{ processingBackground ? '正在处理' : (readerStore.config.backgroundImage ? '更换图片' : '选择图片') }}</span>
+                </button>
+                <button
+                  v-if="readerStore.config.backgroundImage"
+                  class="background-remove"
+                  type="button"
+                  :disabled="processingBackground"
+                  @click="removeBackgroundImage"
+                >移除</button>
+                <input
+                  ref="backgroundInputRef"
+                  class="hidden-input"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/bmp"
+                  @change="handleBackgroundImageChange"
+                >
+              </div>
+              <div v-if="readerStore.config.backgroundImage" class="background-opacity-row">
+                <label for="desktop-background-opacity">背景透明度</label>
+                <input
+                  id="desktop-background-opacity"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  :value="readerStore.config.backgroundOpacity"
+                  @input="handleBackgroundOpacityChange"
+                >
+                <output>{{ Math.round(readerStore.config.backgroundOpacity * 100) }}%</output>
+              </div>
+            </div>
+            <div class="setting-switch-row">
+              <div class="setting-switch-copy">
+                <span>应用到阅读页</span>
+                <small>{{ readerBackgroundDescription }}</small>
+              </div>
+              <button
+                class="switch-control"
+                :class="{ on: readerStore.config.applyBackgroundToReader }"
+                type="button"
+                role="switch"
+                :disabled="!readerStore.config.backgroundImage"
+                :aria-checked="readerStore.config.applyBackgroundToReader"
+                aria-label="将桌面背景图应用到阅读页"
+                @click="toggleReaderBackground"
+              >
+                <span></span>
+              </button>
+            </div>
           </section>
 
           <section class="drawer-section">
@@ -205,9 +290,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
+import { useReaderStore } from '../stores/reader'
+import {
+  normalizeReaderBackgroundOpacity,
+  prepareReaderBackgroundImage,
+} from '../utils/readerBackground'
 
 const props = defineProps<{
   modelValue: boolean
@@ -219,7 +310,22 @@ const emit = defineEmits<{
 
 const appStore = useAppStore()
 const shelfStore = useBookshelfStore()
+const readerStore = useReaderStore()
+const route = useRoute()
 const appVersion = __APP_VERSION__
+const isDesktopApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+const backgroundInputRef = ref<HTMLInputElement | null>(null)
+const processingBackground = ref(false)
+const hasCustomBackground = computed(() => Boolean(readerStore.config.backgroundImage) && (
+  route.name === 'home'
+  || (route.name === 'reader' && readerStore.config.applyBackgroundToReader)
+))
+const readerBackgroundDescription = computed(() => {
+  if (!readerStore.config.backgroundImage) return '请先选择桌面背景图片'
+  return readerStore.config.applyBackgroundToReader
+    ? '桌面背景图也会显示在阅读页'
+    : '阅读页继续使用阅读主题背景'
+})
 
 // Single-user desktop: local WebDAV backup is always available.
 const webdavStatusTitle = computed(() => '\u6587\u4ef6\u5907\u4efd\u4e0e\u6062\u590d')
@@ -275,6 +381,41 @@ function setTheme(t: 'light' | 'dark') {
   appStore.setTheme(t)
 }
 
+function toggleReaderBackground() {
+  if (!readerStore.config.backgroundImage) return
+  readerStore.updateConfig(
+    'applyBackgroundToReader',
+    !readerStore.config.applyBackgroundToReader,
+  )
+}
+
+async function handleBackgroundImageChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  processingBackground.value = true
+  try {
+    const dataUrl = await prepareReaderBackgroundImage(file)
+    readerStore.setBackgroundImage(dataUrl)
+    appStore.showToast('桌面背景已更新', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '背景图片处理失败', 'error')
+  } finally {
+    processingBackground.value = false
+    input.value = ''
+  }
+}
+
+function handleBackgroundOpacityChange(event: Event) {
+  const value = (event.target as HTMLInputElement).valueAsNumber
+  readerStore.updateConfig('backgroundOpacity', normalizeReaderBackgroundOpacity(value))
+}
+
+function removeBackgroundImage() {
+  readerStore.clearBackgroundImage()
+  appStore.showToast('桌面背景已移除', 'success')
+}
+
 async function handleInstallPwa() {
   const accepted = await appStore.installPwa()
   if (!accepted) {
@@ -327,6 +468,20 @@ async function handleCheckVersionUpdate() {
   flex-direction: column;
   box-shadow: var(--shadow-xl);
   border-left: 1px solid var(--color-divider);
+}
+
+.settings-drawer.with-custom-background {
+  background: color-mix(in srgb, var(--color-bg-elevated) 82%, transparent);
+  backdrop-filter: blur(24px) saturate(120%);
+  -webkit-backdrop-filter: blur(24px) saturate(120%);
+}
+
+.settings-drawer.with-custom-background .status-card,
+.settings-drawer.with-custom-background .setting-switch-row,
+.settings-drawer.with-custom-background .background-setting,
+.settings-drawer.with-custom-background .theme-option {
+  background: color-mix(in srgb, var(--color-bg-elevated) 66%, transparent);
+  border-color: color-mix(in srgb, var(--color-border) 72%, transparent);
 }
 
 .drawer-header {
@@ -565,6 +720,113 @@ async function handleCheckVersionUpdate() {
 .theme-toggle {
   display: flex;
   gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.background-setting {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg);
+}
+
+.background-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.background-picker {
+  min-width: 0;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 5px var(--space-3) 5px 5px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  transition: border-color var(--duration-fast), background var(--duration-fast);
+}
+
+.background-picker:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  background: var(--color-bg-hover);
+}
+
+.background-preview {
+  width: 42px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  box-shadow: inset 0 0 0 1px var(--color-border-light);
+}
+
+.background-preview.empty {
+  background: var(--color-bg-sunken);
+  color: var(--color-text-tertiary);
+}
+
+.background-preview.empty::after {
+  content: '+';
+  font-size: 19px;
+  font-weight: 400;
+}
+
+.background-remove {
+  min-height: 34px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.background-remove:hover:not(:disabled) {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.background-picker:disabled,
+.background-remove:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.background-opacity-row {
+  display: grid;
+  grid-template-columns: auto minmax(100px, 1fr) 38px;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.background-opacity-row input {
+  width: 100%;
+  accent-color: var(--color-primary);
+}
+
+.background-opacity-row output {
+  text-align: right;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.hidden-input {
+  display: none;
 }
 
 .status-card {
@@ -594,6 +856,73 @@ async function handleCheckVersionUpdate() {
 
 .status-card.muted {
   opacity: 0.72;
+}
+
+.setting-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg);
+}
+
+.setting-switch-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.setting-switch-copy span {
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.setting-switch-copy small {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.switch-control {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  flex: 0 0 44px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  background: var(--color-bg-sunken);
+  transition: background var(--duration-fast), border-color var(--duration-fast);
+}
+
+.switch-control span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-xs);
+  transition: transform var(--duration-fast);
+}
+
+.switch-control.on {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+}
+
+.switch-control.on span {
+  transform: translateX(20px);
+}
+
+.switch-control:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .action-btn:disabled {

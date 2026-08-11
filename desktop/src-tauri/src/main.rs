@@ -12,11 +12,13 @@ use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::NewWindowResponse;
 use tauri::{App, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-const WEBVIEW2_DOWNLOAD_URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
-
 fn main() {
+    #[cfg(target_os = "windows")]
+    const WEBVIEW2_DOWNLOAD_URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
+
     // Without this check Tauri panics deep inside window creation with a message
     // no end user can act on.
+    #[cfg(target_os = "windows")]
     if let Err(err) = tauri::webview_version() {
         win::fatal(&format!(
             "未检测到 Microsoft Edge WebView2 运行时，应用无法启动。\n\n\
@@ -55,8 +57,7 @@ fn start(app: &mut App) -> anyhow::Result<()> {
 
     if paths.relocated_notice {
         win::warn(&format!(
-            "程序所在目录不可写，书库数据已改存到：\n{}\n\n\
-             如需便携使用，请把程序解压到有写入权限的目录（例如桌面或 D 盘）。",
+            "程序所在目录不可写，书库数据已改存到：\n{}",
             paths.data_dir.display()
         ));
     }
@@ -102,10 +103,8 @@ fn start(app: &mut App) -> anyhow::Result<()> {
         })
         .build()?;
 
-    // Intercept the close request: hand it to the frontend so the user can pick
-    // "hide to tray" or "quit". We call prevent_close() on every request and
-    // ask the frontend to resolve it; the frontend calls window.destroy() to
-    // actually quit (destroy does not re-trigger this handler).
+    // The frontend resolves each intercepted close request using the persisted
+    // preference: hide to tray or destroy the window and exit.
     let app_handle = app.handle().clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {

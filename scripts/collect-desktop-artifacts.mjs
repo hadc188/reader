@@ -72,6 +72,49 @@ function firstExecutable() {
   return match
 }
 
+function findAppBundle() {
+  return bundleRoots()
+    .flatMap((rootPath) => findEntries(rootPath, (path) => path.toLowerCase().endsWith('.app')))
+    .find(Boolean)
+}
+
+function zipAppBundle(app, destination) {
+  execFileSync('ditto', [
+    '-c', '-k', '--sequesterRsrc', '--keepParent', app,
+    destination,
+  ])
+}
+
+function zipAppFromDmg(dmg, destination) {
+  const mountPoint = join(tmpdir(), `reader-dmg-${process.pid}`)
+  rmSync(mountPoint, { recursive: true, force: true })
+  mkdirSync(mountPoint, { recursive: true })
+  let mounted = false
+
+  try {
+    execFileSync('hdiutil', [
+      'attach', dmg,
+      '-mountpoint', mountPoint,
+      '-nobrowse',
+      '-readonly',
+      '-quiet',
+    ])
+    mounted = true
+    const app = findEntries(mountPoint, (path) => path.toLowerCase().endsWith('.app')).find(Boolean)
+    if (!app) throw new Error(`No .app bundle found inside ${dmg}`)
+    zipAppBundle(app, destination)
+  } finally {
+    if (mounted) {
+      try {
+        execFileSync('hdiutil', ['detach', mountPoint, '-quiet'])
+      } catch (error) {
+        console.warn(`Unable to detach ${mountPoint}: ${error.message}`)
+      }
+    }
+    rmSync(mountPoint, { recursive: true, force: true })
+  }
+}
+
 const prefix = `Reader-${version}-${platform}-${arch}`
 
 if (platform === 'windows') {
@@ -84,15 +127,21 @@ if (platform === 'windows') {
   execFileSync('tar.exe', ['-a', '-c', '-f', join(outputDir, `${prefix}-portable.zip`), '-C', stage, 'Reader.exe'])
   rmSync(stage, { recursive: true, force: true })
 } else if (platform === 'macos') {
-  copyArtifact(firstBundleFile('.dmg'), join(outputDir, `${prefix}.dmg`))
-  const app = bundleRoots()
-    .flatMap((rootPath) => findEntries(rootPath, (path) => path.toLowerCase().endsWith('.app')))
-    .find(Boolean)
-  if (!app) throw new Error(`No .app bundle found for ${target}`)
-  execFileSync('ditto', [
-    '-c', '-k', '--sequesterRsrc', '--keepParent', app,
-    join(outputDir, `${prefix}.zip`),
-  ])
+  const dmg = firstBundleFile('.dmg')
+  const dmgOutput = join(outputDir, `${prefix}.dmg`)
+  const appOutput = join(outputDir, `${prefix}.zip`)
+  copyArtifact(dmg, dmgOutput)
+  const app = findAppBundle()
+  if (app) {
+    zipAppBundle(app, appOutput)
+  } else {
+    // A DMG-only Tauri build may remove its staging .app after bundling. Mount
+    // the finished disk image so the portable app archive remains available.
+    zipAppFromDmg(dmg, appOutput)
+  }
+  if (!existsSync(appOutput) || statSync(appOutput).size === 0) {
+    throw new Error(`Failed to create macOS app archive: ${appOutput}`)
+  }
 } else if (platform === 'linux') {
   copyArtifact(firstBundleFile('.appimage'), join(outputDir, `${prefix}.AppImage`))
   copyArtifact(firstBundleFile('.deb'), join(outputDir, `${prefix}.deb`))

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { rankSearchResults, searchMergeKey } from './searchRank'
+import { isSearchResultRelevant, rankSearchResults, searchMergeKey } from './searchRank'
 import type { SearchBook } from '../types'
 
 function book(partial: Partial<SearchBook>): SearchBook {
@@ -13,14 +13,14 @@ function book(partial: Partial<SearchBook>): SearchBook {
 }
 
 describe('rankSearchResults', () => {
-  it('puts exact title match first, then substring, then other', () => {
+  it('puts exact title match first, then substring, and removes unrelated results', () => {
     const exact = book({ name: '遮天', author: '辰东', bookSourceUrls: ['a'] })
     const contains = book({ name: '遮天之龙起微末', author: '某', bookSourceUrls: ['b'] })
     const other = book({ name: '凡人修仙传', author: '忘语', bookSourceUrls: ['c'] })
     const ranked = rankSearchResults([other, contains, exact], '遮天')
     expect(ranked[0].name).toBe('遮天')
     expect(ranked[1].name).toBe('遮天之龙起微末')
-    expect(ranked[2].name).toBe('凡人修仙传')
+    expect(ranked).toHaveLength(2)
   })
 
   it('ranks exact author match as tier 0', () => {
@@ -40,6 +40,12 @@ describe('rankSearchResults', () => {
   it('returns list unchanged when key is empty', () => {
     const list = [book({ name: 'b' }), book({ name: 'a' })]
     expect(rankSearchResults(list, '  ')).toBe(list)
+  })
+
+  it('keeps matches in author and kind while rejecting unrelated books', () => {
+    expect(isSearchResultRelevant(book({ name: '某书', author: '作者：辰东' }), '辰 东')).toBe(true)
+    expect(isSearchResultRelevant(book({ name: '某书', kind: '都市 / 重生' }), '重生')).toBe(true)
+    expect(isSearchResultRelevant(book({ name: '凡人修仙传', author: '忘语' }), '遮天')).toBe(false)
   })
 })
 

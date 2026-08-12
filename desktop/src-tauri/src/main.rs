@@ -33,6 +33,8 @@ fn main() {
     }
 
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Surface the existing window instead of starting a second instance.
             if let Some(window) = app.get_webview_window("main") {

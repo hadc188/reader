@@ -10,7 +10,7 @@
       aria-hidden="true"
       :style="customBackgroundStyle"
     ></div>
-    <TitleBar />
+    <TitleBar :surface="titlebarSurface" />
     <div class="app-body">
       <AppTopBar v-if="showHeader" />
       <main class="app-main" :class="{ 'with-bottom-nav': showBottomNav, 'without-header': !showHeader }">
@@ -60,6 +60,11 @@ const readerStore = useReaderStore()
 
 const showHeader = computed(() => route.name !== 'reader')
 const showBottomNav = computed(() => route.name !== 'reader')
+const titlebarSurface = computed<'settings' | 'reader-panel' | null>(() => {
+  if (appStore.showSettingsDrawer) return 'settings'
+  if (route.name === 'reader' && readerStore.activePanel) return 'reader-panel'
+  return null
+})
 const showCustomBackground = computed(() => {
   if (!readerStore.config.backgroundImage) return false
   return route.name === 'home'
@@ -82,6 +87,7 @@ const stopBackgroundClassSync = watch(showCustomBackground, (active) => {
 
 onMounted(() => {
   void appStore.checkVersionUpdate()
+  void appStore.applyBossKey().catch(() => undefined)
 })
 
 let closeUnlisten: (() => void) | undefined

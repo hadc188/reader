@@ -33,6 +33,8 @@ import {
   type SpeechApiFormat,
   type SpeechAudioFormat,
 } from '../utils/openaiSpeech'
+import { syncLegadoBookProgress, type LegadoBookProgress } from '../api/webdav'
+import { deleteCustomFont, listCustomFonts, uploadCustomFont, type CustomFontEntry } from '../api/fonts'
 
 const READER_SESSION_KEY = 'reader-last-session'
 const READER_READ_HISTORY_PREFIX = 'reader-read-history:'
@@ -149,6 +151,8 @@ export const fontPresets = [
   { label: '仿宋', value: 'fangsong', family: '"FangSong", "STFangsong", serif' },
 ]
 
+const CUSTOM_FONT_PREFIX = 'custom:'
+
 interface TTSOptions {
   onStart?: () => void
   onProgress?: (progress: number) => void
@@ -242,6 +246,8 @@ export const useReaderStore = defineStore('reader', () => {
   const readChapterKeys = ref<Set<string>>(new Set())
   const progressDirty = ref(false)
   const lastServerProgressKey = ref('')
+  const pendingLegadoProgress = ref<{ index: number; position: number } | null>(null)
+  const customFonts = ref<CustomFontEntry[]>([])
 
   const currentChapter = computed(() => chapters.value[currentIndex.value] || null)
   const hasNext = computed(() => currentIndex.value < chapters.value.length - 1)
@@ -256,6 +262,72 @@ export const useReaderStore = defineStore('reader', () => {
 
   /* ─── Reading config ─── */
   const config = reactive<ReadConfig>(loadConfig())
+
+  function customFontFamily(id: string) {
+    return `ReaderCustom_${id.replace(/[^a-zA-Z0-9_]/g, '')}`
+  }
+
+  async function installCustomFontFace(font: CustomFontEntry) {
+    const family = customFontFamily(font.id)
+    // Load through a blob URL so the font does not depend on the webview's
+    // cross-origin font handling. This also makes malformed files fail before
+    // the font is offered as an active reading option.
+    const response = await fetch(font.url, { cache: 'no-store' })
+    if (!response.ok) throw new Error(`字体资源请求失败（${response.status}）`)
+    const blobUrl = URL.createObjectURL(await response.blob())
+    const face = new FontFace(family, `url("${blobUrl}")`)
+    try {
+      const loaded = await face.load()
+      document.fonts.add(loaded)
+      return true
+    } catch (error) {
+      throw new Error(`字体文件加载失败：${error instanceof Error ? error.message : '格式不受支持'}`)
+    } finally {
+      URL.revokeObjectURL(blobUrl)
+    }
+  }
+
+  async function fetchCustomFonts() {
+    customFonts.value = await listCustomFonts()
+    const failedIds = new Set<string>()
+    for (const font of customFonts.value) {
+      try {
+        await installCustomFontFace(font)
+      } catch {
+        // Ignore a stale or corrupt font during startup. It remains listed so
+        // the user can remove it from the settings panel.
+        failedIds.add(font.id)
+      }
+    }
+    if (config.fontFamily.startsWith(CUSTOM_FONT_PREFIX)) {
+      const id = config.fontFamily.slice(CUSTOM_FONT_PREFIX.length)
+      if (!customFonts.value.some((font) => font.id === id) || failedIds.has(id)) {
+        updateConfig('fontFamily', 'system')
+      }
+    }
+    return customFonts.value
+  }
+
+  async function importCustomFont(file: File) {
+    const font = await uploadCustomFont(file)
+    try {
+      await installCustomFontFace(font)
+    } catch (error) {
+      await deleteCustomFont(font.id).catch(() => undefined)
+      throw error
+    }
+    customFonts.value.push(font)
+    updateConfig('fontFamily', `${CUSTOM_FONT_PREFIX}${font.id}`)
+    return font
+  }
+
+  async function removeCustomFont(id: string) {
+    await deleteCustomFont(id)
+    customFonts.value = customFonts.value.filter((font) => font.id !== id)
+    if (config.fontFamily === `${CUSTOM_FONT_PREFIX}${id}`) {
+      updateConfig('fontFamily', 'system')
+    }
+  }
 
   function saveConfig() {
     const persistedConfig: Partial<ReadConfig> = { ...config }
@@ -499,8 +571,17 @@ export const useReaderStore = defineStore('reader', () => {
     try {
       const chapterContent = await fetchChapterContent(nextIndex)
       if (chapterContent == null) return false
+      const persistedProgressTime = session.book.durChapterTime || 0
       setActiveChapterState(nextIndex, chapterContent, session.chapterScrollProgress || 0)
+      if (book.value) {
+        book.value.durChapterTime = persistedProgressTime
+        const shelfBook = shelfStore.books.find((item) => item.bookUrl === book.value?.bookUrl)
+        if (shelfBook) shelfBook.durChapterTime = persistedProgressTime
+      }
       markChapterAsRead(nextIndex)
+      await restoreCurrentBookProgressFromLegado(chapterContent).catch((error) => {
+        appStore.showToast((error as Error).message || '读取网盘阅读进度失败', 'warning')
+      })
       return true
     } catch {
       return false
@@ -630,6 +711,82 @@ export const useReaderStore = defineStore('reader', () => {
 
   function saveSpeechConfig() {
     localStorage.setItem('reader-speechConfig', JSON.stringify(speechConfig))
+  }
+
+  function normalizeLegadoProgressTime(value?: number | null) {
+    if (typeof value !== 'number' || Number.isNaN(value) || value <= 0) return 0
+    return value < 1_000_000_000_000 ? value * 1000 : value
+  }
+
+  async function syncCurrentBookProgressToLegado(
+    allowUpload = true,
+    contentOverride?: string,
+    forceUpload = false,
+  ) {
+    if (!book.value) return null
+    if (!appStore.legadoSyncEnabled) return null
+    const webdav = appStore.legadoWebdavConfig
+    if (!webdav.url || !webdav.account || !webdav.password) return null
+    const plainContentLength = Math.max(1, (contentOverride ?? content.value).replace(/<[^>]+>/g, '').length)
+    const progressPosition = Math.max(0, Math.min(plainContentLength,
+      Math.round(chapterScrollProgress.value * plainContentLength)))
+    const progress: LegadoBookProgress = {
+      name: book.value.name,
+      author: book.value.author,
+      durChapterIndex: currentIndex.value,
+      durChapterPos: progressPosition,
+      durChapterTime: forceUpload ? Date.now() : (book.value.durChapterTime || 0),
+      durChapterTitle: currentChapter.value?.title || book.value.durChapterTitle,
+    }
+    const result = await syncLegadoBookProgress(webdav, progress, allowUpload, forceUpload)
+    if (!result.remote) return result
+
+    const remote = result.remote
+    const remoteTime = normalizeLegadoProgressTime(remote.durChapterTime)
+    const localTime = normalizeLegadoProgressTime(progress.durChapterTime)
+    const remotePositionIsAhead = remote.durChapterIndex > currentIndex.value
+      || (remote.durChapterIndex === currentIndex.value && remote.durChapterPos > progress.durChapterPos)
+    const remoteIsNewer = remoteTime > localTime
+      || (remoteTime === localTime && remotePositionIsAhead)
+    if (!remoteIsNewer) return result
+
+    const targetIndex = Math.max(0, Math.min(chapters.value.length - 1, remote.durChapterIndex))
+    const title = chapters.value[targetIndex]?.title || remote.durChapterTitle || book.value.durChapterTitle
+    const remoteProgress = targetIndex === currentIndex.value
+      ? Math.max(0, Math.min(1, remote.durChapterPos / plainContentLength))
+      : 0
+    const encodedRemoteProgress = encodeServerProgress(remoteProgress)
+    pendingLegadoProgress.value = { index: targetIndex, position: remote.durChapterPos }
+    currentIndex.value = targetIndex
+    Object.assign(book.value, {
+      durChapterIndex: targetIndex,
+      durChapterPos: encodedRemoteProgress,
+      durChapterTitle: title,
+      durChapterTime: remote.durChapterTime,
+    })
+    chapterScrollProgress.value = remoteProgress
+    const shelfBook = shelfStore.books.find((item) => item.bookUrl === book.value?.bookUrl)
+    if (shelfBook) Object.assign(shelfBook, {
+      durChapterIndex: targetIndex,
+      durChapterPos: encodedRemoteProgress,
+      durChapterTitle: title,
+      durChapterTime: remote.durChapterTime,
+    })
+    saveReaderSession()
+    appStore.showToast('已读取手机端阅读进度', 'success')
+    return result
+  }
+
+  function uploadCurrentBookProgressToLegado() {
+    return syncCurrentBookProgressToLegado(true, undefined, true)
+  }
+
+  async function restoreCurrentBookProgressFromLegado(contentOverride?: string) {
+    const result = await syncCurrentBookProgressToLegado(false, contentOverride)
+    if (pendingLegadoProgress.value) {
+      await loadChapter(currentIndex.value)
+    }
+    return result
   }
 
   const systemSpeechSupported = computed(() => (
@@ -1344,7 +1501,7 @@ export const useReaderStore = defineStore('reader', () => {
     content.value = ''
     appStore.markBookOpened(b.bookUrl)
     currentIndex.value = b.durChapterIndex || 0
-    chapterScrollProgress.value = 0
+    chapterScrollProgress.value = decodeServerProgress(b.durChapterPos)
     preloadedContent.value.clear()
     loadReadChapterHistory(b)
     progressDirty.value = false
@@ -1355,6 +1512,13 @@ export const useReaderStore = defineStore('reader', () => {
         bookUrl: b.bookUrl,
         bookSourceUrl: b.origin,
         tocUrl: b.tocUrl,
+      })
+      const initialChapterContent = await fetchChapterContent(currentIndex.value).catch(() => null)
+      if (initialChapterContent) {
+        preloadedContent.value.set(currentIndex.value, initialChapterContent)
+      }
+      await restoreCurrentBookProgressFromLegado(initialChapterContent || undefined).catch((error) => {
+        appStore.showToast((error as Error).message || '读取网盘阅读进度失败', 'warning')
       })
       saveReaderSession()
     } catch (error) {
@@ -1481,14 +1645,19 @@ export const useReaderStore = defineStore('reader', () => {
       const previousSavedIndex = book.value.durChapterIndex ?? 0
       const previousSavedProgress = decodeServerProgress(book.value.durChapterPos)
       const isOpeningSavedChapter = !forceRefresh && index === previousSavedIndex
-      const initialProgress = isOpeningSavedChapter ? previousSavedProgress : 0
+      const cloudProgress = pendingLegadoProgress.value?.index === index
+        ? Math.max(0, Math.min(1, pendingLegadoProgress.value.position
+          / Math.max(1, chapterContent.replace(/<[^>]+>/g, '').length)))
+        : null
+      const initialProgress = cloudProgress ?? (isOpeningSavedChapter ? previousSavedProgress : 0)
+      if (cloudProgress != null) pendingLegadoProgress.value = null
 
       setActiveChapterState(index, chapterContent, initialProgress)
       markChapterAsRead(index)
       appStore.markChapterRead(book.value.bookUrl, index, chapters.value.length)
 
       if (!isOpeningSavedChapter) {
-        await persistProgress(index, 0)
+        await persistProgress(index, cloudProgress ?? 0)
       }
 
       if (config.enablePreload) {
@@ -1735,9 +1904,12 @@ export const useReaderStore = defineStore('reader', () => {
     currentChapter, hasNext, hasPrev, readingProgress,
       loadBook, loadChapter, fetchChapterContent, setActiveChapterState, refreshContent, nextChapter, prevChapter, clear,
       chapterScrollProgress, setChapterScrollProgress,
-      getPersistedReaderSession, restorePersistedSession,
+      getPersistedReaderSession, restorePersistedSession, syncCurrentBookProgressToLegado,
+      restoreCurrentBookProgressFromLegado,
+      uploadCurrentBookProgressToLegado,
       persistProgress, flushProgressToServer, flushProgressToServerKeepalive,
       config, updateConfig, resetConfig, saveConfig, setBackgroundImage, clearBackgroundImage,
+      customFonts, fetchCustomFonts, importCustomFont, removeCustomFont, customFontFamily,
     themeIndex, isNight, currentTheme, chromeTheme, setThemeIndex, toggleNight,
     autoReading, autoReadingTimer, toggleAutoReading, stopAutoReading,
     activePanel, openPanel, togglePanel, backPanel, closePanel,

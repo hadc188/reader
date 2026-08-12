@@ -71,3 +71,10 @@ export async function readSourceFile(file: File) {
     file: new Uint8Array(await file.arrayBuffer()),
   })
 }
+
+export function exportBookSources(sources: BookSource[]) {
+  return invokeEnvelope<{ saved: boolean; cancelled?: boolean; path?: string }>(
+    'export_book_sources_to_file',
+    { sources },
+  )
+}

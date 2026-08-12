@@ -1,6 +1,6 @@
 [package]
 name = "reader-rust"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2021"
 
 # The desktop app is a workspace member so it shares this target/ directory, but
@@ -12,6 +12,7 @@ default-members = ["."]
 
 [dependencies]
 tauri = { version = "2" }
+tauri-plugin-global-shortcut = "2"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,6 +53,7 @@ sxd-xpath = "0.4"
 sxd-document = "0.3"
 quick-xml = "0.31"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 # Only used by tests/*.rs to spin up local mock upstream sites. The app itself

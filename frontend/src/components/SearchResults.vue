@@ -88,7 +88,7 @@ import { useSourceStore } from '../stores/source'
 import { searchBookMultiSSE } from '../api/search'
 import type { SseLike } from '../api/sse'
 import { saveBook } from '../api/bookshelf'
-import { rankSearchResults, searchMergeKey } from '../utils/searchRank'
+import { isSearchResultRelevant, rankSearchResults, searchMergeKey } from '../utils/searchRank'
 import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
 import type { Book, SearchBook } from '../types'
@@ -109,6 +109,7 @@ const {
 } = storeToRefs(shelfStore)
 
 let eventSource: SseLike | null = null
+let searchGeneration = 0
 const showBookDetail = ref(false)
 const selectedBook = ref<Book | SearchBook | null>(null)
 
@@ -181,6 +182,7 @@ function ensureSearchSelection() {
 
 function doSearch(key: string) {
   closeEventSource()
+  const generation = ++searchGeneration
 
   if (searchScope.value === 'group' && !selectedGroup.value) {
     shelfStore.searchResults = []
@@ -197,21 +199,30 @@ function doSearch(key: string) {
   shelfStore.searchResults = []
   shelfStore.isSearching = true
 
-  eventSource = searchBookMultiSSE({
+  const stream = searchBookMultiSSE({
     key,
     concurrentCount: 24,
     bookSourceGroup: searchScope.value === 'group' ? selectedGroup.value : undefined,
     bookSourceUrl: searchScope.value === 'source' ? selectedSourceUrl.value : undefined,
   })
+  eventSource = stream
 
-  eventSource.onmessage = (event) => {
+  const isCurrentSearch = () => (
+    generation === searchGeneration
+    && eventSource === stream
+    && shelfStore.searchKey === key
+  )
+
+  stream.onmessage = (event) => {
+    if (!isCurrentSearch()) return
     try {
       const data = event.data as { data?: SearchBook[] }
       if (data.data && Array.isArray(data.data)) {
         const byKey = new Map(shelfStore.searchResults.map((r) => [searchMergeKey(r), r]))
         for (const b of data.data) {
-          const key = searchMergeKey(b)
-          const existing = byKey.get(key)
+          if (!isSearchResultRelevant(b, key)) continue
+          const mergeKey = searchMergeKey(b)
+          const existing = byKey.get(mergeKey)
           if (existing) {
             // Merge this source into the existing row.
             const urls = new Set(existing.bookSourceUrls ?? [existing.origin])
@@ -222,7 +233,7 @@ function doSearch(key: string) {
             if (!existing.kind && b.kind) existing.kind = b.kind
             if (!existing.lastChapter && b.lastChapter) existing.lastChapter = b.lastChapter
           } else {
-            byKey.set(key, b)
+            byKey.set(mergeKey, b)
           }
         }
         shelfStore.searchResults = Array.from(byKey.values())
@@ -230,19 +241,25 @@ function doSearch(key: string) {
     } catch { /* skip */ }
   }
 
-  eventSource.addEventListener('end', () => {
+  stream.addEventListener('end', () => {
+    if (!isCurrentSearch()) return
     shelfStore.isSearching = false
-    closeEventSource()
+    stream.close()
+    eventSource = null
   })
 
-  eventSource.addEventListener('error', () => {
+  stream.addEventListener('error', () => {
+    if (!isCurrentSearch()) return
     shelfStore.isSearching = false
-    closeEventSource()
+    stream.close()
+    eventSource = null
   })
 
-  eventSource.onerror = () => {
+  stream.onerror = () => {
+    if (!isCurrentSearch()) return
     shelfStore.isSearching = false
-    closeEventSource()
+    stream.close()
+    eventSource = null
   }
 }
 
@@ -253,6 +270,7 @@ watch(
     if (key) {
       doSearch(key)
     } else {
+      searchGeneration += 1
       closeEventSource()
       shelfStore.searchResults = []
       shelfStore.isSearching = false
@@ -273,6 +291,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  searchGeneration += 1
   closeEventSource()
 })
 

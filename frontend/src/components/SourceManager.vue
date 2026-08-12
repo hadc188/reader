@@ -133,6 +133,7 @@ import {
   testBookSources,
   readRemoteSourceFile,
   readSourceFile,
+  exportBookSources,
   pinBookSource,
   unpinBookSource,
 } from '../api/source'
@@ -603,8 +604,20 @@ function touchSubscription(url: string) {
   persistSubscriptions()
 }
 
-function exportSources() {
-  const blob = new Blob([JSON.stringify(sources.value, null, 2)], { type: 'application/json;charset=utf-8' })
+async function exportSources() {
+  const payload = JSON.stringify(sources.value, null, 2)
+  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    try {
+      const result = await exportBookSources(sources.value)
+      if (result.cancelled) return
+      appStore.showToast('书源已导出', 'success')
+      return
+    } catch (error) {
+      appStore.showToast((error as Error).message || '导出失败', 'error')
+      return
+    }
+  }
+  const blob = new Blob([payload], { type: 'application/json;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url

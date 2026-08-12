@@ -147,6 +147,7 @@
         :class="{ 'horizontal-page-article': isHorizontalPageMode }"
         :style="{
           maxWidth: isHorizontalPageMode ? 'none' : (config.pageWidth + 'px'),
+          fontFamily: currentFontFamily,
           fontSize: config.fontSize + 'px',
           fontWeight: config.fontWeight,
           lineHeight: config.lineHeight,
@@ -211,6 +212,7 @@
         class="continuous-reading"
         :style="{
           maxWidth: config.pageWidth + 'px',
+          fontFamily: currentFontFamily,
           fontSize: config.fontSize + 'px',
           fontWeight: config.fontWeight,
           lineHeight: config.lineHeight,
@@ -280,10 +282,26 @@
       >
         <div class="selection-menu-text">{{ selectionMenu.text }}</div>
         <div class="selection-menu-actions">
-          <button @click="addSelectionBookmark">加入书签</button>
+          <button @click="() => addSelectionBookmark()">加入书签</button>
           <button @click="addSelectionReplaceRule('book')">按本书替换</button>
           <button @click="addSelectionReplaceRule('source')">按书源替换</button>
         </div>
+      </div>
+    </Transition>
+
+    <Transition name="fade">
+      <div
+        v-if="readerContextMenu.visible"
+        class="reader-context-menu"
+        :style="{ top: `${readerContextMenu.top}px`, left: `${readerContextMenu.left}px`, background: chromeTheme.popup, color: chromeTheme.fontColor }"
+        @click.stop
+      >
+        <button :disabled="!readerContextMenu.text" @click="searchContextSelection">搜索选中内容</button>
+        <button @click="bookmarkContextSelection">加入当前页书签</button>
+        <button :disabled="!readerContextMenu.text" @click="replaceContextSelection">按本书替换</button>
+        <button @click="openSourceFromContextMenu">换源</button>
+        <button @click="toggleAutoReadingFromContextMenu">{{ store.isAutoScrolling ? '停止自动翻页' : '开始自动翻页' }}</button>
+        <button @click="refreshFromContextMenu">刷新</button>
       </div>
     </Transition>
 
@@ -360,7 +378,10 @@ const isMobile = ref(false)
 const leftToolbarRevealed = ref(false)
 const rightToolbarRevealed = ref(false)
 let speechTimerTicker: number | null = null
+let legadoSyncTicker: number | null = null
+let readerViewUnmounted = false
 let suppressNextTapUntil = 0
+const readerContextMenu = ref({ visible: false, top: 0, left: 0, text: '' })
 let restorePositionTimer: number | null = null
 let persistPositionTimer: number | null = null
 const pendingRestorePosition = ref<SavedReadingPosition | null>(null)
@@ -376,8 +397,14 @@ const serverProgressAutoSaveScheduler = createReaderProgressAutoSaveScheduler({
 const readerProgressExitSaver = createReaderProgressExitSaver({
   disposeAutoSave: () => serverProgressAutoSaveScheduler.dispose(),
   savePosition: () => saveReadingPosition({ force: true }),
-  flushToServer: () => store.flushProgressToServer(true),
-  flushToServerKeepalive: () => store.flushProgressToServerKeepalive(true),
+  flushToServer: () => {
+    store.flushProgressToServerKeepalive(true)
+    void store.uploadCurrentBookProgressToLegado().catch(() => undefined)
+  },
+  flushToServerKeepalive: () => {
+    store.flushProgressToServerKeepalive(true)
+    void store.uploadCurrentBookProgressToLegado().catch(() => undefined)
+  },
 })
 const isContinuousMode = computed(() =>
   config.value.readMethod === '上下滚动' || config.value.readMethod === '上下滚动2',
@@ -495,7 +522,11 @@ function handleViewportChange() {
 
 const currentFontFamily = computed(() => {
   const preset = fontPresets.find(p => p.value === config.value.fontFamily)
-  return preset ? preset.family : ''
+  if (preset) return preset.family
+  if (config.value.fontFamily.startsWith('custom:')) {
+    return `"${store.customFontFamily(config.value.fontFamily.slice('custom:'.length))}"`
+  }
+  return ''
 })
 
 function formatChapterHtml(rawText: string) {
@@ -506,6 +537,7 @@ function formatChapterHtml(rawText: string) {
 
   if (/<[a-z][\s\S]*>/i.test(text)) {
     wrapper.innerHTML = text
+    normalizeSourceTypography(wrapper)
     const paragraphs = Array.from(wrapper.querySelectorAll('p')) as HTMLParagraphElement[]
     if (paragraphs.length) {
       paragraphs.forEach((paragraph) => {
@@ -721,9 +753,30 @@ function pageBackward() {
 }
 
 // Navigation
-async function goHome() {
-  await persistReadingProgressBeforeLeave()
+function goHome() {
+  persistReadingProgressKeepalive()
   router.replace('/')
+}
+
+function normalizeSourceTypography(root: HTMLElement) {
+  root.querySelectorAll('style, link[rel="stylesheet"]').forEach((element) => element.remove())
+  const typographyProperties = [
+    'font',
+    'font-size',
+    'font-family',
+    'line-height',
+  ]
+
+  root.querySelectorAll<HTMLElement>('*').forEach((element) => {
+    if (element.tagName === 'FONT') {
+      element.removeAttribute('size')
+      element.removeAttribute('face')
+    }
+    typographyProperties.forEach((property) => element.style.removeProperty(property))
+    if (!element.getAttribute('style')?.trim()) {
+      element.removeAttribute('style')
+    }
+  })
 }
 
 function handlePageHide() {
@@ -737,10 +790,6 @@ function handleBeforeUnload() {
 function handleVisibilityChange() {
   if (document.visibilityState !== 'hidden') return
   persistReadingProgressTemporaryKeepalive()
-}
-
-async function persistReadingProgressBeforeLeave() {
-  await readerProgressExitSaver.flushBeforeRouteLeave()
 }
 
 function persistReadingProgressKeepalive() {
@@ -1197,13 +1246,77 @@ function handleBackgroundClick(e: Event) {
   }
 }
 
-function handleContextMenu(event: Event) {
-  if (!disableSystemCallout.value) return
+function handleContextMenu(event: MouseEvent) {
   event.preventDefault()
+  const text = window.getSelection?.()?.toString().trim() || ''
+  const width = 190
+  const height = 270
+  readerContextMenu.value = {
+    visible: true,
+    top: Math.min(event.clientY, Math.max(8, window.innerHeight - height - 8)),
+    left: Math.min(event.clientX, Math.max(8, window.innerWidth - width - 8)),
+    text,
+  }
+}
+
+function closeReaderContextMenu() {
+  readerContextMenu.value.visible = false
+}
+
+function searchContextSelection() {
+  const text = readerContextMenu.value.text
+  closeReaderContextMenu()
+  if (text) {
+    searchQuery.value = text.slice(0, 80)
+    openSearch()
+  }
+}
+
+async function bookmarkContextSelection() {
+  const text = readerContextMenu.value.text
+  closeReaderContextMenu()
+  if (text) {
+    await addSelectionBookmark(text)
+    return
+  }
+  try {
+    await store.addBookmark(scrollContainerRef.value?.scrollTop || 0)
+    appStore.showToast('已添加当前页书签', 'success')
+  } catch {
+    appStore.showToast('加入书签失败', 'error')
+  }
+}
+
+function replaceContextSelection() {
+  const text = readerContextMenu.value.text
+  closeReaderContextMenu()
+  if (text) addSelectionReplaceRule('book', text)
+}
+
+function openSourceFromContextMenu() {
+  closeReaderContextMenu()
+  store.openPanel('source')
+}
+
+function toggleAutoReadingFromContextMenu() {
+  closeReaderContextMenu()
+  store.toggleAutoReading()
+  appStore.showToast(store.isAutoScrolling ? '已开始自动翻页' : '已停止自动翻页', 'success')
+}
+
+async function refreshFromContextMenu() {
+  closeReaderContextMenu()
+  try {
+    await store.refreshContent()
+    appStore.showToast('当前章节已刷新', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '刷新失败', 'error')
+  }
 }
 
 function handleGlobalClick(e: MouseEvent) {
   if (store.activePanel) return
+  closeReaderContextMenu()
   if (Date.now() < suppressNextTapUntil) return
   if (Date.now() < suppressSelectionCloseUntil.value) return
   if (selectionMenu.value.visible) {
@@ -1680,6 +1793,17 @@ onBeforeRouteLeave(() => {
   return true
 })
 
+async function waitForChapterListReady() {
+  if (!store.chaptersLoading) return
+  await new Promise<void>((resolve) => {
+    const stop = watch(() => store.chaptersLoading, (loading) => {
+      if (loading) return
+      stop()
+      resolve()
+    }, { flush: 'sync' })
+  })
+}
+
 onMounted(async () => {
   syncViewportSize()
   if (!store.book) {
@@ -1691,8 +1815,18 @@ onMounted(async () => {
     appStore.showToast('已恢复最近阅读的离线章节', 'success')
   }
   appStore.startReadingSession(store.book?.bookUrl, store.book?.name)
+  void store.fetchCustomFonts().catch(() => undefined)
+  await waitForChapterListReady()
+  if (readerViewUnmounted) return
+  if (store.book && store.chapters.length) {
+    await store.restoreCurrentBookProgressFromLegado(store.content || undefined).catch((error) => {
+      appStore.showToast((error as Error).message || '读取网盘阅读进度失败', 'warning')
+    })
+  }
+  if (readerViewUnmounted) return
   loadSavedReadingPosition()
   window.addEventListener('keydown', handleKeydown)
+  window.addEventListener('click', closeReaderContextMenu)
   document.addEventListener('mouseup', handleMouseUpSelection)
   document.addEventListener('touchend', handleTouchEndSelection)
     document.addEventListener('selectionchange', handleSelectionChange)
@@ -1710,6 +1844,9 @@ onMounted(async () => {
   speechTimerTicker = window.setInterval(() => {
     speechTimerNow.value = Date.now()
   }, 15000)
+  legadoSyncTicker = window.setInterval(() => {
+    void store.uploadCurrentBookProgressToLegado().catch(() => undefined)
+  }, 300000)
   await Promise.all([
     store.fetchBookmarks(),
     store.fetchReplaceRules(),
@@ -1724,9 +1861,11 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+    readerViewUnmounted = true
     persistReadingProgressKeepalive()
     appStore.stopReadingSession()
-    window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('click', closeReaderContextMenu)
   document.removeEventListener('mouseup', handleMouseUpSelection)
   document.removeEventListener('touchend', handleTouchEndSelection)
     document.removeEventListener('selectionchange', handleSelectionChange)
@@ -1736,6 +1875,7 @@ onUnmounted(() => {
     window.removeEventListener('beforeunload', handleBeforeUnload)
     document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (speechTimerTicker) clearInterval(speechTimerTicker)
+  if (legadoSyncTicker) clearInterval(legadoSyncTicker)
   if (restorePositionTimer) clearTimeout(restorePositionTimer)
   if (persistPositionTimer) clearTimeout(persistPositionTimer)
   if (refreshOfflineCacheStateTimer) clearTimeout(refreshOfflineCacheStateTimer)
@@ -2106,6 +2246,17 @@ watch(
   box-shadow: inset 0 0 0 1px rgba(201, 127, 58, 0.18);
 }
 
+:deep(.chapter-text font),
+:deep(.chapter-text big),
+:deep(.chapter-text small),
+:deep(.chapter-text [style*="font-size"]),
+:deep(.chapter-text [style*="font-family"]),
+:deep(.chapter-text [style*="line-height"]) {
+  font-size: inherit !important;
+  font-family: inherit !important;
+  line-height: inherit !important;
+}
+
 .reader-view::selection,
 .reader-view :deep(*)::selection {
   color: var(--reader-selection-color);
@@ -2184,10 +2335,12 @@ watch(
 
 .reader-drawer {
   position: fixed;
-  top: calc(var(--titlebar-height, 32px) + var(--safe-area-top));
+  top: 0;
   bottom: var(--safe-area-bottom);
   left: 0;
   width: min(340px, 85vw);
+  box-sizing: border-box;
+  padding-top: calc(var(--titlebar-height, 32px) + var(--safe-area-top));
   z-index: 50;
   box-shadow: 4px 0 24px rgba(0,0,0,0.15);
   transition: background 0.3s;
@@ -2231,6 +2384,37 @@ watch(
 
 .selection-menu-actions button:first-child {
   grid-column: 1 / -1;
+}
+
+.reader-context-menu {
+  position: fixed;
+  z-index: 80;
+  width: 190px;
+  display: grid;
+  padding: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-radius: 10px;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(18px) saturate(120%);
+}
+
+.reader-context-menu button {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-size: 13px;
+}
+
+.reader-context-menu button:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.reader-context-menu button:disabled {
+  opacity: 0.38;
 }
 
 :deep(.search-highlight) {

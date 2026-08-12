@@ -7,6 +7,7 @@ use crate::service::book_source_service::{
 use crate::util::text::normalize_source_url;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, sync::Arc};
+use tauri_plugin_dialog::DialogExt;
 use tokio::{sync::Semaphore, task::JoinSet};
 
 const MAX_TEST_SOURCE_BATCH_SIZE: usize = 100;
@@ -486,6 +487,41 @@ pub async fn read_source_file(
         return Ok(ApiResponse::ok(serde_json::to_value(sources).unwrap_or_default()));
     }
     Err(AppError::BadRequest("No json file uploaded".to_string()))
+}
+
+/// Opens the native save dialog on desktop and writes a formatted book-source
+/// export. Browser callers should keep using the frontend download fallback.
+#[tauri::command]
+pub async fn export_book_sources_to_file(
+    app: tauri::AppHandle,
+    sources: Vec<BookSource>,
+) -> Result<ApiResponse<serde_json::Value>, AppError> {
+    let Some(file) = app
+        .dialog()
+        .file()
+        .set_title("导出书源")
+        .set_file_name(format!("reader-book-sources-{}.json", export_timestamp()))
+        .add_filter("JSON 文件", &["json"])
+        .blocking_save_file()
+    else {
+        return Ok(ApiResponse::ok(serde_json::json!({"saved": false, "cancelled": true})));
+    };
+    let path = file
+        .into_path()
+        .map_err(|error| AppError::BadRequest(format!("无法访问导出路径：{error}")))?;
+    let json = serde_json::to_vec_pretty(&sources)
+        .map_err(|error| AppError::Internal(error.into()))?;
+    tokio::fs::write(&path, json)
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    Ok(ApiResponse::ok(serde_json::json!({
+        "saved": true,
+        "path": path.to_string_lossy(),
+    })))
+}
+
+fn export_timestamp() -> String {
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
 #[tauri::command]

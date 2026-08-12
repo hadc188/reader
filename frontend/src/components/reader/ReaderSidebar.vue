@@ -45,7 +45,7 @@ import { computed } from 'vue'
 import { useReaderStore } from '../../stores/reader'
 
 const store = useReaderStore()
-const theme = computed(() => store.chromeTheme)
+const theme = computed(() => store.activePanel ? store.currentTheme : store.chromeTheme)
 
 defineProps<{
   edgeActive?: boolean

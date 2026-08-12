@@ -176,7 +176,11 @@ fn bytes_response(
             builder = builder.header(http::header::CACHE_CONTROL, value);
         }
     }
-    builder.body(bytes).unwrap_or_else(|_| http::Response::new(Vec::new()))
+    builder
+        .header("access-control-allow-origin", "*")
+        .header("cross-origin-resource-policy", "cross-origin")
+        .body(bytes)
+        .unwrap_or_else(|_| http::Response::new(Vec::new()))
 }
 
 fn mime_from_ext(path: &std::path::Path) -> &'static str {
@@ -186,6 +190,10 @@ fn mime_from_ext(path: &std::path::Path) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "svg" => "image/svg+xml",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
         "avif" => "image/avif",
         "json" => "application/json",
         "txt" => "text/plain; charset=utf-8",

@@ -1,4 +1,4 @@
-import { get, post, invokeEnvelope } from './invoke'
+import { get, post, invokeEnvelope, invokeRaw } from './invoke'
 
 export interface WebdavFileEntry {
   name: string
@@ -18,6 +18,98 @@ export interface WebdavBinaryResponse {
   content_type?: string | null
 }
 
+export interface LegadoWebdavConfig {
+  url: string
+  account: string
+  password: string
+  directory?: string
+}
+
+export interface LegadoBookProgress {
+  name: string
+  author: string
+  durChapterIndex: number
+  durChapterPos: number
+  durChapterTime: number
+  durChapterTitle?: string | null
+}
+
+export interface LegadoProgressResponse {
+  configured: boolean
+  remote?: LegadoBookProgress | null
+  uploaded: boolean
+}
+
+export interface LegadoWebdavBackupEntry {
+  name: string
+  size: number
+  lastModified: number
+}
+
+export interface SaveBackupResult {
+  saved: boolean
+  cancelled?: boolean
+  path?: string
+}
+
+export function testLegadoWebdav(config: LegadoWebdavConfig) {
+  return invokeEnvelope<{ connected: boolean }>('test_legado_webdav', { config })
+}
+
+export function syncLegadoBookProgress(
+  config: LegadoWebdavConfig,
+  progress: LegadoBookProgress,
+  allowUpload = true,
+  forceUpload = false,
+) {
+  return invokeEnvelope<LegadoProgressResponse>('sync_legado_book_progress', {
+    req: {
+      config,
+      progress,
+      allowUpload,
+      forceUpload,
+    },
+  })
+}
+
+export function listLegadoWebdavBackups(config: LegadoWebdavConfig) {
+  return invokeEnvelope<LegadoWebdavBackupEntry[]>('list_legado_webdav_backups', { config })
+}
+
+export function uploadLegadoWebdavBackup(
+  config: LegadoWebdavConfig,
+  filename: string,
+  files: BackupArchiveFile[],
+) {
+  return invokeEnvelope<LegadoWebdavBackupEntry>('upload_legado_webdav_backup', {
+    req: { config, filename, files },
+  })
+}
+
+export function downloadLegadoWebdavBackup(config: LegadoWebdavConfig, filename: string) {
+  return invokeRaw<WebdavBinaryResponse>('download_legado_webdav_backup', {
+    req: { config, filename },
+  })
+}
+
+export function saveLegadoWebdavBackupAs(config: LegadoWebdavConfig, filename: string) {
+  return invokeEnvelope<SaveBackupResult>('save_legado_webdav_backup_as', {
+    req: { config, filename },
+  })
+}
+
+export function getLegadoWebdavBackupArchive(config: LegadoWebdavConfig, filename: string) {
+  return invokeEnvelope<Record<string, string>>('get_legado_webdav_backup_archive', {
+    req: { config, filename },
+  })
+}
+
+export function deleteLegadoWebdavBackup(config: LegadoWebdavConfig, filename: string) {
+  return invokeEnvelope<string>('delete_legado_webdav_backup', {
+    req: { config, filename },
+  })
+}
+
 export function getWebdavFileList(path = '/') {
   return get<WebdavFileEntry[]>('/getWebdavFileList', {
     params: { path },
@@ -34,6 +126,10 @@ export function getWebdavFileBlob(path: string) {
   return get<WebdavBinaryResponse>('/getWebdavFile', {
     params: { path },
   }).then((r) => createWebdavFileBlob(r.data))
+}
+
+export function saveWebdavFileAs(path: string) {
+  return invokeEnvelope<SaveBackupResult>('save_webdav_file_as', { req: { path } })
 }
 
 export function decodeWebdavFileText(response: WebdavBinaryResponse) {

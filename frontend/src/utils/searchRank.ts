@@ -7,7 +7,6 @@ import type { SearchBook } from '../types'
  *   0. exact title OR author match to the search key
  *   1. search key appears in the kind/tag
  *   2. search key is a substring of title or author
- *   3. everything else
  * Within a bucket, books found in more sources rank higher.
  */
 export function rankSearchResults(list: SearchBook[], searchKey: string): SearchBook[] {
@@ -23,7 +22,7 @@ export function rankSearchResults(list: SearchBook[], searchKey: string): Search
     return 3
   }
 
-  return [...list].sort((a, b) => {
+  return list.filter((book) => isSearchResultRelevant(book, key)).sort((a, b) => {
     const ta = tier(a)
     const tb = tier(b)
     if (ta !== tb) return ta - tb
@@ -31,6 +30,17 @@ export function rankSearchResults(list: SearchBook[], searchKey: string): Search
     const nb = b.bookSourceUrls?.length ?? 1
     return nb - na
   })
+}
+
+export function isSearchResultRelevant(
+  book: Pick<SearchBook, 'name' | 'author' | 'kind'>,
+  searchKey: string,
+): boolean {
+  const key = normalizeSearchText(searchKey).replace(/^作者[:：]?/, '')
+  if (!key) return true
+
+  return [book.name, book.author.replace(/^\s*作者\s*[:：]?\s*/, ''), book.kind || '']
+    .some((value) => normalizeSearchText(value).includes(key))
 }
 
 /** Normalized merge key for deduping search results across sources. */
@@ -50,4 +60,8 @@ function normalizeSearchAuthor(value: string): string {
     .replace(/^作者[:：]/, '')
     .replace(/^作者/, '')
     .replace(/^[:：]/, '')
+}
+
+function normalizeSearchText(value: string): string {
+  return value.trim().toLocaleLowerCase().replace(/\s+/g, '')
 }

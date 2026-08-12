@@ -29,6 +29,7 @@ const LOCAL_STORAGE_KEYS = [
   'reader-last-session',
   'reader-currentIndex',
   'reader-source-subscriptions',
+  'reader-legado-sync-enabled',
 ]
 
 export interface WebdavBackupPayload {

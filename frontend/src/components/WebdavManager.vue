@@ -8,8 +8,8 @@
         <section class="webdav-modal">
           <header class="modal-header">
             <div>
-              <h2>本地备份与文件管理</h2>
-              <p class="subtitle">备份书架、书源、RSS、书签、净化规则和阅读配置，兼容 Legado 备份</p>
+              <h2>备份与恢复</h2>
+              <p class="subtitle">手动管理本地备份，并与 Legado 兼容的 WebDAV 备份</p>
             </div>
             <button class="icon-btn" @click="close" aria-label="关闭">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -24,6 +24,66 @@
           </div>
 
           <template v-else>
+            <section class="remote-backup-panel">
+              <div class="panel-heading">
+                <div>
+                  <h3>WebDAV 网盘备份</h3>
+                  <p>备份文件保存到配置目录根下，手机端可直接恢复。不会自动上传或恢复。</p>
+                </div>
+                <button class="action-btn" :disabled="remoteWorking" @click="testRemote">
+                  {{ remoteWorking && remoteAction === 'test' ? '测试中...' : '测试连接' }}
+                </button>
+              </div>
+              <div class="remote-config-grid">
+                <input v-model.trim="remoteDraft.url" type="url" autocomplete="url" placeholder="WebDAV 服务地址">
+                <input v-model.trim="remoteDraft.account" type="text" autocomplete="username" placeholder="账号">
+                <input v-model="remoteDraft.password" type="password" autocomplete="current-password" placeholder="应用密码">
+                <input v-model.trim="remoteDraft.directory" type="text" placeholder="子目录（默认 legado）">
+              </div>
+              <div class="remote-actions">
+                <button class="action-btn primary" :disabled="remoteWorking" @click="saveRemoteConfig">
+                  保存配置
+                </button>
+                <button class="action-btn" :disabled="remoteWorking || !remoteConfigured" @click="uploadRemoteBackup">
+                  {{ remoteWorking && remoteAction === 'upload' ? '上传中...' : '备份到网盘' }}
+                </button>
+                <button class="action-btn" :disabled="remoteWorking || !remoteConfigured" @click="loadRemoteBackups">
+                  刷新网盘备份
+                </button>
+              </div>
+              <div class="sync-progress-toggle">
+                <div class="setting-switch-copy">
+                  <span>同步阅读进度</span>
+                  <small>{{ appStore.legadoSyncEnabled ? '进入和退出阅读页时与手机端同步' : '已关闭手机端阅读进度同步' }}</small>
+                </div>
+                <button
+                  class="switch-control"
+                  :class="{ on: appStore.legadoSyncEnabled }"
+                  type="button"
+                  role="switch"
+                  :aria-checked="appStore.legadoSyncEnabled"
+                  aria-label="同步阅读进度"
+                  @click="appStore.setLegadoSyncEnabled(!appStore.legadoSyncEnabled)"
+                ><span></span></button>
+              </div>
+              <div v-if="remoteError" class="notice error remote-error">{{ remoteError }}</div>
+              <div v-if="remoteLoading" class="empty-state compact-empty">正在读取网盘备份...</div>
+              <div v-else-if="remoteConfigured && remoteBackups.length === 0" class="empty-state compact-empty">网盘中暂无备份文件</div>
+              <div v-else-if="remoteBackups.length" class="remote-backup-list">
+                <div v-for="entry in remoteBackups" :key="entry.name" class="remote-backup-row">
+                  <div class="remote-backup-info">
+                    <strong>{{ entry.name }}</strong>
+                    <small>{{ formatSize(entry.size) }} · {{ formatDate(entry.lastModified) }}</small>
+                  </div>
+                  <div class="file-actions">
+                    <button class="mini-btn" :disabled="remoteWorking" @click="restoreRemoteBackup(entry)">恢复</button>
+                    <button class="mini-btn" :disabled="remoteWorking" @click="downloadRemoteBackup(entry)">下载</button>
+                    <button class="mini-btn danger" :disabled="remoteWorking" @click="deleteRemoteBackup(entry)">删除</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
             <div class="backup-location">
               <span class="backup-location-label">备份目录</span>
               <code class="backup-location-path">{{ backupPath || '加载中...' }}</code>
@@ -139,11 +199,19 @@ import {
   deleteWebdavFile,
   deleteWebdavFileList,
   getWebdavBackupArchive,
-  getWebdavFileBlob,
   getWebdavFileList,
   getWebdavFileText,
   getWebdavHome,
   openWebdavFolder,
+  testLegadoWebdav,
+  listLegadoWebdavBackups,
+  uploadLegadoWebdavBackup,
+  saveLegadoWebdavBackupAs,
+  getLegadoWebdavBackupArchive,
+  deleteLegadoWebdavBackup,
+  saveWebdavFileAs,
+  type LegadoWebdavBackupEntry,
+  type LegadoWebdavConfig,
   type WebdavFileEntry,
   uploadFilesToWebdav,
 } from '../api/webdav'
@@ -174,6 +242,15 @@ const loading = ref(false)
 const working = ref(false)
 const errorMessage = ref('')
 const backupPath = ref('')
+const remoteDraft = ref<LegadoWebdavConfig>({ ...appStore.legadoWebdavConfig })
+const remoteBackups = ref<LegadoWebdavBackupEntry[]>([])
+const remoteLoading = ref(false)
+const remoteWorking = ref(false)
+const remoteAction = ref<'test' | 'upload' | 'restore' | 'download' | 'delete' | ''>('')
+const remoteError = ref('')
+const remoteConfigured = computed(() => Boolean(
+  remoteDraft.value.url.trim() && remoteDraft.value.account.trim() && remoteDraft.value.password,
+))
 
 // Single-user desktop: WebDAV backup is always available.
 const webdavAvailable = computed(() => true)
@@ -186,10 +263,12 @@ watch(
   () => props.modelValue,
   (visible) => {
     if (visible && webdavAvailable.value) {
+      remoteDraft.value = { ...appStore.legadoWebdavConfig }
       void loadFiles(currentPath.value)
       getWebdavHome()
         .then((home) => { backupPath.value = home.path })
         .catch(() => { backupPath.value = '' })
+      if (remoteConfigured.value) void loadRemoteBackups()
     }
     if (!visible) {
       errorMessage.value = ''
@@ -213,6 +292,112 @@ async function openFolder() {
 function isBackupFile(name: string) {
   const lowerName = name.toLowerCase()
   return lowerName.endsWith('.json') || lowerName.endsWith('.zip')
+}
+
+function saveRemoteConfig() {
+  appStore.setLegadoWebdavConfig({ ...remoteDraft.value, directory: remoteDraft.value.directory?.trim() || 'legado' })
+  appStore.showToast('WebDAV 配置已保存', 'success')
+  remoteError.value = ''
+}
+
+async function testRemote() {
+  remoteWorking.value = true
+  remoteAction.value = 'test'
+  remoteError.value = ''
+  try {
+    await testLegadoWebdav(remoteDraft.value)
+    saveRemoteConfig()
+    appStore.showToast('WebDAV 连接成功', 'success')
+    await loadRemoteBackups()
+  } catch (error) {
+    remoteError.value = (error as Error).message || '连接失败'
+  } finally {
+    remoteWorking.value = false
+    remoteAction.value = ''
+  }
+}
+
+async function loadRemoteBackups() {
+  if (!remoteConfigured.value) return
+  remoteLoading.value = true
+  remoteError.value = ''
+  try {
+    remoteBackups.value = await listLegadoWebdavBackups(remoteDraft.value)
+  } catch (error) {
+    remoteBackups.value = []
+    remoteError.value = (error as Error).message || '读取网盘备份失败'
+  } finally {
+    remoteLoading.value = false
+  }
+}
+
+async function uploadRemoteBackup() {
+  remoteWorking.value = true
+  remoteAction.value = 'upload'
+  try {
+    saveRemoteConfig()
+    const payload = await createWebdavBackupPayload()
+    await uploadLegadoWebdavBackup(remoteDraft.value, buildBackupFilename(), createCompatibleBackupArchiveFiles(payload))
+    appStore.showToast('备份已上传到 WebDAV', 'success')
+    await loadRemoteBackups()
+  } catch (error) {
+    remoteError.value = (error as Error).message || '上传备份失败'
+  } finally {
+    remoteWorking.value = false
+    remoteAction.value = ''
+  }
+}
+
+async function downloadRemoteBackup(entry: LegadoWebdavBackupEntry) {
+  remoteWorking.value = true
+  remoteAction.value = 'download'
+  try {
+    const result = await saveLegadoWebdavBackupAs(remoteDraft.value, entry.name)
+    if (result.saved) {
+      appStore.showToast(`备份已保存到 ${result.path || '所选位置'}`, 'success')
+    }
+  } catch (error) {
+    remoteError.value = (error as Error).message || '下载备份失败'
+  } finally {
+    remoteWorking.value = false
+    remoteAction.value = ''
+  }
+}
+
+async function restoreRemoteBackup(entry: LegadoWebdavBackupEntry) {
+  const ok = await appStore.confirmDialog(`确定从 ${entry.name} 恢复数据吗？这会覆盖当前数据。`, { title: '恢复数据', danger: true })
+  if (!ok) return
+  remoteWorking.value = true
+  remoteAction.value = 'restore'
+  try {
+    const contents = await getLegadoWebdavBackupArchive(remoteDraft.value, entry.name)
+    const result = parseCompatibleBackupArchive(contents)
+    await restoreWebdavBackup(result.payload)
+    appStore.showToast('恢复完成，正在刷新页面', 'success')
+    window.setTimeout(() => window.location.reload(), 800)
+  } catch (error) {
+    remoteError.value = (error as Error).message || '恢复备份失败'
+  } finally {
+    remoteWorking.value = false
+    remoteAction.value = ''
+  }
+}
+
+async function deleteRemoteBackup(entry: LegadoWebdavBackupEntry) {
+  const ok = await appStore.confirmDialog(`确定删除 ${entry.name} 吗？`, { title: '删除备份', danger: true })
+  if (!ok) return
+  remoteWorking.value = true
+  remoteAction.value = 'delete'
+  try {
+    await deleteLegadoWebdavBackup(remoteDraft.value, entry.name)
+    appStore.showToast('远端备份已删除', 'success')
+    await loadRemoteBackups()
+  } catch (error) {
+    remoteError.value = (error as Error).message || '删除备份失败'
+  } finally {
+    remoteWorking.value = false
+    remoteAction.value = ''
+  }
 }
 
 function formatSize(size: number) {
@@ -334,15 +519,10 @@ async function createBackup() {
 async function downloadEntry(entry: EntryRow) {
   working.value = true
   try {
-    const blob = await getWebdavFileBlob(entry.path)
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = entry.name
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    URL.revokeObjectURL(url)
+    const result = await saveWebdavFileAs(entry.path)
+    if (result.saved) {
+      appStore.showToast(`备份已保存到 ${result.path || '所选位置'}`, 'success')
+    }
   } catch (error) {
     appStore.showToast((error as Error).message || '下载失败', 'error')
   } finally {
@@ -440,6 +620,158 @@ async function restoreBackup(entry: EntryRow) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.remote-backup-panel {
+  margin: var(--space-4) var(--space-6) 0;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-sunken);
+}
+
+.panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.panel-heading h3 {
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+.panel-heading p {
+  margin-top: 4px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.remote-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.remote-config-grid input {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.remote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.sync-progress-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-divider);
+}
+
+.sync-progress-toggle .setting-switch-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sync-progress-toggle .setting-switch-copy span {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.sync-progress-toggle .setting-switch-copy small {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.sync-progress-toggle .switch-control {
+  position: relative;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-border);
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.sync-progress-toggle .switch-control span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.24);
+  transition: transform 0.2s ease;
+}
+
+.sync-progress-toggle .switch-control.on {
+  background: var(--color-primary);
+}
+
+.sync-progress-toggle .switch-control.on span {
+  transform: translateX(18px);
+}
+
+.remote-backup-list {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--color-divider);
+}
+
+.remote-backup-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.remote-backup-info {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.remote-backup-info strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+
+.remote-backup-info small {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.compact-empty {
+  min-height: 80px;
+}
+
+.remote-error {
+  margin: var(--space-3) 0 0;
 }
 
 .modal-header {
@@ -703,6 +1035,16 @@ async function restoreBackup(entry: EntryRow) {
 
   .webdav-modal {
     max-height: 92vh;
+  }
+
+  .remote-config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .remote-backup-row,
+  .panel-heading {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .toolbar {

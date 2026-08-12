@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <Teleport to="body">
     <Transition name="fade">
       <div v-if="modelValue" class="drawer-overlay" @click="close"></div>
@@ -87,6 +87,35 @@
               >
                 <span></span>
               </button>
+            </div>
+            <div v-if="isDesktopApp" class="boss-key-setting">
+              <div class="setting-switch-row compact-row">
+                <div class="setting-switch-copy">
+                  <span>老板键</span>
+                  <small>在其他窗口中也能一键隐藏应用</small>
+                </div>
+                <button
+                  class="switch-control"
+                  :class="{ on: appStore.bossKeyEnabled }"
+                  type="button"
+                  role="switch"
+                  :aria-checked="appStore.bossKeyEnabled"
+                  @click="toggleBossKey"
+                ><span></span></button>
+              </div>
+              <button
+                class="boss-key-recorder"
+                :class="{ recording: recordingBossKey }"
+                type="button"
+                :disabled="!appStore.bossKeyEnabled"
+                aria-label="老板键快捷键"
+                @click="startBossKeyRecording"
+                @keydown="recordBossKey"
+                @blur="recordingBossKey = false"
+              >
+                {{ recordingBossKey ? '请按下新的快捷键' : formatBossKey(appStore.bossKeyShortcut) }}
+              </button>
+              <small class="boss-key-hint">需包含 Ctrl、Alt、Shift 或 Meta，F1 至 F12 可单独使用</small>
             </div>
             <template v-if="appStore.canCheckVersionUpdate">
               <div
@@ -299,6 +328,7 @@ import {
   normalizeReaderBackgroundOpacity,
   prepareReaderBackgroundImage,
 } from '../utils/readerBackground'
+import { captureBossKey, formatBossKey } from '../utils/bossKey'
 
 const props = defineProps<{
   modelValue: boolean
@@ -316,6 +346,7 @@ const appVersion = __APP_VERSION__
 const isDesktopApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 const backgroundInputRef = ref<HTMLInputElement | null>(null)
 const processingBackground = ref(false)
+const recordingBossKey = ref(false)
 const hasCustomBackground = computed(() => Boolean(readerStore.config.backgroundImage) && (
   route.name === 'home'
   || (route.name === 'reader' && readerStore.config.applyBackgroundToReader)
@@ -329,7 +360,7 @@ const readerBackgroundDescription = computed(() => {
 
 // Single-user desktop: local WebDAV backup is always available.
 const webdavStatusTitle = computed(() => '\u6587\u4ef6\u5907\u4efd\u4e0e\u6062\u590d')
-const webdavStatusMessage = computed(() => '\u652f\u6301\u5c06\u4e66\u67b6\u3001\u4e66\u7b7e\u7b49\u6570\u636e\u5907\u4efd\u5230\u4f60\u7684 WebDAV \u670d\u52a1\u5668\uff0c\u4e0b\u8f7d\u5907\u4efd\u6587\u4ef6\u5e76\u6267\u884c\u6062\u590d\u3002')
+const webdavStatusMessage = computed(() => '进入备份窗口后，可手动配置 WebDAV 地址并执行备份、下载和恢复。不会自动上传或恢复。')
 
 const versionUpdateTitle = computed(() => {
   const info = appStore.versionUpdate
@@ -369,6 +400,44 @@ function openSourceManager() {
 function openWebdavManager() {
   close()
   appStore.showWebdavManager = true
+}
+
+async function toggleBossKey() {
+  try {
+    await appStore.setBossKeyEnabled(!appStore.bossKeyEnabled)
+    appStore.showToast(appStore.bossKeyEnabled ? '老板键已启用' : '老板键已关闭', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '老板键设置失败', 'error')
+  }
+}
+
+function startBossKeyRecording(event: MouseEvent) {
+  recordingBossKey.value = true
+  ;(event.currentTarget as HTMLButtonElement).focus()
+}
+
+async function recordBossKey(event: KeyboardEvent) {
+  if (!recordingBossKey.value || event.repeat) return
+  event.preventDefault()
+  event.stopPropagation()
+  const result = captureBossKey(event)
+  if (result.error === 'cancel') {
+    recordingBossKey.value = false
+    return
+  }
+  if (result.error) {
+    appStore.showToast(result.error, 'error')
+    return
+  }
+  if (!result.shortcut) return
+
+  try {
+    await appStore.setBossKeyShortcut(result.shortcut)
+    recordingBossKey.value = false
+    appStore.showToast('老板键快捷键已更新', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '快捷键已被其他应用占用', 'error')
+  }
 }
 
 function refreshCache() {
@@ -458,10 +527,12 @@ async function handleCheckVersionUpdate() {
 
 .settings-drawer {
   position: fixed;
-  top: var(--titlebar-height, 32px);
+  top: 0;
   right: 0;
   bottom: 0;
   width: min(420px, 94vw);
+  box-sizing: border-box;
+  padding-top: var(--titlebar-height, 32px);
   background: var(--color-bg-elevated);
   z-index: var(--z-modal);
   display: flex;
@@ -636,6 +707,48 @@ async function handleCheckVersionUpdate() {
   border: 1px solid var(--color-border);
   background: var(--color-bg);
   color: inherit;
+}
+
+.boss-key-setting {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg);
+}
+
+.boss-key-setting .compact-row {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.boss-key-recorder {
+  min-height: 40px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.boss-key-recorder.recording {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 15%, transparent);
+}
+
+.boss-key-recorder:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.boss-key-hint {
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
 }
 
 .password-actions {

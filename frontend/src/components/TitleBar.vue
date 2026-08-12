@@ -4,6 +4,9 @@
     :class="{
       'reader-titlebar': isReader,
       'has-custom-background': hasCustomBackground,
+      'surface-open': surface !== null,
+      'settings-surface-open': surface === 'settings',
+      'reader-surface-open': surface === 'reader-panel',
     }"
     :style="titlebarStyle"
   >
@@ -31,6 +34,10 @@ import { useRoute } from 'vue-router'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useReaderStore } from '../stores/reader'
 
+const { surface = null } = defineProps<{
+  surface?: 'settings' | 'reader-panel' | null
+}>()
+
 const readerStore = useReaderStore()
 const route = useRoute()
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -42,16 +49,26 @@ const hasCustomBackground = computed(() => Boolean(readerStore.config.background
   || (isReader.value && readerStore.config.applyBackgroundToReader)
 ))
 const titlebarStyle = computed(() => {
+  const surfaceBackground = surface === 'reader-panel'
+    ? readerStore.currentTheme.popup
+    : 'var(--color-bg-elevated)'
+
   if (isReader.value) {
     return {
-      background: hasCustomBackground.value
+      '--titlebar-surface-background': surfaceBackground,
+      background: surface !== null
+        ? surfaceBackground
+        : hasCustomBackground.value
         ? `color-mix(in srgb, ${readerStore.currentTheme.body} 24%, transparent)`
         : readerStore.currentTheme.body,
       color: readerStore.currentTheme.fontColor,
     }
   }
   return {
-    background: hasCustomBackground.value
+    '--titlebar-surface-background': surfaceBackground,
+    background: surface !== null
+      ? surfaceBackground
+      : hasCustomBackground.value
       ? 'color-mix(in srgb, var(--color-bg-elevated) 30%, transparent)'
       : 'var(--color-bg-elevated)',
     color: 'var(--color-text-secondary)',
@@ -95,6 +112,7 @@ onBeforeUnmount(() => cleanup())
   position: relative;
   flex-shrink: 0;
   height: var(--titlebar-height, 32px);
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -115,6 +133,34 @@ onBeforeUnmount(() => cleanup())
   backdrop-filter: blur(4px) saturate(115%);
   -webkit-backdrop-filter: blur(4px) saturate(115%);
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.titlebar.surface-open {
+  background: var(--titlebar-surface-background) !important;
+  border-bottom-color: transparent;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  text-shadow: none;
+}
+
+.titlebar.settings-surface-open {
+  box-shadow: inset -420px -1px 0 color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.titlebar.reader-surface-open {
+  box-shadow: inset 340px -1px 0 color-mix(in srgb, currentColor 10%, transparent);
+}
+
+@media (max-width: 494px) {
+  .titlebar.settings-surface-open {
+    box-shadow: inset -94vw -1px 0 color-mix(in srgb, currentColor 10%, transparent);
+  }
+}
+
+@media (max-width: 400px) {
+  .titlebar.reader-surface-open {
+    box-shadow: inset 85vw -1px 0 color-mix(in srgb, currentColor 10%, transparent);
+  }
 }
 
 .titlebar-drag {

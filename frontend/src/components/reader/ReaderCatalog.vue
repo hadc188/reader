@@ -270,7 +270,7 @@ function toggleBookmarkSelection(bm: Bookmark) {
 
 async function addCurrentBookmark() {
   await store.addBookmark()
-  appStore.showToast('宸叉坊鍔犲綋鍓嶉〉涔︾', 'success')
+  appStore.showToast('已添加当前页书签', 'success')
 }
 
 async function handleBatchAction() {

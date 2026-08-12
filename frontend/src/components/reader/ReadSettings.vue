@@ -36,14 +36,39 @@
       <!-- 正文字体 -->
       <div class="setting-row">
         <label>正文字体</label>
-        <div class="btn-group">
-          <button
-            v-for="f in fontPresets"
-            :key="f.value"
-            class="opt-btn"
-            :class="{ active: config.fontFamily === f.value }"
-            @click="store.updateConfig('fontFamily', f.value)"
-          >{{ f.label }}</button>
+        <div class="font-picker">
+          <div class="btn-group">
+            <button
+              v-for="f in fontPresets"
+              :key="f.value"
+              class="opt-btn"
+              :class="{ active: config.fontFamily === f.value }"
+              @click="store.updateConfig('fontFamily', f.value)"
+            >{{ f.label }}</button>
+            <button
+              v-for="font in store.customFonts"
+              :key="font.id"
+              class="opt-btn custom-font-btn"
+              :title="font.name"
+              :class="{ active: config.fontFamily === `custom:${font.id}` }"
+              @click="store.updateConfig('fontFamily', `custom:${font.id}`)"
+            >{{ font.name }}</button>
+          </div>
+          <div class="font-actions">
+            <button class="opt-btn" @click="fontInputRef?.click()">导入字体</button>
+            <button
+              v-if="activeCustomFont"
+              class="opt-btn danger"
+              @click="removeActiveCustomFont"
+            >删除当前字体</button>
+            <input
+              ref="fontInputRef"
+              type="file"
+              accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2"
+              hidden
+              @change="handleFontFile"
+            >
+          </div>
         </div>
       </div>
 
@@ -396,8 +421,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useReaderStore, themePresets, nightThemeIndex, fontPresets } from '../../stores/reader'
+import { useAppStore } from '../../stores/app'
 import {
   getSpeechApiFormatOption,
   speechApiFormatOptions,
@@ -406,6 +432,37 @@ import {
 } from '../../utils/openaiSpeech'
 
 const store = useReaderStore()
+const appStore = useAppStore()
+const fontInputRef = ref<HTMLInputElement | null>(null)
+const activeCustomFont = computed(() => {
+  if (!config.value.fontFamily.startsWith('custom:')) return null
+  const id = config.value.fontFamily.slice('custom:'.length)
+  return store.customFonts.find((font) => font.id === id) || null
+})
+
+async function handleFontFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  try {
+    await store.importCustomFont(file)
+    appStore.showToast('字体已导入并应用', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '字体导入失败', 'error')
+  } finally {
+    input.value = ''
+  }
+}
+
+async function removeActiveCustomFont() {
+  if (!activeCustomFont.value) return
+  try {
+    await store.removeCustomFont(activeCustomFont.value.id)
+    appStore.showToast('字体已删除', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '字体删除失败', 'error')
+  }
+}
 const config = computed(() => store.config)
 const theme = computed(() => store.chromeTheme)
 const isDarkSettings = computed(() => store.isNight || theme.value.name === '暗灰')
@@ -619,6 +676,30 @@ onMounted(async () => {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.font-picker {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 10px;
+}
+
+.font-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.custom-font-btn {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.opt-btn.danger {
+  border-color: color-mix(in srgb, #d14b45 55%, transparent);
+  color: #c43f3a;
 }
 
 .opt-btn {

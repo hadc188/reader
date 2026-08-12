@@ -4,10 +4,15 @@ import { dismissVersionUpdate, getVersionUpdate } from '../api/update'
 import { addReadingStats } from '../api/readingStats'
 import type { VersionUpdateInfo } from '../types'
 import { applySystemTheme } from '../utils/systemUi'
+import type { LegadoWebdavConfig } from '../api/webdav'
+import { invokeRaw } from '../api/invoke'
 
 export const useAppStore = defineStore('app', () => {
   const STATS_KEY = 'reader-stats'
   const CLOSE_TO_TRAY_KEY = 'reader-close-to-tray'
+  const LEGADO_WEBDAV_KEY = 'reader-legado-webdav'
+  const LEGADO_SYNC_ENABLED_KEY = 'reader-legado-sync-enabled'
+  const BOSS_KEY_KEY = 'reader-boss-key'
   // ─── Theme ───
   const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null
   const legacyReaderNight = localStorage.getItem('reader-isNight') === 'true'
@@ -40,6 +45,75 @@ export const useAppStore = defineStore('app', () => {
 
   function toggleCloseToTray() {
     setCloseToTray(!closeToTray.value)
+  }
+
+  const legadoWebdavConfig = ref<LegadoWebdavConfig>(loadLegadoWebdavConfig())
+
+  function loadLegadoWebdavConfig(): LegadoWebdavConfig {
+    try {
+      const value = JSON.parse(localStorage.getItem(LEGADO_WEBDAV_KEY) || '{}')
+      return {
+        url: typeof value.url === 'string' ? value.url : '',
+        account: typeof value.account === 'string' ? value.account : '',
+        password: typeof value.password === 'string' ? value.password : '',
+        directory: typeof value.directory === 'string' && value.directory.trim() ? value.directory : 'legado',
+      }
+    } catch {
+      return { url: '', account: '', password: '', directory: 'legado' }
+    }
+  }
+
+  function setLegadoWebdavConfig(value: LegadoWebdavConfig) {
+    const next = {
+      url: value.url.trim(),
+      account: value.account.trim(),
+      password: value.password,
+      directory: value.directory?.trim() || 'legado',
+    }
+    legadoWebdavConfig.value = next
+    localStorage.setItem(LEGADO_WEBDAV_KEY, JSON.stringify(next))
+  }
+
+  const legadoSyncEnabled = ref(localStorage.getItem(LEGADO_SYNC_ENABLED_KEY) !== 'disabled')
+
+  function setLegadoSyncEnabled(value: boolean) {
+    legadoSyncEnabled.value = value
+    localStorage.setItem(LEGADO_SYNC_ENABLED_KEY, value ? 'enabled' : 'disabled')
+  }
+
+  const bossKeyEnabled = ref(localStorage.getItem(BOSS_KEY_KEY) === 'enabled')
+  const bossKeyShortcut = ref(localStorage.getItem(`${BOSS_KEY_KEY}-shortcut`) || 'CommandOrControl+Shift+H')
+
+  async function applyBossKey() {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+    await invokeRaw('configure_boss_key', {
+      shortcut: bossKeyEnabled.value ? bossKeyShortcut.value : null,
+    })
+  }
+
+  async function setBossKeyEnabled(value: boolean) {
+    const previous = bossKeyEnabled.value
+    bossKeyEnabled.value = value
+    try {
+      await applyBossKey()
+      localStorage.setItem(BOSS_KEY_KEY, value ? 'enabled' : 'disabled')
+    } catch (error) {
+      bossKeyEnabled.value = previous
+      throw error
+    }
+  }
+
+  async function setBossKeyShortcut(value: string) {
+    const previous = bossKeyShortcut.value
+    bossKeyShortcut.value = value
+    try {
+      await applyBossKey()
+      localStorage.setItem(`${BOSS_KEY_KEY}-shortcut`, value)
+    } catch (error) {
+      bossKeyShortcut.value = previous
+      await applyBossKey().catch(() => undefined)
+      throw error
+    }
   }
 
   // ─── 隐藏功能（在设置里可隐藏统计、RSS 等导航入口）───
@@ -294,6 +368,8 @@ export const useAppStore = defineStore('app', () => {
   return {
     theme, setTheme, toggleTheme,
     closeToTray, setCloseToTray, toggleCloseToTray,
+    legadoWebdavConfig, setLegadoWebdavConfig, legadoSyncEnabled, setLegadoSyncEnabled,
+    bossKeyEnabled, bossKeyShortcut, applyBossKey, setBossKeyEnabled, setBossKeyShortcut,
     versionUpdate, versionUpdateLoading, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
     checkVersionUpdate, dismissVersionUpdateReminder,
     showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager,

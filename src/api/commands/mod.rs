@@ -10,6 +10,7 @@ pub mod speech;
 pub mod update;
 pub mod user;
 pub mod webdav;
+pub mod window;
 
 use crate::error::error::{ApiResponse, AppError};
 

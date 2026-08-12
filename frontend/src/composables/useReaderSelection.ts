@@ -94,9 +94,9 @@ export function useReaderSelection(
     }
   }
 
-  async function addSelectionBookmark() {
+  async function addSelectionBookmark(explicitText = '') {
     const selection = window.getSelection?.()
-    const text = activeSelectionText.value || selection?.toString().trim() || ''
+    const text = explicitText || activeSelectionText.value || selection?.toString().trim() || ''
     if (!text) return
     try {
       const pos = scrollContainerRef.value?.scrollTop || 0
@@ -110,9 +110,9 @@ export function useReaderSelection(
     }
   }
 
-  async function addSelectionReplaceRule(mode: 'book' | 'source') {
+  async function addSelectionReplaceRule(mode: 'book' | 'source', explicitText = '') {
     const selection = window.getSelection?.()
-    const text = activeSelectionText.value || selection?.toString().trim() || ''
+    const text = explicitText || activeSelectionText.value || selection?.toString().trim() || ''
     if (!text || !store.book) return
 
     try {

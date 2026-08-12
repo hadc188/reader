@@ -87,6 +87,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::bookmark::delete_bookmark,
         commands::bookmark::delete_bookmarks,
         commands::debug::debug_source_step,
+        commands::network::configure_network_proxy,
         commands::reading_stats::add_reading_stats,
         commands::reading_stats::get_reading_stats_daily,
         commands::reading_stats::get_reading_stats_summary,

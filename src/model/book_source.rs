@@ -49,6 +49,12 @@ pub struct BookSource {
     pub single_url: Option<bool>,
 }
 
+impl BookSource {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled != Some(false)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ExploreKind {

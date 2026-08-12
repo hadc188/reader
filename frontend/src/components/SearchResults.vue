@@ -124,7 +124,7 @@ const shelfBookUrls = computed(() => {
 
 const sourceGroups = computed(() => {
   const groups = new Set<string>()
-  for (const source of sourceStore.sources) {
+  for (const source of sourceStore.sources.filter((item) => item.enabled !== false)) {
     const parts = (source.bookSourceGroup || '')
       .split(/[;,，；、|/]/)
       .map((item) => item.trim())
@@ -146,15 +146,26 @@ const sourceOptions = computed(() => {
     })
 })
 
+const enabledSourceUrls = computed(() => {
+  return new Set(sourceOptions.value.map((source) => source.bookSourceUrl))
+})
+
+const enabledSourceSignature = computed(() => {
+  return sourceOptions.value.map((source) => source.bookSourceUrl).join('\n')
+})
+
 const displayResults = computed<SearchBook[]>(() => {
-  const enriched = results.value.map((book) => {
-    const source = sourceByUrl.value.get(book.origin)
-    return {
-      ...book,
-      originName: book.originName || source?.bookSourceName || book.origin,
-      originGroup: book.originGroup || source?.bookSourceGroup,
-    }
-  })
+  const enriched = results.value
+    .filter((book) => enabledSourceUrls.value.has(book.origin))
+    .map((book) => {
+      const source = sourceByUrl.value.get(book.origin)
+      return {
+        ...book,
+        bookSourceUrls: book.bookSourceUrls?.filter((url) => enabledSourceUrls.value.has(url)),
+        originName: book.originName || source?.bookSourceName || book.origin,
+        originGroup: book.originGroup || source?.bookSourceGroup,
+      }
+    })
   return rankSearchResults(enriched, searchKey.value)
 })
 
@@ -282,6 +293,11 @@ watch(
 watch([searchScope, sourceGroups, sourceOptions], () => {
   ensureSearchSelection()
 }, { immediate: true })
+
+watch(enabledSourceSignature, (next, previous) => {
+  if (next === previous || !searchKey.value) return
+  doSearch(searchKey.value)
+})
 
 onMounted(async () => {
   // Always refresh the source list on mount so the group/source dropdowns

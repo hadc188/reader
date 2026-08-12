@@ -1,6 +1,6 @@
 use crate::crawler::{
     fetcher::{fetch, FetchResponse, RequestSpec, StrResponse},
-    http_client::HttpClient,
+    http_client::{HttpClient, ProxyMode, ProxyStatus},
     url_analyzer::analyze_url,
 };
 use crate::error::error::AppError;
@@ -102,8 +102,16 @@ impl BookService {
         }
     }
 
-    pub fn http_client(&self) -> &reqwest::Client {
+    pub fn http_client(&self) -> reqwest::Client {
         self.http.client()
+    }
+
+    pub fn configure_network_proxy(
+        &self,
+        mode: ProxyMode,
+        proxy: Option<&str>,
+    ) -> anyhow::Result<ProxyStatus> {
+        self.http.configure_proxy(mode, proxy)
     }
 
     fn source_cookie_key(&self, user_ns: &str, source_url: &str) -> String {

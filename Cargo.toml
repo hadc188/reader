@@ -1,6 +1,6 @@
 [package]
 name = "reader-rust"
-version = "1.3.2"
+version = "1.3.3"
 edition = "2021"
 
 # The desktop app is a workspace member so it shares this target/ directory, but
@@ -54,6 +54,9 @@ sxd-document = "0.3"
 quick-xml = "0.31"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 tauri-plugin-dialog = "2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.55"
 
 [dev-dependencies]
 # Only used by tests/*.rs to spin up local mock upstream sites. The app itself

@@ -13,6 +13,8 @@ export const useAppStore = defineStore('app', () => {
   const LEGADO_WEBDAV_KEY = 'reader-legado-webdav'
   const LEGADO_SYNC_ENABLED_KEY = 'reader-legado-sync-enabled'
   const BOSS_KEY_KEY = 'reader-boss-key'
+  const NETWORK_PROXY_MODE_KEY = 'reader-network-proxy-mode'
+  const NETWORK_PROXY_URL_KEY = 'reader-network-proxy-url'
   // ─── Theme ───
   const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null
   const legacyReaderNight = localStorage.getItem('reader-isNight') === 'true'
@@ -114,6 +116,41 @@ export const useAppStore = defineStore('app', () => {
       await applyBossKey().catch(() => undefined)
       throw error
     }
+  }
+
+  // ─── Network proxy ───
+  type NetworkProxyMode = 'system' | 'manual'
+  type NetworkProxyStatus = {
+    mode: NetworkProxyMode
+    active: boolean
+    address?: string | null
+  }
+  const savedProxyMode = localStorage.getItem(NETWORK_PROXY_MODE_KEY)
+  const networkProxyMode = ref<NetworkProxyMode>(savedProxyMode === 'manual' ? 'manual' : 'system')
+  const networkProxyUrl = ref(localStorage.getItem(NETWORK_PROXY_URL_KEY) || '')
+  const networkProxyStatus = ref<NetworkProxyStatus | null>(null)
+
+  async function applyNetworkProxy(
+    mode: NetworkProxyMode = networkProxyMode.value,
+    proxyUrl: string = networkProxyUrl.value,
+  ) {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null
+    const status = await invokeRaw<NetworkProxyStatus>('configure_network_proxy', {
+      mode,
+      proxyUrl: mode === 'manual' ? proxyUrl.trim() : null,
+    })
+    networkProxyStatus.value = status
+    return status
+  }
+
+  async function setNetworkProxy(mode: NetworkProxyMode, proxyUrl: string) {
+    const normalizedUrl = proxyUrl.trim()
+    const status = await applyNetworkProxy(mode, normalizedUrl)
+    networkProxyMode.value = mode
+    networkProxyUrl.value = normalizedUrl
+    localStorage.setItem(NETWORK_PROXY_MODE_KEY, mode)
+    localStorage.setItem(NETWORK_PROXY_URL_KEY, normalizedUrl)
+    return status
   }
 
   // ─── 隐藏功能（在设置里可隐藏统计、RSS 等导航入口）───
@@ -370,6 +407,7 @@ export const useAppStore = defineStore('app', () => {
     closeToTray, setCloseToTray, toggleCloseToTray,
     legadoWebdavConfig, setLegadoWebdavConfig, legadoSyncEnabled, setLegadoSyncEnabled,
     bossKeyEnabled, bossKeyShortcut, applyBossKey, setBossKeyEnabled, setBossKeyShortcut,
+    networkProxyMode, networkProxyUrl, networkProxyStatus, applyNetworkProxy, setNetworkProxy,
     versionUpdate, versionUpdateLoading, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
     checkVersionUpdate, dismissVersionUpdateReminder,
     showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager,

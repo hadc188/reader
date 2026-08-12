@@ -45,9 +45,7 @@ pub async fn request_speech_audio(
     validate_audio_format(kind, format)?;
     let endpoint = build_speech_endpoint(&req.base_url, kind, &req.voice, format)?;
     let proxy_client = build_proxy_client(req.proxy_url.as_deref())?;
-    let client = proxy_client
-        .as_ref()
-        .unwrap_or_else(|| state.book_service.http_client());
+    let client = proxy_client.unwrap_or_else(|| state.book_service.http_client());
     let mut request = client
         .post(endpoint)
         .timeout(Duration::from_secs(120));

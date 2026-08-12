@@ -31,7 +31,7 @@
               <div class="book-tags">
                 <span v-if="book.kind" class="tag">{{ book.kind }}</span>
                 <span v-if="(book as Book).totalChapterNum" class="tag">共{{ (book as Book).totalChapterNum }}章</span>
-                <span v-if="(book as Book).originName" class="tag origin">{{ (book as Book).originName }}</span>
+                <span v-if="displayOriginName" class="tag origin">{{ displayOriginName }}</span>
               </div>
               <p v-if="(book as Book).durChapterTitle" class="progress">
                 已读至：{{ (book as Book).durChapterTitle }}
@@ -168,6 +168,21 @@ const displayChapters = computed(() => {
   return chapters.value.slice(0, 50)
 })
 
+const enabledSourcesByUrl = computed(() => new Map(
+  sourceStore.sources
+    .filter((source) => source.enabled !== false)
+    .map((source) => [source.bookSourceUrl, source]),
+))
+
+const displayOriginName = computed(() => {
+  if (!props.book) return ''
+  return enabledSourcesByUrl.value.get(props.book.origin)?.bookSourceName || ''
+})
+
+const enabledSourceSignature = computed(() => {
+  return Array.from(enabledSourcesByUrl.value.keys()).join('\n')
+})
+
 function sourceNameByOrigin(origin: string): string {
   const found = sourceStore.sources.find((s) => s.bookSourceUrl === origin)
   return found?.bookSourceName || origin
@@ -196,7 +211,7 @@ function loadSourceCandidates() {
   // stale cache saved before the current source was included), so we seed it
   // here and let the SSE stream dedup against it.
   const base = b as Book
-  if (base.origin) {
+  if (base.origin && enabledSourcesByUrl.value.has(base.origin)) {
     sourceCandidates.value.push({
       name: base.name,
       author: base.author,
@@ -223,6 +238,7 @@ function loadSourceCandidates() {
     if (data.data && Array.isArray(data.data)) {
       const seen = new Set(sourceCandidates.value.map((c) => `${c.origin}::${c.bookUrl}`))
       for (const cand of data.data) {
+        if (!enabledSourcesByUrl.value.has(cand.origin)) continue
         const key = `${cand.origin}::${cand.bookUrl}`
         if (!seen.has(key)) {
           seen.add(key)
@@ -260,13 +276,14 @@ watch(() => props.modelValue, async (visible) => {
     coverFailed.value = false
     showAllChapters.value = false
     chapters.value = []
-    if (sourceStore.sources.length === 0) {
-      sourceStore.fetchSources().catch(() => undefined)
-    }
+    await sourceStore.fetchSources(true).catch(() => undefined)
+    if (!props.modelValue || !props.book) return
     loadSourceCandidates()
     // Load the current source's chapters; switching source below reloads them.
     const b = props.book as Book
-    await loadChaptersFor(b.bookUrl, b.origin)
+    if (enabledSourcesByUrl.value.has(b.origin)) {
+      await loadChaptersFor(b.bookUrl, b.origin)
+    }
   } else {
     closeSourceSSE()
   }
@@ -276,6 +293,15 @@ watch(() => props.modelValue, async (visible) => {
 watch(selectedSource, async (sel) => {
   if (!sel) return
   await loadChaptersFor(sel.bookUrl, sel.origin)
+})
+
+watch(enabledSourceSignature, () => {
+  sourceCandidates.value = sourceCandidates.value.filter((candidate) => (
+    enabledSourcesByUrl.value.has(candidate.origin)
+  ))
+  if (selectedSource.value && !enabledSourcesByUrl.value.has(selectedSource.value.origin)) {
+    selectedSource.value = sourceCandidates.value[0] || null
+  }
 })
 
 function close() {

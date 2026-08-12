@@ -74,11 +74,12 @@ pub struct StrResponse {
 pub async fn fetch(client: &HttpClient, req: RequestSpec) -> anyhow::Result<FetchResponse> {
     let mut last_err: Option<anyhow::Error> = None;
     let max_retries = req.retry;
+    let request_client = client.client_with_proxy(req.proxy.as_deref())?;
     for attempt in 0..=max_retries {
         let req = req.clone();
         let mut builder = match req.method {
-            HttpMethod::GET => client.client().get(&req.url),
-            HttpMethod::POST => client.client().post(&req.url),
+            HttpMethod::GET => request_client.get(&req.url),
+            HttpMethod::POST => request_client.post(&req.url),
         };
 
         let mut has_content_type = false;

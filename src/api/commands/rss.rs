@@ -102,14 +102,10 @@ pub async fn delete_rss_sources(
 
 #[tauri::command]
 pub async fn read_remote_rss_source_file(
+    state: tauri::State<'_, AppState>,
     req: RemoteRssSourceParam,
 ) -> Result<ApiResponse<Vec<String>>, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .danger_accept_invalid_certs(true)
-        .build()
-        .map_err(|e| AppError::Internal(e.into()))?;
+    let client = state.book_service.http_client();
 
     let text = client
         .get(&req.url)

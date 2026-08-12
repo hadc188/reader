@@ -266,6 +266,7 @@ async function toggleSource(source: BookSource) {
   try {
     await saveBookSource(next)
     Object.assign(source, next)
+    await sourceStore.fetchSources(true)
     appStore.showToast('书源状态已更新', 'success')
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
@@ -303,7 +304,7 @@ async function removeSource(source: BookSource) {
       createSource()
     }
     appStore.showToast('已删除', 'success')
-    sourceStore.fetchSources().catch(() => undefined)
+    await sourceStore.fetchSources(true).catch(() => undefined)
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
   }
@@ -326,7 +327,7 @@ async function removeSelectedSources() {
       createSource()
     }
     appStore.showToast(`已删除 ${targets.length} 个书源`, 'success')
-    sourceStore.fetchSources().catch(() => undefined)
+    await sourceStore.fetchSources(true).catch(() => undefined)
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '批量删除失败', 'error')
   }

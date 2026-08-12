@@ -37,6 +37,49 @@
             </div>
           </section>
 
+          <section v-if="isDesktopApp" class="drawer-section">
+            <h3 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.14.38.35.72.6 1 .3.31.68.5 1.1.6h.09v4h-.09c-.42.1-.8.29-1.1.6-.25.28-.46.62-.6 1Z" />
+              </svg>
+              网络代理
+            </h3>
+            <div class="proxy-setting">
+              <div class="proxy-mode-toggle" role="group" aria-label="网络代理模式">
+                <button
+                  type="button"
+                  :class="{ active: proxyModeDraft === 'system' }"
+                  @click="proxyModeDraft = 'system'"
+                >跟随系统</button>
+                <button
+                  type="button"
+                  :class="{ active: proxyModeDraft === 'manual' }"
+                  @click="proxyModeDraft = 'manual'"
+                >手动代理</button>
+              </div>
+              <div v-if="proxyModeDraft === 'manual'" class="proxy-address-field">
+                <label for="network-proxy-url">代理地址</label>
+                <input
+                  id="network-proxy-url"
+                  v-model.trim="proxyUrlDraft"
+                  type="text"
+                  inputmode="url"
+                  autocomplete="off"
+                  placeholder="http://127.0.0.1:7890"
+                  @keydown.enter="saveNetworkProxy"
+                >
+              </div>
+              <small class="proxy-hint">{{ proxyDescription }}</small>
+              <button
+                class="action-btn primary proxy-save-btn"
+                type="button"
+                :disabled="savingProxy || (proxyModeDraft === 'manual' && !proxyUrlDraft.trim())"
+                @click="saveNetworkProxy"
+              >{{ savingProxy ? '应用中...' : '保存并应用' }}</button>
+            </div>
+          </section>
+
 
           <section class="drawer-section">
             <h3 class="section-title">
@@ -319,7 +362,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
@@ -347,6 +390,9 @@ const isDesktopApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in w
 const backgroundInputRef = ref<HTMLInputElement | null>(null)
 const processingBackground = ref(false)
 const recordingBossKey = ref(false)
+const proxyModeDraft = ref<'system' | 'manual'>(appStore.networkProxyMode)
+const proxyUrlDraft = ref(appStore.networkProxyUrl)
+const savingProxy = ref(false)
 const hasCustomBackground = computed(() => Boolean(readerStore.config.backgroundImage) && (
   route.name === 'home'
   || (route.name === 'reader' && readerStore.config.applyBackgroundToReader)
@@ -356,6 +402,26 @@ const readerBackgroundDescription = computed(() => {
   return readerStore.config.applyBackgroundToReader
     ? '桌面背景图也会显示在阅读页'
     : '阅读页继续使用阅读主题背景'
+})
+const proxyDescription = computed(() => {
+  if (proxyModeDraft.value === 'manual') {
+    return '书源、订阅源、封面和未单独配置代理的语音请求会使用此地址。'
+  }
+  if (appStore.networkProxyStatus?.mode === 'system') {
+    return appStore.networkProxyStatus.active
+      ? '已读取本机系统代理，相关网络请求会自动使用。'
+      : '本机未启用系统代理，相关网络请求将直接连接。'
+  }
+  return '默认读取本机系统代理；未启用时自动直接连接。'
+})
+
+watch(() => props.modelValue, (visible) => {
+  if (!visible) return
+  proxyModeDraft.value = appStore.networkProxyMode
+  proxyUrlDraft.value = appStore.networkProxyUrl
+  if (isDesktopApp && proxyModeDraft.value === 'system') {
+    void appStore.applyNetworkProxy().catch(() => undefined)
+  }
 })
 
 // Single-user desktop: local WebDAV backup is always available.
@@ -408,6 +474,22 @@ async function toggleBossKey() {
     appStore.showToast(appStore.bossKeyEnabled ? '老板键已启用' : '老板键已关闭', 'success')
   } catch (error) {
     appStore.showToast((error as Error).message || '老板键设置失败', 'error')
+  }
+}
+
+async function saveNetworkProxy() {
+  if (savingProxy.value) return
+  savingProxy.value = true
+  try {
+    const status = await appStore.setNetworkProxy(proxyModeDraft.value, proxyUrlDraft.value)
+    appStore.showToast(
+      status?.active ? '代理设置已应用' : '已使用直接连接',
+      'success',
+    )
+  } catch (error) {
+    appStore.showToast((error as Error).message || '代理设置失败', 'error')
+  } finally {
+    savingProxy.value = false
   }
 }
 
@@ -550,6 +632,7 @@ async function handleCheckVersionUpdate() {
 .settings-drawer.with-custom-background .status-card,
 .settings-drawer.with-custom-background .setting-switch-row,
 .settings-drawer.with-custom-background .background-setting,
+.settings-drawer.with-custom-background .proxy-setting,
 .settings-drawer.with-custom-background .theme-option {
   background: color-mix(in srgb, var(--color-bg-elevated) 66%, transparent);
   border-color: color-mix(in srgb, var(--color-border) 72%, transparent);
@@ -749,6 +832,73 @@ async function handleCheckVersionUpdate() {
 .boss-key-hint {
   color: var(--color-text-tertiary);
   line-height: 1.5;
+}
+
+.proxy-setting {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg);
+}
+
+.proxy-mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+}
+
+.proxy-mode-toggle button {
+  min-height: 36px;
+  border-radius: calc(var(--radius-md) - 2px);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.proxy-mode-toggle button.active {
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-sm);
+}
+
+.proxy-address-field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.proxy-address-field label {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.proxy-address-field input {
+  width: 100%;
+  min-height: 42px;
+  box-sizing: border-box;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+}
+
+.proxy-address-field input:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 14%, transparent);
+  outline: none;
+}
+
+.proxy-hint {
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+.proxy-save-btn {
+  justify-content: center;
 }
 
 .password-actions {

@@ -105,6 +105,15 @@ impl BookSourceService {
         Ok(out)
     }
 
+    pub async fn list_enabled(&self, user_ns: &str) -> Result<Vec<BookSource>, AppError> {
+        Ok(self
+            .list(user_ns)
+            .await?
+            .into_iter()
+            .filter(BookSource::is_enabled)
+            .collect())
+    }
+
     pub async fn delete(&self, user_ns: &str, book_source_url: &str) -> Result<(), AppError> {
         self.repo.delete(user_ns, book_source_url).await
     }

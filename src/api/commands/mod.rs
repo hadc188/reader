@@ -3,6 +3,7 @@ pub mod book_group;
 pub mod book_source;
 pub mod bookmark;
 pub mod debug;
+pub mod network;
 pub mod reading_stats;
 pub mod replace_rule;
 pub mod rss;

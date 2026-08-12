@@ -249,12 +249,14 @@ pub async fn search_book_multi(
         let mut out = Vec::new();
         for url in urls {
             if let Some(s) = state.book_source_service.get(&user_ns, &url).await? {
-                out.push(s);
+                if s.is_enabled() {
+                    out.push(s);
+                }
             }
         }
         out
     } else {
-        let mut list = state.book_source_service.list(&user_ns).await?;
+        let mut list = state.book_source_service.list_enabled(&user_ns).await?;
         if let Some(ref group) = req.book_source_group {
             list.retain(|s| s.book_source_group.as_deref().unwrap_or("").contains(group));
         }
@@ -1506,15 +1508,15 @@ pub async fn search_book_multi_sse(
 
         let sources = if let Some(url) = book_source_url {
             match state_clone.book_source_service.get(&user_ns, &url).await {
-                Ok(Some(s)) => vec![s],
+                Ok(Some(s)) if s.is_enabled() => vec![s],
                 _ => {
-                    let _ = on_event.send(json_err("未配置书源"));
+                    let _ = on_event.send(json_err("书源未启用或已删除"));
                     let _ = on_event.send(json_end(last_index));
                     return;
                 }
             }
         } else {
-            match state_clone.book_source_service.list(&user_ns).await {
+            match state_clone.book_source_service.list_enabled(&user_ns).await {
                 Ok(mut list) => {
                     if let Some(ref group) = book_source_group {
                         list.retain(|s| {
@@ -1626,7 +1628,7 @@ pub async fn search_book_source_sse(
             }
         };
 
-        let sources = match state_clone.book_source_service.list(&user_ns).await {
+        let sources = match state_clone.book_source_service.list_enabled(&user_ns).await {
             Ok(mut list) => {
                 if let Some(ref group) = book_source_group {
                     list.retain(|s| s.book_source_group.as_deref().unwrap_or("").contains(group));
@@ -1722,6 +1724,8 @@ pub async fn get_available_book_source(
 
     // Try to find book by URL first, then by name+author
     let book_url = req.url.clone();
+    let sources = state.book_source_service.list_enabled(&user_ns).await?;
+    let enabled_source_urls = enabled_source_urls(&sources);
 
     if !paged_request {
         if let Some(ref url) = book_url {
@@ -1730,9 +1734,12 @@ pub async fn get_available_book_source(
                 .load_book_sources_cache(&user_ns, url)
                 .await?
             {
-                return Ok(ApiResponse::ok(
-                    serde_json::to_value(list).unwrap_or_default(),
-                ));
+                let list = retain_enabled_source_books(list, &enabled_source_urls);
+                if !list.is_empty() {
+                    return Ok(ApiResponse::ok(
+                        serde_json::to_value(list).unwrap_or_default(),
+                    ));
+                }
             }
         }
     }
@@ -1761,7 +1768,6 @@ pub async fn get_available_book_source(
     let book = book.or_else(|| fallback_available_book(&req));
 
     let book = book.ok_or_else(|| AppError::BadRequest("书籍信息错误".to_string()))?;
-    let sources = state.book_source_service.list(&user_ns).await?;
     if sources.is_empty() {
         if paged_request {
             return Ok(ApiResponse::ok(
@@ -1869,6 +1875,8 @@ pub async fn get_available_book_source_sse(
     let last_index_start = req.last_index.unwrap_or(-1);
     let concurrent_count = effective_available_concurrent_count(req.concurrent_count);
     let book_url = req.url.clone();
+    let sources = state.book_source_service.list_enabled(&user_ns).await?;
+    let enabled_source_urls = enabled_source_urls(&sources);
 
     let book = if let Some(ref url) = book_url {
         state.book_service.get_shelf_book(&user_ns, url).await?
@@ -1896,6 +1904,7 @@ pub async fn get_available_book_source_sse(
                 .load_book_sources_cache(&user_ns, url)
                 .await?
             {
+                let cached = retain_enabled_source_books(cached, &enabled_source_urls);
                 let cached = take_available_source_cached_matches(
                     cached,
                     AVAILABLE_SOURCE_SSE_RESULT_LIMIT,
@@ -1930,7 +1939,6 @@ pub async fn get_available_book_source_sse(
         }
     }
 
-    let sources = state.book_source_service.list(&user_ns).await?;
     let state_clone = state.inner().clone();
     tokio::spawn(async move {
         if sources.is_empty() {
@@ -2411,6 +2419,23 @@ fn available_source_sse_result_key(book: &SearchBook) -> String {
     format!("{}::{}", book.origin, book.book_url)
 }
 
+fn enabled_source_urls(sources: &[BookSource]) -> std::collections::HashSet<String> {
+    sources
+        .iter()
+        .map(|source| normalize_source_url(&source.book_source_url))
+        .collect()
+}
+
+fn retain_enabled_source_books(
+    books: Vec<SearchBook>,
+    enabled_urls: &std::collections::HashSet<String>,
+) -> Vec<SearchBook> {
+    books
+        .into_iter()
+        .filter(|book| enabled_urls.contains(&normalize_source_url(&book.origin)))
+        .collect()
+}
+
 fn available_source_matches_target(
     book: &SearchBook,
     target_name: &str,
@@ -2474,7 +2499,8 @@ mod tests {
     use super::{
         book_matches_delete_target, build_available_book_source_response,
         cache_count_for_shelf_display, fallback_available_book,
-        should_use_available_source_cache, take_available_source_cached_matches,
+        retain_enabled_source_books, should_use_available_source_cache,
+        take_available_source_cached_matches,
         take_available_source_sse_matches, GetAvailableBookSourceRequest,
     };
     use crate::model::{book::Book, search::SearchBook};
@@ -2590,6 +2616,28 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].origin, "https://m.22biqu.com/");
+    }
+
+    #[test]
+    fn available_book_source_cache_removes_disabled_and_deleted_sources() {
+        let cached = vec![
+            SearchBook {
+                origin: "enabled-source".to_string(),
+                book_url: "book-1".to_string(),
+                ..SearchBook::default()
+            },
+            SearchBook {
+                origin: "deleted-source".to_string(),
+                book_url: "book-2".to_string(),
+                ..SearchBook::default()
+            },
+        ];
+        let enabled = HashSet::from(["enabled-source".to_string()]);
+
+        let matches = retain_enabled_source_books(cached, &enabled);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].origin, "enabled-source");
     }
 
     #[test]

@@ -88,6 +88,7 @@ const stopBackgroundClassSync = watch(showCustomBackground, (active) => {
 onMounted(() => {
   void appStore.checkVersionUpdate()
   void appStore.applyBossKey().catch(() => undefined)
+  void appStore.applyNetworkProxy().catch(() => undefined)
 })
 
 let closeUnlisten: (() => void) | undefined

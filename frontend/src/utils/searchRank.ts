@@ -43,6 +43,50 @@ export function isSearchResultRelevant(
     .some((value) => normalizeSearchText(value).includes(key))
 }
 
+/** Keep the complete source hit when merging rows, so the detail modal does
+ * not have to rediscover a source that the initial search already found. */
+export function initializeSearchResult(book: SearchBook): SearchBook {
+  const candidate = searchSourceCandidate(book)
+  return {
+    ...book,
+    bookSourceUrls: book.origin ? [book.origin] : [],
+    sourceCandidates: candidate.origin && candidate.bookUrl ? [candidate] : [],
+  }
+}
+
+export function mergeSearchResult(existing: SearchBook, incoming: SearchBook): SearchBook {
+  const urls = new Set(existing.bookSourceUrls ?? (existing.origin ? [existing.origin] : []))
+  if (incoming.origin) urls.add(incoming.origin)
+
+  const candidates = [...(existing.sourceCandidates ?? [searchSourceCandidate(existing)])]
+  for (const candidate of incoming.sourceCandidates ?? [searchSourceCandidate(incoming)]) {
+    if (!candidate.origin || !candidate.bookUrl) continue
+    const sameSourceIndex = candidates.findIndex((item) => item.origin === candidate.origin)
+    if (sameSourceIndex === -1) {
+      candidates.push(candidate)
+    } else if (!candidates[sameSourceIndex].bookUrl) {
+      candidates[sameSourceIndex] = candidate
+    }
+  }
+
+  return {
+    ...existing,
+    bookSourceUrls: Array.from(urls),
+    sourceCandidates: candidates,
+    coverUrl: existing.coverUrl || incoming.coverUrl,
+    intro: existing.intro || incoming.intro,
+    kind: existing.kind || incoming.kind,
+    lastChapter: existing.lastChapter || incoming.lastChapter,
+    updateTime: existing.updateTime || incoming.updateTime,
+    wordCount: existing.wordCount || incoming.wordCount,
+  }
+}
+
+function searchSourceCandidate(book: SearchBook): SearchBook {
+  const { bookSourceUrls: _urls, sourceCandidates: _candidates, ...candidate } = book
+  return candidate
+}
+
 /** Normalized merge key for deduping search results across sources. */
 export function searchMergeKey(book: Pick<SearchBook, 'name' | 'author'>): string {
   return `${normalizeSearchName(book.name)}|${normalizeSearchAuthor(book.author)}`

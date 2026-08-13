@@ -17,6 +17,7 @@ fn dismissed_latest_release_remains_update_without_reminder() {
         name: Some("v1.0.6".to_string()),
         html_url: "https://github.com/hadc188/reader/releases/tag/v1.0.6".to_string(),
         published_at: Some("2026-05-15T08:00:00Z".to_string()),
+        assets: Vec::new(),
     };
     let preferences = UpdatePreferences {
         dismissed_version: Some("v1.0.6".to_string()),

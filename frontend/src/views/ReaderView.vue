@@ -90,6 +90,27 @@
       @progress="openCachePanel"
     />
 
+    <Transition name="auto-reading-status">
+      <div
+        v-if="store.isAutoScrolling"
+        class="auto-reading-status"
+        role="status"
+        aria-live="polite"
+        :style="{
+          '--auto-status-bg': chromeTheme.popup,
+          '--auto-status-color': chromeTheme.fontColor,
+        }"
+        @click.stop
+      >
+        <span class="auto-reading-indicator" aria-hidden="true"></span>
+        <span class="auto-reading-label">自动翻页中</span>
+        <span class="auto-reading-mode">{{ autoReadingModeLabel }}</span>
+        <button type="button" title="停止自动翻页" aria-label="停止自动翻页" @click="stopAutoReadingFromStatus">
+          <span aria-hidden="true"></span>
+        </button>
+      </div>
+    </Transition>
+
     <ReaderTtsPanel
       :show="showTTSPanel"
       :theme="chromeTheme"
@@ -322,6 +343,7 @@ import { applySystemTheme } from '../utils/systemUi'
 import { countBrowserBookCache } from '../utils/browserCache'
 import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
+import { handleReaderFontSizeWheel } from '../utils/readerFontSize'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
 import type { Book } from '../types'
 
@@ -370,6 +392,7 @@ const theme = computed(() => store.currentTheme)
 const chromeTheme = computed(() => store.chromeTheme)
 const hasReaderBackground = computed(() => Boolean(config.value.backgroundImage) && config.value.applyBackgroundToReader)
 const readerColorScheme = computed(() => store.isNight || theme.value.name === '暗灰' ? 'dark' : 'light')
+const autoReadingModeLabel = computed(() => config.value.autoPageMode === 'paragraph' ? '段落' : '平滑')
 
 const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
@@ -1304,6 +1327,11 @@ function toggleAutoReadingFromContextMenu() {
   appStore.showToast(store.isAutoScrolling ? '已开始自动翻页' : '已停止自动翻页', 'success')
 }
 
+function stopAutoReadingFromStatus() {
+  store.stopAutoReading()
+  appStore.showToast('已停止自动翻页', 'success')
+}
+
 async function refreshFromContextMenu() {
   closeReaderContextMenu()
   try {
@@ -1804,6 +1832,21 @@ async function waitForChapterListReady() {
   })
 }
 
+function handleReaderWheel(event: WheelEvent) {
+  if (store.activePanel) return
+
+  const target = event.target as HTMLElement | null
+  if (target?.closest('input, textarea, select, button, .reader-context-menu')) {
+    return
+  }
+
+  handleReaderFontSizeWheel(
+    config.value.fontSize,
+    event,
+    (fontSize) => store.updateConfig('fontSize', fontSize),
+  )
+}
+
 onMounted(async () => {
   syncViewportSize()
   if (!store.book) {
@@ -1826,6 +1869,7 @@ onMounted(async () => {
   if (readerViewUnmounted) return
   loadSavedReadingPosition()
   window.addEventListener('keydown', handleKeydown)
+  window.addEventListener('wheel', handleReaderWheel, { passive: false })
   window.addEventListener('click', closeReaderContextMenu)
   document.addEventListener('mouseup', handleMouseUpSelection)
   document.addEventListener('touchend', handleTouchEndSelection)
@@ -1865,6 +1909,7 @@ onUnmounted(() => {
     persistReadingProgressKeepalive()
     appStore.stopReadingSession()
   window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('wheel', handleReaderWheel)
   window.removeEventListener('click', closeReaderContextMenu)
   document.removeEventListener('mouseup', handleMouseUpSelection)
   document.removeEventListener('touchend', handleTouchEndSelection)
@@ -2054,6 +2099,82 @@ watch(
 
 .reader-edge-trigger-right {
   right: 0;
+}
+
+.auto-reading-status {
+  position: absolute;
+  top: 12px;
+  right: 48px;
+  z-index: 18;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  max-width: calc(100% - 96px);
+  padding: 5px 5px 5px 12px;
+  border: 1px solid color-mix(in srgb, var(--auto-status-color) 14%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--auto-status-bg) 88%, transparent);
+  color: var(--auto-status-color);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  backdrop-filter: blur(18px) saturate(120%);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+}
+
+.auto-reading-indicator {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-primary) 16%, transparent);
+  animation: auto-reading-pulse 1.8s ease-in-out infinite;
+}
+
+.auto-reading-label {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auto-reading-mode {
+  color: color-mix(in srgb, var(--auto-status-color) 62%, transparent);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.auto-reading-status button {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--auto-status-color) 8%, transparent);
+  transition: background 0.18s ease, transform 0.18s ease;
+}
+
+.auto-reading-status button:hover {
+  background: color-mix(in srgb, var(--auto-status-color) 14%, transparent);
+}
+
+.auto-reading-status button:active {
+  transform: scale(0.94);
+}
+
+.auto-reading-status button span {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+@keyframes auto-reading-pulse {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
 }
 
 .reader-drawer.with-custom-background,
@@ -2428,6 +2549,16 @@ watch(
 }
 
 @media (max-width: 768px) {
+  .auto-reading-status {
+    top: 8px;
+    right: 10px;
+    max-width: calc(100% - 20px);
+  }
+
+  .auto-reading-mode {
+    display: none;
+  }
+
   .reader-scroll-container.horizontal-page-mode {
     scroll-behavior: auto;
   }
@@ -2469,6 +2600,17 @@ watch(
 /* Transitions */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+.auto-reading-status-enter-active,
+.auto-reading-status-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.auto-reading-status-enter-from,
+.auto-reading-status-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
 
 .slide-left-enter-active, .slide-left-leave-active { transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .slide-left-enter-from, .slide-left-leave-to { transform: translateX(-100%); }

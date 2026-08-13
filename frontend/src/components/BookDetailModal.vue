@@ -206,13 +206,10 @@ function loadSourceCandidates() {
   sourcesLoading.value = true
   sourceCandidates.value = []
   selectedSource.value = null
-  // Always include the current source as the first candidate, so the user can
-  // see it and switch back to it. The backend may omit it (e.g. when serving a
-  // stale cache saved before the current source was included), so we seed it
-  // here and let the SSE stream dedup against it.
   const base = b as Book
-  if (base.origin && enabledSourcesByUrl.value.has(base.origin)) {
-    sourceCandidates.value.push({
+  const mergedSearchCandidates = (b as SearchBook).sourceCandidates || []
+  const initialCandidates: SearchBook[] = [
+    {
       name: base.name,
       author: base.author,
       bookUrl: base.bookUrl,
@@ -221,7 +218,17 @@ function loadSourceCandidates() {
       intro: base.intro,
       kind: base.kind,
       lastChapter: base.latestChapterTitle,
-    } as SearchBook)
+    },
+    ...mergedSearchCandidates,
+  ]
+  const seenSources = new Set<string>()
+  for (const candidate of initialCandidates) {
+    if (!candidate.origin || !candidate.bookUrl) continue
+    if (!enabledSourcesByUrl.value.has(candidate.origin) || seenSources.has(candidate.origin)) continue
+    seenSources.add(candidate.origin)
+    sourceCandidates.value.push(candidate)
+  }
+  if (sourceCandidates.value.length) {
     selectedSource.value = sourceCandidates.value[0]
   }
   const stream = getAvailableBookSourceSSE({
@@ -236,12 +243,11 @@ function loadSourceCandidates() {
   stream.onmessage = (event) => {
     const data = event.data as { data?: SearchBook[] }
     if (data.data && Array.isArray(data.data)) {
-      const seen = new Set(sourceCandidates.value.map((c) => `${c.origin}::${c.bookUrl}`))
+      const seen = new Set(sourceCandidates.value.map((candidate) => candidate.origin))
       for (const cand of data.data) {
         if (!enabledSourcesByUrl.value.has(cand.origin)) continue
-        const key = `${cand.origin}::${cand.bookUrl}`
-        if (!seen.has(key)) {
-          seen.add(key)
+        if (!seen.has(cand.origin)) {
+          seen.add(cand.origin)
           sourceCandidates.value.push(cand)
         }
       }

@@ -15,7 +15,18 @@
     </div>
     <div class="settings-sep"></div>
 
+    <nav class="reader-settings-tabs" aria-label="阅读设置分类">
+      <button
+        v-for="tab in readerSettingsTabs"
+        :key="tab.value"
+        type="button"
+        :class="{ active: activeSettingsTab === tab.value }"
+        @click="activeSettingsTab = tab.value"
+      >{{ tab.label }}</button>
+    </nav>
+
     <div class="settings-body">
+      <section v-show="activeSettingsTab === 'display'" class="settings-group">
       <!-- 阅读主题 -->
       <div class="setting-row">
         <label>阅读主题</label>
@@ -94,9 +105,9 @@
       <div class="setting-row">
         <label>字体大小</label>
         <div class="stepper">
-          <button class="step-btn" @click="step('fontSize', -1, 12, 32)">A-</button>
+          <button class="step-btn" @click="step('fontSize', -1, READER_FONT_SIZE_MIN, READER_FONT_SIZE_MAX)">A-</button>
           <span class="step-val">{{ config.fontSize }}</span>
-          <button class="step-btn" @click="step('fontSize', 1, 12, 32)">A+</button>
+          <button class="step-btn" @click="step('fontSize', 1, READER_FONT_SIZE_MIN, READER_FONT_SIZE_MAX)">A+</button>
         </div>
       </div>
 
@@ -157,7 +168,10 @@
         </div>
       </div>
 
-      <div class="settings-sep"></div>
+      <div class="setting-hint shortcut-hint">按住 Ctrl 并滚动鼠标滚轮，也可以快速调整字体大小。</div>
+      </section>
+
+      <section v-show="activeSettingsTab === 'paging'" class="settings-group">
 
       <!-- 翻页方式 -->
       <div class="setting-row">
@@ -239,8 +253,9 @@
           <button class="opt-btn" :class="{ active: config.selectAction === 'ignore' }" @click="store.updateConfig('selectAction', 'ignore')">忽略</button>
         </div>
       </div>
+      </section>
 
-      <div class="settings-sep"></div>
+      <section v-show="activeSettingsTab === 'speech'" class="settings-group">
 
       <!-- 朗读引擎 -->
       <div class="setting-row">
@@ -403,8 +418,9 @@
           <button class="opt-btn" :class="{ active: store.speechConfig.stopAfterMinutes === 120 }" @click="store.setSpeechStopTimer(120)">120分钟</button>
         </div>
       </div>
+      </section>
 
-      <div class="settings-sep"></div>
+      <section v-show="activeSettingsTab === 'more'" class="settings-group">
 
       <!-- 更多操作 -->
       <div class="setting-row">
@@ -416,6 +432,7 @@
         <label>内容净化</label>
         <button class="opt-btn wide" @click="store.openPanel('rule', 'settings')">管理净化规则</button>
       </div>
+      </section>
     </div>
   </div>
 </template>
@@ -430,10 +447,18 @@ import {
   type SpeechApiFormat,
   type SpeechAudioFormat,
 } from '../../utils/openaiSpeech'
+import { READER_FONT_SIZE_MAX, READER_FONT_SIZE_MIN } from '../../utils/readerFontSize'
 
 const store = useReaderStore()
 const appStore = useAppStore()
 const fontInputRef = ref<HTMLInputElement | null>(null)
+const readerSettingsTabs = [
+  { value: 'display', label: '显示' },
+  { value: 'paging', label: '翻页' },
+  { value: 'speech', label: '朗读' },
+  { value: 'more', label: '更多' },
+] as const
+const activeSettingsTab = ref<(typeof readerSettingsTabs)[number]['value']>('display')
 const activeCustomFont = computed(() => {
   if (!config.value.fontFamily.startsWith('custom:')) return null
   const id = config.value.fontFamily.slice('custom:'.length)
@@ -571,7 +596,55 @@ onMounted(async () => {
 .settings-body {
   display: flex;
   flex-direction: column;
+}
+
+.reader-settings-tabs {
+  position: sticky;
+  top: -24px;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+  margin-bottom: 20px;
+  padding: 3px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--settings-popup) 90%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.reader-settings-tabs button {
+  min-height: 38px;
+  border-radius: 11px;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.62;
+  transition: background 0.18s, opacity 0.18s, box-shadow 0.18s, transform 0.18s;
+}
+
+.reader-settings-tabs button:hover:not(.active) {
+  background: color-mix(in srgb, var(--settings-font) 7%, transparent);
+  opacity: 0.82;
+}
+
+.reader-settings-tabs button:active {
+  transform: scale(0.98);
+}
+
+.reader-settings-tabs button.active {
+  background: var(--settings-field-bg-hover);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.12);
+  opacity: 1;
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
   gap: 20px;
+}
+
+.shortcut-hint {
+  margin-top: -8px;
 }
 
 .setting-row {
@@ -703,6 +776,7 @@ onMounted(async () => {
 }
 
 .opt-btn {
+  min-height: 36px;
   padding: 6px 16px;
   border-radius: 20px;
   font-size: 13px;
@@ -717,6 +791,10 @@ onMounted(async () => {
 
 .opt-btn:hover {
   border-color: var(--color-primary, #c97f3a);
+}
+
+.opt-btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .opt-btn:disabled {
@@ -772,6 +850,10 @@ onMounted(async () => {
 @media (max-width: 420px) {
   .read-settings {
     padding: 16px;
+  }
+
+  .reader-settings-tabs {
+    top: -16px;
   }
 
   .settings-header {

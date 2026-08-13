@@ -1,11 +1,12 @@
 import { defineStore } from 'pinia'
 import { ref, watch, computed } from 'vue'
-import { dismissVersionUpdate, getVersionUpdate } from '../api/update'
+import { applyDesktopVersionUpdate, dismissVersionUpdate, getVersionUpdate } from '../api/update'
 import { addReadingStats } from '../api/readingStats'
-import type { VersionUpdateInfo } from '../types'
+import type { DesktopUpdateProgress, VersionUpdateInfo } from '../types'
 import { applySystemTheme } from '../utils/systemUi'
 import type { LegadoWebdavConfig } from '../api/webdav'
 import { invokeRaw } from '../api/invoke'
+import { normalizeBossKeyShortcut } from '../utils/bossKey'
 
 export const useAppStore = defineStore('app', () => {
   const STATS_KEY = 'reader-stats'
@@ -84,7 +85,11 @@ export const useAppStore = defineStore('app', () => {
   }
 
   const bossKeyEnabled = ref(localStorage.getItem(BOSS_KEY_KEY) === 'enabled')
-  const bossKeyShortcut = ref(localStorage.getItem(`${BOSS_KEY_KEY}-shortcut`) || 'CommandOrControl+Shift+H')
+  const savedBossKeyShortcut = localStorage.getItem(`${BOSS_KEY_KEY}-shortcut`)
+  const bossKeyShortcut = ref(normalizeBossKeyShortcut(savedBossKeyShortcut))
+  if (savedBossKeyShortcut !== bossKeyShortcut.value) {
+    localStorage.setItem(`${BOSS_KEY_KEY}-shortcut`, bossKeyShortcut.value)
+  }
 
   async function applyBossKey() {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
@@ -106,11 +111,12 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function setBossKeyShortcut(value: string) {
+    const normalizedValue = normalizeBossKeyShortcut(value)
     const previous = bossKeyShortcut.value
-    bossKeyShortcut.value = value
+    bossKeyShortcut.value = normalizedValue
     try {
       await applyBossKey()
-      localStorage.setItem(`${BOSS_KEY_KEY}-shortcut`, value)
+      localStorage.setItem(`${BOSS_KEY_KEY}-shortcut`, normalizedValue)
     } catch (error) {
       bossKeyShortcut.value = previous
       await applyBossKey().catch(() => undefined)
@@ -188,6 +194,8 @@ export const useAppStore = defineStore('app', () => {
   // ─── User (single-user desktop: no auth) ───
   const versionUpdate = ref<VersionUpdateInfo | null>(null)
   const versionUpdateLoading = ref(false)
+  const desktopUpdateLoading = ref(false)
+  const desktopUpdateProgress = ref<DesktopUpdateProgress | null>(null)
   const versionUpdateChecked = ref(false)
   let versionUpdateToastVersion = ''
   const canCheckVersionUpdate = computed(() => true)
@@ -280,6 +288,43 @@ export const useAppStore = defineStore('app', () => {
         bookUrl: readingSessionBook?.bookUrl,
         bookName: readingSessionBook?.bookName,
       }).catch(() => undefined)
+    }
+  }
+
+  async function applyDesktopUpdate() {
+    if (desktopUpdateLoading.value) return null
+    if (!versionUpdate.value?.updateAvailable) {
+      showToast('当前没有可安装的新版本', 'warning')
+      return null
+    }
+    desktopUpdateLoading.value = true
+    desktopUpdateProgress.value = {
+      stage: 'checking',
+      percent: 0,
+      downloaded: 0,
+      total: 0,
+      message: '正在确认最新版本',
+    }
+    try {
+      const result = await applyDesktopVersionUpdate((progress) => {
+        desktopUpdateProgress.value = progress
+      })
+      showToast(result.message, 'success')
+      return result
+    } catch (error) {
+      if (desktopUpdateProgress.value?.stage !== 'failed') {
+        desktopUpdateProgress.value = {
+          stage: 'failed',
+          percent: null,
+          downloaded: desktopUpdateProgress.value?.downloaded || 0,
+          total: desktopUpdateProgress.value?.total || 0,
+          message: '更新失败',
+        }
+      }
+      showToast((error as Error).message || '更新失败', 'error')
+      return null
+    } finally {
+      desktopUpdateLoading.value = false
     }
   }
 
@@ -408,8 +453,8 @@ export const useAppStore = defineStore('app', () => {
     legadoWebdavConfig, setLegadoWebdavConfig, legadoSyncEnabled, setLegadoSyncEnabled,
     bossKeyEnabled, bossKeyShortcut, applyBossKey, setBossKeyEnabled, setBossKeyShortcut,
     networkProxyMode, networkProxyUrl, networkProxyStatus, applyNetworkProxy, setNetworkProxy,
-    versionUpdate, versionUpdateLoading, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
-    checkVersionUpdate, dismissVersionUpdateReminder,
+    versionUpdate, versionUpdateLoading, desktopUpdateLoading, desktopUpdateProgress, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
+    checkVersionUpdate, dismissVersionUpdateReminder, applyDesktopUpdate,
     showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager,
     isOnline, pwaUpdateAvailable, deferredInstallPrompt, waitingServiceWorker,
     setOnlineStatus, setPwaUpdateAvailable, setDeferredInstallPrompt, setWaitingServiceWorker, installPwa, applyPwaUpdate,

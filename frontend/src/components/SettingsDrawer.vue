@@ -18,9 +18,19 @@
           </button>
         </div>
 
+        <nav class="settings-tabs" aria-label="设置分类">
+          <button
+            v-for="tab in settingsTabs"
+            :key="tab.value"
+            type="button"
+            :class="{ active: activeSettingsTab === tab.value }"
+            @click="activeSettingsTab = tab.value"
+          >{{ tab.label }}</button>
+        </nav>
+
         <div class="drawer-body">
 
-          <section class="drawer-section">
+          <section v-show="activeSettingsTab === 'common'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
@@ -37,7 +47,7 @@
             </div>
           </section>
 
-          <section v-if="isDesktopApp" class="drawer-section">
+          <section v-if="isDesktopApp" v-show="activeSettingsTab === 'app'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <circle cx="12" cy="12" r="3" />
@@ -81,7 +91,7 @@
           </section>
 
 
-          <section class="drawer-section">
+          <section v-show="activeSettingsTab === 'common'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -101,7 +111,7 @@
             </div>
           </section>
 
-          <section class="drawer-section">
+          <section v-show="activeSettingsTab === 'app'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <path d="M12 16V4" />
@@ -135,7 +145,6 @@
               <div class="setting-switch-row compact-row">
                 <div class="setting-switch-copy">
                   <span>老板键</span>
-                  <small>在其他窗口中也能一键隐藏应用</small>
                 </div>
                 <button
                   class="switch-control"
@@ -158,19 +167,25 @@
               >
                 {{ recordingBossKey ? '请按下新的快捷键' : formatBossKey(appStore.bossKeyShortcut) }}
               </button>
-              <small class="boss-key-hint">需包含 Ctrl、Alt、Shift 或 Meta，F1 至 F12 可单独使用</small>
+              <small class="boss-key-hint">需包含 Ctrl、Alt 或 Shift，F1 至 F12 可单独使用</small>
             </div>
             <template v-if="appStore.canCheckVersionUpdate">
               <div
                 class="status-card"
-                :class="{ accent: appStore.hasVersionUpdateReminder, muted: appStore.versionUpdateLoading }"
+                :class="{ accent: appStore.hasVersionUpdateReminder, muted: appStore.versionUpdateLoading && !appStore.desktopUpdateLoading }"
               >
                 <span>{{ versionUpdateTitle }}</span>
                 <small>{{ versionUpdateMessage }}</small>
+                <div v-if="showDesktopUpdateProgress" class="update-progress" :class="{ failed: appStore.desktopUpdateProgress?.stage === 'failed' }" :role="appStore.desktopUpdateProgress?.stage === 'failed' ? undefined : 'progressbar'" :aria-valuenow="appStore.desktopUpdateProgress?.percent ?? undefined" aria-valuemin="0" aria-valuemax="100" :aria-valuetext="desktopUpdateProgressMessage">
+                  <div class="update-progress-track">
+                    <span :class="{ indeterminate: appStore.desktopUpdateProgress?.percent == null && appStore.desktopUpdateProgress?.stage !== 'failed' }" :style="updateProgressStyle"></span>
+                  </div>
+                  <small>{{ desktopUpdateProgressMessage }}</small>
+                </div>
               </div>
               <div class="btn-group version-actions">
                 <button class="action-btn" :disabled="!appStore.versionUpdate?.releaseUrl" @click="handleOpenRelease">
-                  查看 Release
+                  查看发行页
                 </button>
                 <button
                   class="action-btn"
@@ -182,23 +197,19 @@
                 <button class="action-btn" :disabled="appStore.versionUpdateLoading" @click="handleCheckVersionUpdate">
                   {{ appStore.versionUpdateLoading ? '检查中...' : '重新检查' }}
                 </button>
+                <button
+                  v-if="isDesktopApp"
+                  class="action-btn primary"
+                  :disabled="!appStore.versionUpdate?.updateAvailable || appStore.desktopUpdateLoading"
+                  @click="handleDesktopUpdate"
+                >
+                  {{ desktopUpdateButtonLabel }}
+                </button>
               </div>
             </template>
-            <div v-if="appStore.pwaUpdateAvailable" class="status-card accent">
-              <span>&#21457;&#29616;&#26032;&#29256;&#26412;</span>
-              <small>&#21047;&#26032;&#21518;&#21487;&#20351;&#29992;&#26368;&#26032;&#31163;&#32447;&#36164;&#28304;</small>
-            </div>
-            <div class="btn-group">
-              <button class="action-btn" :disabled="!appStore.deferredInstallPrompt" @click="handleInstallPwa">
-                &#23433;&#35013;&#21040;&#20027;&#23631;&#24149;
-              </button>
-              <button class="action-btn primary" :disabled="!appStore.pwaUpdateAvailable" @click="handleApplyUpdate">
-                &#26356;&#26032;&#24212;&#29992;
-              </button>
-            </div>
           </section>
 
-          <section class="drawer-section">
+          <section v-show="activeSettingsTab === 'common'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <rect width="7" height="7" x="3" y="3" rx="1" />
@@ -221,7 +232,7 @@
             </div>
           </section>
 
-          <section class="drawer-section">
+          <section v-show="activeSettingsTab === 'appearance'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <circle cx="12" cy="12" r="4" />
@@ -255,7 +266,6 @@
             <div class="background-setting">
               <div class="setting-switch-copy">
                 <span>桌面背景图</span>
-                <small>背景图片会显示在主页并覆盖标题栏</small>
               </div>
               <div class="background-actions">
                 <button
@@ -322,7 +332,7 @@
             </div>
           </section>
 
-          <section class="drawer-section">
+          <section v-show="activeSettingsTab === 'appearance'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <path d="M17.94 17.94 12 12m0 0a3 3 0 1 0-3-3 3 3 0 0 0 3 3zM12 12l5.5-5.5" />
@@ -390,12 +400,17 @@ const isDesktopApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in w
 const backgroundInputRef = ref<HTMLInputElement | null>(null)
 const processingBackground = ref(false)
 const recordingBossKey = ref(false)
+const settingsTabs = [
+  { value: 'common', label: '常用' },
+  { value: 'appearance', label: '外观' },
+  { value: 'app', label: '应用' },
+] as const
+const activeSettingsTab = ref<(typeof settingsTabs)[number]['value']>('common')
 const proxyModeDraft = ref<'system' | 'manual'>(appStore.networkProxyMode)
 const proxyUrlDraft = ref(appStore.networkProxyUrl)
 const savingProxy = ref(false)
 const hasCustomBackground = computed(() => Boolean(readerStore.config.backgroundImage) && (
-  route.name === 'home'
-  || (route.name === 'reader' && readerStore.config.applyBackgroundToReader)
+  route.name !== 'reader' || readerStore.config.applyBackgroundToReader
 ))
 const readerBackgroundDescription = computed(() => {
   if (!readerStore.config.backgroundImage) return '请先选择桌面背景图片'
@@ -442,13 +457,40 @@ const versionUpdateMessage = computed(() => {
   if (!info) return '可检查 GitHub Release，发现新版后会在设置入口提示。'
   if (info.error && !info.latestVersion) return info.error
   if (info.updateAvailable && info.shouldRemind) {
-    return `当前 ${info.currentVersion}，最新 ${info.latestVersion}。`
+    return `当前 ${info.currentVersion}，最新 ${info.latestVersion}。更新时会自动匹配安装包版或便携版。`
   }
   if (info.updateAvailable) {
     return `当前 ${info.currentVersion}，最新 ${info.latestVersion}，本版本已设置不再提醒。`
   }
   if (info.error) return `当前 ${info.currentVersion}，上次检查失败：${info.error}`
   return `当前 ${info.currentVersion}。`
+})
+const updateProgressStyle = computed(() => ({
+  width: appStore.desktopUpdateProgress?.stage === 'failed'
+    ? '100%'
+    : appStore.desktopUpdateProgress?.percent == null
+    ? '36%'
+    : `${appStore.desktopUpdateProgress.percent}%`,
+}))
+const showDesktopUpdateProgress = computed(() => (
+  appStore.desktopUpdateLoading || appStore.desktopUpdateProgress?.stage === 'failed'
+))
+const desktopUpdateProgressMessage = computed(() => {
+  const progress = appStore.desktopUpdateProgress
+  if (!progress) return '正在准备更新'
+  if (progress.stage === 'downloading' && progress.percent != null) {
+    return `${progress.message} ${progress.percent}%`
+  }
+  return progress.message
+})
+const desktopUpdateButtonLabel = computed(() => {
+  const progress = appStore.desktopUpdateProgress
+  if (!appStore.desktopUpdateLoading) return progress?.stage === 'failed' ? '重试更新' : '下载并更新'
+  if (progress?.stage === 'downloading' && progress.percent != null) return `下载 ${progress.percent}%`
+  if (progress?.stage === 'verifying') return '正在校验...'
+  if (progress?.stage === 'ready') return '正在启动...'
+  if (progress?.stage === 'failed') return '重试更新'
+  return '正在准备...'
 })
 
 
@@ -567,20 +609,8 @@ function removeBackgroundImage() {
   appStore.showToast('桌面背景已移除', 'success')
 }
 
-async function handleInstallPwa() {
-  const accepted = await appStore.installPwa()
-  if (!accepted) {
-    appStore.showToast('\u5f53\u524d\u73af\u5883\u6682\u4e0d\u652f\u6301\u5b89\u88c5\uff0c\u6216\u7528\u6237\u5df2\u53d6\u6d88', 'warning')
-    return
-  }
-  appStore.showToast('\u5b89\u88c5\u8bf7\u6c42\u5df2\u63d0\u4ea4', 'success')
-}
-
-function handleApplyUpdate() {
-  const ok = appStore.applyPwaUpdate()
-  if (!ok) {
-    appStore.showToast('\u5f53\u524d\u6ca1\u6709\u53ef\u5e94\u7528\u7684\u65b0\u7248\u672c', 'warning')
-  }
+async function handleDesktopUpdate() {
+  await appStore.applyDesktopUpdate()
 }
 
 function handleOpenRelease() {
@@ -681,6 +711,40 @@ async function handleCheckVersionUpdate() {
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   padding: var(--space-2) calc(var(--space-5) + var(--safe-area-right)) calc(var(--space-5) + var(--safe-area-bottom)) var(--space-5);
+}
+
+.settings-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  margin: 0 var(--space-5) var(--space-2);
+  padding: 3px;
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-sunken);
+}
+
+.settings-tabs button {
+  min-height: 38px;
+  border-radius: calc(var(--radius-lg) - 3px);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background var(--duration-fast), color var(--duration-fast), box-shadow var(--duration-fast), transform var(--duration-fast);
+}
+
+.settings-tabs button:hover:not(.active) {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.settings-tabs button:active {
+  transform: scale(0.98);
+}
+
+.settings-tabs button.active {
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-sm);
 }
 
 @media (max-width: 768px) {
@@ -919,11 +983,13 @@ async function handleCheckVersionUpdate() {
 .action-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
+  min-height: 38px;
+  padding: 0 var(--space-4);
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
-  font-weight: 500;
+  font-weight: 600;
   background: var(--color-bg);
   color: var(--color-text);
   border: 1px solid var(--color-border-light);
@@ -1119,6 +1185,44 @@ async function handleCheckVersionUpdate() {
 
 .status-card.muted {
   opacity: 0.72;
+}
+
+.update-progress {
+  display: grid;
+  gap: 5px;
+  margin-top: var(--space-1);
+}
+
+.update-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(var(--color-primary-rgb), 0.16);
+}
+
+.update-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+  transition: width 160ms ease;
+}
+
+.update-progress-track span.indeterminate {
+  animation: update-progress-slide 1.1s ease-in-out infinite alternate;
+}
+
+.update-progress.failed small {
+  color: var(--color-danger);
+}
+
+.update-progress.failed .update-progress-track span {
+  background: var(--color-danger);
+}
+
+@keyframes update-progress-slide {
+  from { transform: translateX(-30%); }
+  to { transform: translateX(205%); }
 }
 
 .setting-switch-row {

@@ -88,7 +88,13 @@ import { useSourceStore } from '../stores/source'
 import { searchBookMultiSSE } from '../api/search'
 import type { SseLike } from '../api/sse'
 import { saveBook } from '../api/bookshelf'
-import { isSearchResultRelevant, rankSearchResults, searchMergeKey } from '../utils/searchRank'
+import {
+  initializeSearchResult,
+  isSearchResultRelevant,
+  mergeSearchResult,
+  rankSearchResults,
+  searchMergeKey,
+} from '../utils/searchRank'
 import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
 import type { Book, SearchBook } from '../types'
@@ -162,6 +168,9 @@ const displayResults = computed<SearchBook[]>(() => {
       return {
         ...book,
         bookSourceUrls: book.bookSourceUrls?.filter((url) => enabledSourceUrls.value.has(url)),
+        sourceCandidates: book.sourceCandidates?.filter((candidate) => (
+          enabledSourceUrls.value.has(candidate.origin)
+        )),
         originName: book.originName || source?.bookSourceName || book.origin,
         originGroup: book.originGroup || source?.bookSourceGroup,
       }
@@ -235,16 +244,9 @@ function doSearch(key: string) {
           const mergeKey = searchMergeKey(b)
           const existing = byKey.get(mergeKey)
           if (existing) {
-            // Merge this source into the existing row.
-            const urls = new Set(existing.bookSourceUrls ?? [existing.origin])
-            if (b.origin) urls.add(b.origin)
-            existing.bookSourceUrls = Array.from(urls)
-            if (!existing.coverUrl && b.coverUrl) existing.coverUrl = b.coverUrl
-            if (!existing.intro && b.intro) existing.intro = b.intro
-            if (!existing.kind && b.kind) existing.kind = b.kind
-            if (!existing.lastChapter && b.lastChapter) existing.lastChapter = b.lastChapter
+            byKey.set(mergeKey, mergeSearchResult(existing, b))
           } else {
-            byKey.set(mergeKey, b)
+            byKey.set(mergeKey, initializeSearchResult(b))
           }
         }
         shelfStore.searchResults = Array.from(byKey.values())

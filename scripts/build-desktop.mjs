@@ -18,7 +18,7 @@
 // the `tauri build` step inherits it.
 
 import { execFileSync, execSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -87,6 +87,7 @@ if (!existsSync(exeSrc)) {
 rmSync(stageDir, { recursive: true, force: true })
 mkdirSync(stageDir, { recursive: true })
 cpSync(exeSrc, join(stageDir, 'Reader.exe'))
+writeFileSync(join(stageDir, '.reader-portable'), 'Reader portable package\n')
 // data/ is created at first launch — never ship it in the zip.
 rmSync(join(stageDir, 'data'), { recursive: true, force: true })
 

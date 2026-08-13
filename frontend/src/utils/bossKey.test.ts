@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { captureBossKey, formatBossKey } from './bossKey'
+import { captureBossKey, formatBossKey, normalizeBossKeyShortcut } from './bossKey'
 
 function keyboardEvent(overrides: Partial<KeyboardEvent>): KeyboardEvent {
   return {
@@ -29,6 +29,13 @@ describe('boss key capture', () => {
       .toEqual({ shortcut: 'Alt+Space' })
   })
 
+  it('silently ignores the Windows key and its combinations', () => {
+    expect(captureBossKey(keyboardEvent({ key: 'Meta', code: 'MetaLeft', metaKey: true })))
+      .toEqual({})
+    expect(captureBossKey(keyboardEvent({ key: 'h', code: 'KeyH', metaKey: true })))
+      .toEqual({})
+  })
+
   it('rejects unmodified regular keys', () => {
     expect(captureBossKey(keyboardEvent({ key: 'q', code: 'KeyQ' })).error)
       .toContain('Ctrl')
@@ -36,5 +43,10 @@ describe('boss key capture', () => {
 
   it('formats stored shortcuts for display', () => {
     expect(formatBossKey('CommandOrControl+Shift+H')).toBe('Ctrl / Command + Shift + H')
+  })
+
+  it('replaces an old Windows-key shortcut with the default shortcut', () => {
+    expect(normalizeBossKeyShortcut('Super+H')).toBe('CommandOrControl+Shift+H')
+    expect(normalizeBossKeyShortcut('Control+Alt+H')).toBe('Control+Alt+H')
   })
 })

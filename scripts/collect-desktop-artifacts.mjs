@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -124,7 +124,8 @@ if (platform === 'windows') {
   rmSync(stage, { recursive: true, force: true })
   mkdirSync(stage, { recursive: true })
   cpSync(firstExecutable(), join(stage, 'Reader.exe'))
-  execFileSync('tar.exe', ['-a', '-c', '-f', join(outputDir, `${prefix}-portable.zip`), '-C', stage, 'Reader.exe'])
+  writeFileSync(join(stage, '.reader-portable'), 'Reader portable package\n')
+  execFileSync('tar.exe', ['-a', '-c', '-f', join(outputDir, `${prefix}-portable.zip`), '-C', stage, '.'])
   rmSync(stage, { recursive: true, force: true })
 } else if (platform === 'macos') {
   const dmg = firstBundleFile('.dmg')

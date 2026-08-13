@@ -109,6 +109,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::speech::request_speech_audio,
         commands::update::get_version_update,
         commands::update::dismiss_version_update,
+        commands::update::apply_desktop_update,
         commands::user::save_user_config,
         commands::user::get_user_config,
         commands::user::upload_file,

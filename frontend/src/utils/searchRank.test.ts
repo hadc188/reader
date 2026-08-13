@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { isSearchResultRelevant, rankSearchResults, searchMergeKey } from './searchRank'
+import {
+  initializeSearchResult,
+  isSearchResultRelevant,
+  mergeSearchResult,
+  rankSearchResults,
+  searchMergeKey,
+} from './searchRank'
 import type { SearchBook } from '../types'
 
 function book(partial: Partial<SearchBook>): SearchBook {
@@ -59,5 +65,35 @@ describe('searchMergeKey', () => {
     expect(searchMergeKey({ name: '遮天', author: '作者：辰东' })).toBe('遮天|辰东')
     expect(searchMergeKey({ name: '遮天', author: '作者: 辰 东' })).toBe('遮天|辰东')
     expect(searchMergeKey({ name: '遮 天', author: '辰东' })).toBe('遮天|辰东')
+  })
+})
+
+describe('merged search source candidates', () => {
+  it('retains the complete hit for every merged source', () => {
+    const first = initializeSearchResult(book({
+      name: '神通者', author: '天蚕土豆', origin: 'source-a', bookUrl: 'https://a/book/1',
+    }))
+    const merged = mergeSearchResult(first, book({
+      name: '神通者', author: '天蚕土豆', origin: 'source-b', bookUrl: 'https://b/book/2',
+      lastChapter: '第20章',
+    }))
+
+    expect(merged.bookSourceUrls).toEqual(['source-a', 'source-b'])
+    expect(merged.sourceCandidates).toMatchObject([
+      { origin: 'source-a', bookUrl: 'https://a/book/1' },
+      { origin: 'source-b', bookUrl: 'https://b/book/2', lastChapter: '第20章' },
+    ])
+  })
+
+  it('does not count duplicate hits from the same source twice', () => {
+    const first = initializeSearchResult(book({
+      name: '神通者', author: '天蚕土豆', origin: 'source-a', bookUrl: 'https://a/book/1',
+    }))
+    const merged = mergeSearchResult(first, book({
+      name: '神通者', author: '天蚕土豆', origin: 'source-a', bookUrl: 'https://a/book/duplicate',
+    }))
+
+    expect(merged.bookSourceUrls).toEqual(['source-a'])
+    expect(merged.sourceCandidates).toHaveLength(1)
   })
 })

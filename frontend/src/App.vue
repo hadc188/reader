@@ -67,8 +67,7 @@ const titlebarSurface = computed<'settings' | 'reader-panel' | null>(() => {
 })
 const showCustomBackground = computed(() => {
   if (!readerStore.config.backgroundImage) return false
-  return route.name === 'home'
-    || (route.name === 'reader' && readerStore.config.applyBackgroundToReader)
+  return route.name !== 'reader' || readerStore.config.applyBackgroundToReader
 })
 const appShellStyle = computed(() => ({
   background: route.name === 'reader'
@@ -187,6 +186,43 @@ body {
   backdrop-filter: blur(20px) saturate(120%);
   -webkit-backdrop-filter: blur(20px) saturate(120%);
   border-color: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.app-shell.has-custom-background :is(
+  .explore-view,
+  .stats-view,
+  .rss-view,
+  .rss-manage-view,
+  .rss-article-view,
+  .recent-view
+) {
+  background: transparent !important;
+}
+
+.app-shell.has-custom-background :is(
+  .explore-header,
+  .categories-panel,
+  .source-selector select,
+  .stat-card,
+  .chart-card,
+  .book-stats-card,
+  .range-chip,
+  .rss-toolbar,
+  .article-list-panel,
+  .article-content-panel,
+  .article-page-card,
+  .rss-manage-hero,
+  .rss-manage-tools,
+  .rss-sources,
+  .rss-editor,
+  .recent-search-input,
+  .filter-chip,
+  .recent-clear-btn
+) {
+  background: color-mix(in srgb, var(--color-bg-elevated) 82%, transparent) !important;
+  border-color: color-mix(in srgb, var(--color-border) 76%, transparent) !important;
+  backdrop-filter: blur(18px) saturate(120%);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
 }
 
 body.custom-background-active {

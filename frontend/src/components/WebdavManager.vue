@@ -18,12 +18,26 @@
             </button>
           </header>
 
+          <nav class="backup-tabs" aria-label="备份类型">
+            <button
+              type="button"
+              :class="{ active: activeBackupTab === 'local' }"
+              @click="activeBackupTab = 'local'"
+            >本地备份</button>
+            <button
+              type="button"
+              :class="{ active: activeBackupTab === 'webdav' }"
+              @click="activeBackupTab = 'webdav'"
+            >WebDAV 网盘备份</button>
+          </nav>
+
           <div v-if="!webdavAvailable" class="notice warning">
             <strong>{{ unavailableTitle }}</strong>
             <span>{{ unavailableMessage }}</span>
           </div>
 
           <template v-else>
+            <div v-show="activeBackupTab === 'webdav'" class="backup-tab-content remote-tab-content">
             <section class="remote-backup-panel">
               <div class="panel-heading">
                 <div>
@@ -83,7 +97,9 @@
                 </div>
               </div>
             </section>
+            </div>
 
+            <div v-show="activeBackupTab === 'local'" class="backup-tab-content local-tab-content">
             <div class="backup-location">
               <span class="backup-location-label">备份目录</span>
               <code class="backup-location-path">{{ backupPath || '加载中...' }}</code>
@@ -184,6 +200,7 @@
                 </div>
               </div>
             </div>
+            </div>
           </template>
         </section>
       </div>
@@ -235,6 +252,7 @@ const emit = defineEmits<{
 
 const appStore = useAppStore()
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const activeBackupTab = ref<'local' | 'webdav'>('local')
 const currentPath = ref('/')
 const entries = ref<EntryRow[]>([])
 const selectedPaths = ref<string[]>([])
@@ -622,6 +640,55 @@ async function restoreBackup(entry: EntryRow) {
   overflow: hidden;
 }
 
+.backup-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  margin: var(--space-4) var(--space-6) 0;
+  padding: 3px;
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-sunken);
+}
+
+.backup-tabs button {
+  min-height: 38px;
+  border-radius: calc(var(--radius-lg) - 3px);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background var(--duration-fast), color var(--duration-fast), box-shadow var(--duration-fast), transform var(--duration-fast);
+}
+
+.backup-tabs button:hover:not(.active) {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.backup-tabs button:active {
+  transform: scale(0.98);
+}
+
+.backup-tabs button.active {
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-sm);
+}
+
+.backup-tab-content {
+  flex: 1;
+  min-height: 0;
+}
+
+.local-tab-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.remote-tab-content {
+  overflow-y: auto;
+  padding-bottom: var(--space-6);
+}
+
 .remote-backup-panel {
   margin: var(--space-4) var(--space-6) 0;
   padding: var(--space-4);
@@ -869,6 +936,22 @@ async function restoreBackup(entry: EntryRow) {
   color: #fff;
 }
 
+.action-btn:hover:not(:disabled),
+.mini-btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border);
+}
+
+.action-btn.primary:hover:not(:disabled) {
+  background: var(--color-primary-dark);
+  border-color: var(--color-primary-dark);
+}
+
+.action-btn:active:not(:disabled),
+.mini-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
 .action-btn.danger,
 .mini-btn.danger {
   color: var(--color-danger);
@@ -1035,6 +1118,10 @@ async function restoreBackup(entry: EntryRow) {
 
   .webdav-modal {
     max-height: 92vh;
+  }
+
+  .backup-tabs {
+    margin-inline: var(--space-4);
   }
 
   .remote-config-grid {

@@ -15,6 +15,14 @@ pub fn configure_boss_key(
     else {
         return Ok(());
     };
+    if shortcut.split('+').any(|part| {
+        matches!(
+            part.trim().to_ascii_lowercase().as_str(),
+            "super" | "meta" | "win"
+        )
+    }) {
+        return Err("老板键不能使用系统键".to_string());
+    }
     let parsed = shortcut
         .parse::<tauri_plugin_global_shortcut::Shortcut>()
         .map_err(|_| "快捷键格式无效".to_string())?;

@@ -3,7 +3,19 @@ export interface BossKeyCaptureResult {
   error?: string
 }
 
+export const DEFAULT_BOSS_KEY_SHORTCUT = 'CommandOrControl+Shift+H'
 const FUNCTION_KEY_PATTERN = /^F([1-9]|1[0-2])$/
+
+export function hasSystemKey(shortcut: string): boolean {
+  return shortcut
+    .split('+')
+    .some((part) => ['super', 'meta', 'win'].includes(part.trim().toLowerCase()))
+}
+
+export function normalizeBossKeyShortcut(shortcut: string | null): string {
+  const value = shortcut?.trim() || ''
+  return value && !hasSystemKey(value) ? value : DEFAULT_BOSS_KEY_SHORTCUT
+}
 
 function resolveMainKey(event: KeyboardEvent): string | null {
   if (FUNCTION_KEY_PATTERN.test(event.key.toUpperCase())) return event.key.toUpperCase()
@@ -32,22 +44,22 @@ function resolveMainKey(event: KeyboardEvent): string | null {
 
 export function captureBossKey(event: KeyboardEvent): BossKeyCaptureResult {
   if (event.key === 'Escape') return { error: 'cancel' }
-  if (['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) return {}
+  if (event.metaKey || event.key === 'Meta' || event.code.startsWith('Meta')) return {}
+  if (['Control', 'Alt', 'Shift'].includes(event.key)) return {}
 
   const key = resolveMainKey(event)
   if (!key) return { error: '不支持这个按键，请换一个按键组合' }
-  if (FUNCTION_KEY_PATTERN.test(key) && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
+  if (FUNCTION_KEY_PATTERN.test(key) && !event.ctrlKey && !event.altKey && !event.shiftKey) {
     return { shortcut: key }
   }
-  if (!event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
-    return { error: '快捷键需要包含 Ctrl、Alt、Shift 或 Meta' }
+  if (!event.ctrlKey && !event.altKey && !event.shiftKey) {
+    return { error: '快捷键需要包含 Ctrl、Alt 或 Shift' }
   }
 
   const parts: string[] = []
   if (event.ctrlKey) parts.push('Control')
   if (event.altKey) parts.push('Alt')
   if (event.shiftKey) parts.push('Shift')
-  if (event.metaKey) parts.push('Super')
   parts.push(key)
   return { shortcut: parts.join('+') }
 }
@@ -56,6 +68,5 @@ export function formatBossKey(shortcut: string): string {
   return shortcut
     .replace(/CommandOrControl/gi, 'Ctrl / Command')
     .replace(/Control/gi, 'Ctrl')
-    .replace(/Super/gi, 'Meta')
     .replace(/\+/g, ' + ')
 }

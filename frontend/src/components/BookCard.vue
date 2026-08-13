@@ -171,6 +171,10 @@ const sourceGroup = computed(() => {
 })
 const sourceCount = computed(() => {
   if (!props.isSearch) return 0
+  const candidates = asSearchBook.value.sourceCandidates
+  if (candidates?.length) {
+    return new Set(candidates.map((candidate) => candidate.origin).filter(Boolean)).size
+  }
   return asSearchBook.value.bookSourceUrls?.length ?? 0
 })
 </script>

@@ -55,6 +55,8 @@ export interface SearchBook {
   updateTime?: string
   wordCount?: string
   bookSourceUrls?: string[]
+  /** Full per-source search hits retained when duplicate books are merged. */
+  sourceCandidates?: SearchBook[]
 }
 
 // ─── 章节 ───
@@ -126,6 +128,12 @@ export interface BookGroup {
 }
 
 // ─── 应用更新 ───
+export interface VersionUpdateAsset {
+  name: string
+  browserDownloadUrl: string
+  size: number
+}
+
 export interface VersionUpdateInfo {
   currentVersion: string
   latestVersion: string | null
@@ -137,6 +145,22 @@ export interface VersionUpdateInfo {
   dismissedVersion: string | null
   checkedAt: number
   error: string | null
+  assets: VersionUpdateAsset[]
+}
+
+export interface DesktopUpdateResult {
+  mode: 'installer' | 'portable'
+  platform: 'windows' | 'macos' | 'linux'
+  assetName: string
+  message: string
+}
+
+export interface DesktopUpdateProgress {
+  stage: 'checking' | 'downloading' | 'verifying' | 'ready' | 'failed'
+  percent: number | null
+  downloaded: number
+  total: number
+  message: string
 }
 
 // ─── 书签 ───

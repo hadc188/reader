@@ -45,8 +45,7 @@ const appWindow = isTauri ? getCurrentWindow() : null
 const isMaximized = ref(false)
 const isReader = computed(() => route.name === 'reader')
 const hasCustomBackground = computed(() => Boolean(readerStore.config.backgroundImage) && (
-  route.name === 'home'
-  || (isReader.value && readerStore.config.applyBackgroundToReader)
+  !isReader.value || readerStore.config.applyBackgroundToReader
 ))
 const titlebarStyle = computed(() => {
   const surfaceBackground = surface === 'reader-panel'

@@ -14,12 +14,15 @@
             :selected="selectedFilteredSources.length"
             :loading="loading"
             :testing="testingSources"
+            :test-completed="sourceTestProgress.completed"
+            :test-total="sourceTestProgress.total"
             :invalid-count="invalidSources.length"
             @refresh="loadSources"
             @import-local="triggerFileImport"
             @open-subscriptions="subscriptionPanelVisible = true"
             @export="exportSources"
             @test-sources="testSources"
+            @cancel-test="cancelSourceTest"
             @delete-invalid="removeInvalidSources"
             @create="createSource"
             @close="close"
@@ -44,7 +47,6 @@
             @update:filter-text="filterText = $event"
             @update:filter-group="filterGroup = $event"
             @toggle-current-selection="toggleFilteredSelection"
-            @clear-selection="clearSelection"
             @delete-selection="removeSelectedSources"
           />
 
@@ -121,7 +123,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, onBeforeUnmount, watch } from 'vue'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
   getBookSources,
   deleteBookSource,
@@ -131,6 +134,7 @@ import {
   saveBookSource,
   saveBookSources,
   testBookSources,
+  cancelBookSourceTest,
   readRemoteSourceFile,
   readSourceFile,
   exportBookSources,
@@ -175,6 +179,10 @@ const sourceStore = useSourceStore()
 const sources = ref<BookSource[]>([])
 const loading = ref(false)
 const testingSources = ref(false)
+const sourceTestProgress = ref({ completed: 0, total: 0 })
+const sourceTestTaskId = ref('')
+const sourceTestStopRequested = ref(false)
+let stopSourceTestProgressListener: UnlistenFn | null = null
 const filterText = ref('')
 const filterGroup = ref('')
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -193,6 +201,12 @@ const loginPreviewUrl = ref('')
 const loginPreviewFrameUrl = ref('')
 
 const groupList = computed(() => getBookSourceGroups(sources.value))
+
+watch(groupList, (groups) => {
+  if (filterGroup.value && !groups.includes(filterGroup.value)) {
+    filterGroup.value = ''
+  }
+})
 
 const filteredSources = computed(() =>
   filterBookSources(sources.value, filterText.value, filterGroup.value)
@@ -299,7 +313,9 @@ async function removeSource(source: BookSource) {
   try {
     await deleteBookSource(source.bookSourceUrl)
     sources.value = sources.value.filter((s) => s.bookSourceUrl !== source.bookSourceUrl)
-    selectedSourceUrls.value.delete(source.bookSourceUrl)
+    selectedSourceUrls.value = new Set(
+      Array.from(selectedSourceUrls.value).filter((url) => url !== source.bookSourceUrl)
+    )
     if (editingSource.value?.bookSourceUrl === source.bookSourceUrl) {
       createSource()
     }
@@ -311,7 +327,9 @@ async function removeSource(source: BookSource) {
 }
 
 async function removeSelectedSources() {
-  const targets = selectedFilteredSources.value
+  // Snapshot the visible selection before opening the asynchronous confirm
+  // dialog so the deletion target cannot drift with later filter changes.
+  const targets = [...selectedFilteredSources.value]
   if (!targets.length) {
     appStore.showToast('请先选择要删除的书源', 'warning')
     return
@@ -322,12 +340,14 @@ async function removeSelectedSources() {
     await deleteBookSources(toBookSourceDeletePayload(targets))
     const targetUrls = new Set(targets.map((source) => source.bookSourceUrl))
     sources.value = sources.value.filter((source) => !targetUrls.has(source.bookSourceUrl))
-    selectedSourceUrls.value.clear()
+    selectedSourceUrls.value = new Set(
+      Array.from(selectedSourceUrls.value).filter((url) => !targetUrls.has(url))
+    )
     if (editingSource.value && targetUrls.has(editingSource.value.bookSourceUrl)) {
       createSource()
     }
     appStore.showToast(`已删除 ${targets.length} 个书源`, 'success')
-    await sourceStore.fetchSources(true).catch(() => undefined)
+    await loadSources()
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '批量删除失败', 'error')
   }
@@ -344,33 +364,77 @@ async function testSources() {
   if (!ok) return
 
   testingSources.value = true
+  sourceTestStopRequested.value = false
+  sourceTestTaskId.value = `source-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  sourceTestProgress.value = { completed: 0, total: targets.length }
   try {
+    let completedBeforeBatch = 0
+    stopSourceTestProgressListener = await listen<{
+      taskId: string
+      total: number
+      completed: number
+      cancelled: boolean
+    }>('book-source-test-progress', ({ payload }) => {
+      if (payload.taskId !== sourceTestTaskId.value) return
+      sourceTestProgress.value.completed = Math.min(
+        sourceTestProgress.value.total,
+        completedBeforeBatch + payload.completed,
+      )
+    })
     const batches = chunkBookSourceUrls(targets.map((source) => source.bookSourceUrl))
     const responses = []
     for (const batch of batches) {
+      if (sourceTestStopRequested.value) break
       responses.push(
         await testBookSources({
           bookSourceUrls: batch,
           markInvalid: true,
           concurrent: 12,
+          taskId: sourceTestTaskId.value,
         })
       )
+      completedBeforeBatch += responses.at(-1)?.total || 0
+      sourceTestProgress.value.completed = Math.min(targets.length, completedBeforeBatch)
+      if (responses.at(-1)?.cancelled) break
     }
     const result = mergeBookSourceTestResponses(responses)
     await loadSources()
     if (result.invalid > 0) {
       filterGroup.value = '失效'
     }
-    appStore.showToast(
-      `测试完成：有效 ${result.valid} 个，失效 ${result.invalid} 个，更新分组 ${result.markedInvalid} 个`,
-      result.invalid > 0 ? 'warning' : 'success'
-    )
+    if (sourceTestStopRequested.value || result.cancelled) {
+      appStore.showToast(`测试已中止，已完成 ${result.total} / ${targets.length} 个`, 'warning')
+    } else {
+      appStore.showToast(
+        `测试完成：有效 ${result.valid} 个，失效 ${result.invalid} 个，更新分组 ${result.markedInvalid} 个`,
+        result.invalid > 0 ? 'warning' : 'success'
+      )
+    }
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '书源测试失败', 'error')
   } finally {
+    stopSourceTestProgressListener?.()
+    stopSourceTestProgressListener = null
+    sourceTestTaskId.value = ''
     testingSources.value = false
   }
 }
+
+async function cancelSourceTest() {
+  if (!testingSources.value || sourceTestStopRequested.value) return
+  sourceTestStopRequested.value = true
+  const taskId = sourceTestTaskId.value
+  if (taskId) {
+    await cancelBookSourceTest(taskId).catch(() => undefined)
+  }
+}
+
+onBeforeUnmount(() => {
+  stopSourceTestProgressListener?.()
+  if (sourceTestTaskId.value) {
+    cancelBookSourceTest(sourceTestTaskId.value).catch(() => undefined)
+  }
+})
 
 async function removeInvalidSources() {
   if (!invalidSources.value.length) {
@@ -394,34 +458,30 @@ async function removeInvalidSources() {
 }
 
 function toggleSourceSelection(source: BookSource) {
-  const selected = selectedSourceUrls.value
-  if (selected.has(source.bookSourceUrl)) {
-    selected.delete(source.bookSourceUrl)
+  const next = new Set(selectedSourceUrls.value)
+  if (next.has(source.bookSourceUrl)) {
+    next.delete(source.bookSourceUrl)
   } else {
-    selected.add(source.bookSourceUrl)
+    next.add(source.bookSourceUrl)
   }
+  selectedSourceUrls.value = next
 }
 
 function toggleFilteredSelection() {
-  const selected = selectedSourceUrls.value
+  const next = new Set(selectedSourceUrls.value)
   if (allFilteredSelected.value) {
-    filteredSources.value.forEach((source) => selected.delete(source.bookSourceUrl))
-    return
+    filteredSources.value.forEach((source) => next.delete(source.bookSourceUrl))
+  } else {
+    filteredSources.value.forEach((source) => next.add(source.bookSourceUrl))
   }
-  filteredSources.value.forEach((source) => selected.add(source.bookSourceUrl))
-}
-
-function clearSelection() {
-  selectedSourceUrls.value.clear()
+  selectedSourceUrls.value = next
 }
 
 function pruneSelection() {
   const availableUrls = new Set(sources.value.map((source) => source.bookSourceUrl))
-  Array.from(selectedSourceUrls.value).forEach((url) => {
-    if (!availableUrls.has(url)) {
-      selectedSourceUrls.value.delete(url)
-    }
-  })
+  selectedSourceUrls.value = new Set(
+    Array.from(selectedSourceUrls.value).filter((url) => availableUrls.has(url))
+  )
 }
 
 function hasSourceGroup(source: BookSource, groupName: string) {

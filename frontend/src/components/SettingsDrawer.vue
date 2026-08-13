@@ -631,7 +631,10 @@ async function handleCheckVersionUpdate() {
 <style scoped>
 .drawer-overlay {
   position: fixed;
-  inset: 0;
+  top: var(--titlebar-height, 30px);
+  right: 0;
+  bottom: 0;
+  left: 0;
   background: rgba(0, 0, 0, 0.4);
   z-index: var(--z-overlay);
   backdrop-filter: blur(4px);
@@ -639,12 +642,11 @@ async function handleCheckVersionUpdate() {
 
 .settings-drawer {
   position: fixed;
-  top: 0;
+  top: var(--titlebar-height, 30px);
   right: 0;
   bottom: 0;
   width: min(420px, 94vw);
   box-sizing: border-box;
-  padding-top: var(--titlebar-height, 32px);
   background: var(--color-bg-elevated);
   z-index: var(--z-modal);
   display: flex;

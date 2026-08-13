@@ -34,6 +34,8 @@ export interface Book {
   updateTime?: string
   cachedChapterCount?: number
   browserCachedChapterCount?: number
+  /** 已发现的同一本书的可读书源，加入书架后继续保留。 */
+  sourceCandidates?: SearchBook[]
   recentKind?: 'book' | 'rss'
   rssSourceUrl?: string
   rssLink?: string
@@ -110,6 +112,7 @@ export interface BookSourceTestResponse {
   valid: number
   invalid: number
   markedInvalid: number
+  cancelled: boolean
   results: BookSourceTestResult[]
 }
 

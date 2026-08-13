@@ -901,6 +901,19 @@ pub async fn save_book(
         req.toc_url = Some(repair_encoded_url(toc_url));
     }
 
+    if let Some(candidates) = req.source_candidates.as_mut() {
+        let enabled_urls = state
+            .book_source_service
+            .list_enabled(&user_ns)
+            .await?
+            .into_iter()
+            .map(|source| normalize_source_url(&source.book_source_url))
+            .collect::<std::collections::HashSet<_>>();
+        candidates.retain(|candidate| {
+            enabled_urls.contains(&normalize_source_url(&candidate.origin))
+        });
+    }
+
     if req.toc_url.is_none() || req.name.trim().is_empty() {
         if let Some(source) = state
             .book_source_service

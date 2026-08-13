@@ -32,7 +32,7 @@
           :edit-mode="editMode"
           :selected="selectedUrls?.has(item.bookUrl)"
           :is-search="isSearch"
-          :in-shelf="shelfBookUrls?.has(item.bookUrl)"
+          :in-shelf="isBookInShelf(item)"
           :dragging="sortable && draggedUrl === item.bookUrl"
           :show-delete-action="showDeleteAction"
           @click="$emit('click', $event)"
@@ -75,6 +75,7 @@
 import { computed, nextTick, ref } from 'vue'
 import BookCard from './BookCard.vue'
 import type { Book, SearchBook } from '../types'
+import { searchMergeKey } from '../utils/searchRank'
 
 type DisplayItem = (Book | SearchBook) | { __placeholder: true }
 const PLACEHOLDER_KEY = '__drag-placeholder__'
@@ -90,6 +91,8 @@ const props = defineProps<{
   showDeleteAction?: boolean
   /** 已在书架的书 URL 集合，用于搜索模式下显示「已加入」。 */
   shelfBookUrls?: Set<string>
+  /** 已在书架的书名与作者标识，跨书源判断同一本书。 */
+  shelfBookKeys?: Set<string>
 }>()
 
 const emit = defineEmits<{
@@ -100,6 +103,12 @@ const emit = defineEmits<{
   addToShelf: [book: Book | SearchBook]
   reorder: [payload: { draggedUrl: string; targetUrl: string }]
 }>()
+
+function isBookInShelf(book: Book | SearchBook): boolean {
+  return props.shelfBookUrls?.has(book.bookUrl)
+    || props.shelfBookKeys?.has(searchMergeKey(book))
+    || false
+}
 
 const draggedUrl = ref('')
 const dropTargetUrl = ref('')

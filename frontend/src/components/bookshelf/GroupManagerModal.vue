@@ -99,7 +99,7 @@ async function deleteGroup(groupId: number, groupName: string) {
   inset: 0;
   background: rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(4px);
-  z-index: 1000;
+  z-index: var(--z-overlay);
 }
 
 .modal-container {
@@ -113,7 +113,7 @@ async function deleteGroup(groupId: number, groupName: string) {
     calc(24px + var(--safe-area-right))
     calc(24px + var(--safe-area-bottom))
     calc(24px + var(--safe-area-left));
-  z-index: 1001;
+  z-index: var(--z-modal);
 }
 
 .modal-card {

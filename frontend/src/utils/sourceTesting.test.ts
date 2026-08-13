@@ -25,6 +25,7 @@ describe('sourceTesting', () => {
         valid: 1,
         invalid: 1,
         markedInvalid: 1,
+        cancelled: false,
         results: [
           sourceResult('https://valid.example', true),
           sourceResult('https://invalid.example', false),
@@ -35,6 +36,7 @@ describe('sourceTesting', () => {
         valid: 1,
         invalid: 0,
         markedInvalid: 0,
+        cancelled: false,
         results: [sourceResult('https://valid-2.example', true)],
       },
     ]
@@ -44,6 +46,7 @@ describe('sourceTesting', () => {
       valid: 2,
       invalid: 1,
       markedInvalid: 1,
+      cancelled: false,
       results: responses.flatMap((response) => response.results),
     })
   })

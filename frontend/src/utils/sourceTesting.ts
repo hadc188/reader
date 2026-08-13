@@ -25,6 +25,7 @@ export function mergeBookSourceTestResponses(
       valid: merged.valid + response.valid,
       invalid: merged.invalid + response.invalid,
       markedInvalid: merged.markedInvalid + response.markedInvalid,
+      cancelled: merged.cancelled || response.cancelled,
       results: merged.results.concat(response.results),
     }),
     {
@@ -32,6 +33,7 @@ export function mergeBookSourceTestResponses(
       valid: 0,
       invalid: 0,
       markedInvalid: 0,
+      cancelled: false,
       results: [],
     }
   )

@@ -123,6 +123,12 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     } catch {
       groups.value = []
     }
+    if (
+      activeGroupId.value > 0
+      && !groups.value.some((group) => group.groupId === activeGroupId.value)
+    ) {
+      activeGroupId.value = -1
+    }
   }
 
   async function saveGroup(groupName: string, groupId = 0) {
@@ -138,6 +144,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   async function removeGroup(groupId: number) {
     await apiDeleteBookGroup(groupId)
     groups.value = groups.value.filter((group) => group.groupId !== groupId)
+    activeGroupId.value = -1
     books.value = books.value.map((book) => {
       if (book.group && (book.group & groupId) !== 0) {
         return { ...book, group: book.group & ~groupId }

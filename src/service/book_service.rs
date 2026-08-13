@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 
 /// State for background chapter fetching
@@ -43,6 +43,7 @@ pub struct BookService {
     storage_dir: PathBuf,
     source_cookies: Arc<RwLock<HashMap<String, String>>>,
     rate_states: Arc<RwLock<HashMap<String, RateState>>>,
+    bookshelf_write_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Default)]
@@ -99,6 +100,7 @@ impl BookService {
             storage_dir,
             source_cookies: Arc::new(RwLock::new(HashMap::new())),
             rate_states: Arc::new(RwLock::new(HashMap::new())),
+            bookshelf_write_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -1052,9 +1054,9 @@ impl BookService {
         author: &str,
     ) -> Result<Option<Book>, AppError> {
         let list = self.read_bookshelf(user_ns).await?;
-        Ok(list
-            .into_iter()
-            .find(|b| b.name.trim() == name.trim() && b.author.trim() == author.trim()))
+        Ok(list.into_iter().find(|b| {
+            same_remote_book_identity(&b.name, &b.author, name, author)
+        }))
     }
 
     pub async fn save_book(&self, user_ns: &str, mut book: Book) -> Result<Book, AppError> {
@@ -1066,6 +1068,7 @@ impl BookService {
             return Err(AppError::BadRequest("bookUrl required".to_string()));
         }
 
+        let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
         let mut exist_idx: Option<usize> = None;
         for (i, b) in list.iter().enumerate() {
@@ -1077,6 +1080,7 @@ impl BookService {
 
         if let Some(i) = exist_idx {
             let exist = list[i].clone();
+            merge_book_source_candidates(&exist, &mut book);
             if book.dur_chapter_index.is_none() {
                 book.dur_chapter_index = exist.dur_chapter_index;
             }
@@ -1100,6 +1104,7 @@ impl BookService {
             }
             list[i] = book.clone();
         } else {
+            ensure_current_source_candidate(&mut book);
             list.push(book.clone());
         }
 
@@ -1108,6 +1113,7 @@ impl BookService {
     }
 
     pub async fn save_books(&self, user_ns: &str, books: Vec<Book>) -> Result<Vec<Book>, AppError> {
+        let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut normalized = Vec::with_capacity(books.len());
         for mut book in books {
             sanitize_book_urls(&mut book);
@@ -1123,7 +1129,41 @@ impl BookService {
         Ok(normalized)
     }
 
+    pub async fn remove_source_candidates(
+        &self,
+        user_ns: &str,
+        removed_source_urls: &HashSet<String>,
+    ) -> Result<(), AppError> {
+        if removed_source_urls.is_empty() {
+            return Ok(());
+        }
+        let removed = removed_source_urls
+            .iter()
+            .map(|url| normalize_source_url(url))
+            .collect::<HashSet<_>>();
+        let _write_guard = self.bookshelf_write_lock.lock().await;
+        let mut list = self.read_bookshelf(user_ns).await?;
+        let mut changed = false;
+        for book in &mut list {
+            if let Some(candidates) = book.source_candidates.as_mut() {
+                let before = candidates.len();
+                candidates.retain(|candidate| {
+                    !removed.contains(&normalize_source_url(&candidate.origin))
+                });
+                changed |= before != candidates.len();
+                if candidates.is_empty() {
+                    book.source_candidates = None;
+                }
+            }
+        }
+        if changed {
+            self.write_bookshelf(user_ns, &list).await?;
+        }
+        Ok(())
+    }
+
     pub async fn delete_book(&self, user_ns: &str, book: &Book) -> Result<bool, AppError> {
+        let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
         let orig_len = list.len();
         let removed: Vec<Book> = list
@@ -1143,6 +1183,7 @@ impl BookService {
     }
 
     pub async fn delete_books(&self, user_ns: &str, books: Vec<Book>) -> Result<usize, AppError> {
+        let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
         let mut deleted = 0usize;
         let mut removed_books: Vec<Book> = Vec::new();
@@ -1742,8 +1783,102 @@ fn books_match_for_save(existing: &Book, incoming: &Book) -> bool {
         return false;
     }
     !existing.name.is_empty()
-        && existing.name == incoming.name
-        && existing.author == incoming.author
+        && same_remote_book_identity(
+            &existing.name,
+            &existing.author,
+            &incoming.name,
+            &incoming.author,
+        )
+}
+
+fn same_remote_book_identity(
+    left_name: &str,
+    left_author: &str,
+    right_name: &str,
+    right_author: &str,
+) -> bool {
+    normalize_book_name(left_name) == normalize_book_name(right_name)
+        && normalize_book_author(left_author) == normalize_book_author(right_author)
+}
+
+fn normalize_book_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn normalize_book_author(value: &str) -> String {
+    let compact = normalize_book_name(value);
+    compact
+        .strip_prefix("作者：")
+        .or_else(|| compact.strip_prefix("作者:"))
+        .or_else(|| compact.strip_prefix("作者"))
+        .unwrap_or(&compact)
+        .trim_start_matches(['：', ':'])
+        .to_string()
+}
+
+fn ensure_current_source_candidate(book: &mut Book) {
+    if is_local_book(book) || book.origin.trim().is_empty() || book.book_url.trim().is_empty() {
+        return;
+    }
+    let current = search_candidate_from_book(book);
+    let candidates = book.source_candidates.get_or_insert_with(Vec::new);
+    merge_source_candidate(candidates, current);
+}
+
+fn merge_book_source_candidates(existing: &Book, incoming: &mut Book) {
+    if is_local_book(existing) || is_local_book(incoming) {
+        return;
+    }
+
+    let mut candidates = Vec::new();
+    if !existing.origin.trim().is_empty() && !existing.book_url.trim().is_empty() {
+        merge_source_candidate(&mut candidates, search_candidate_from_book(existing));
+    }
+    for candidate in existing.source_candidates.clone().unwrap_or_default() {
+        merge_source_candidate(&mut candidates, candidate);
+    }
+    for candidate in incoming.source_candidates.clone().unwrap_or_default() {
+        merge_source_candidate(&mut candidates, candidate);
+    }
+    if !incoming.origin.trim().is_empty() && !incoming.book_url.trim().is_empty() {
+        merge_source_candidate(&mut candidates, search_candidate_from_book(incoming));
+    }
+    incoming.source_candidates = (!candidates.is_empty()).then_some(candidates);
+}
+
+fn merge_source_candidate(candidates: &mut Vec<SearchBook>, candidate: SearchBook) {
+    if candidate.origin.trim().is_empty() || candidate.book_url.trim().is_empty() {
+        return;
+    }
+    let origin = normalize_source_url(&candidate.origin);
+    if let Some(index) = candidates
+        .iter()
+        .position(|item| normalize_source_url(&item.origin) == origin)
+    {
+        candidates[index] = candidate;
+    } else {
+        candidates.push(candidate);
+    }
+}
+
+fn search_candidate_from_book(book: &Book) -> SearchBook {
+    SearchBook {
+        name: book.name.clone(),
+        author: book.author.clone(),
+        book_url: book.book_url.clone(),
+        origin: book.origin.clone(),
+        cover_url: book.cover_url.clone(),
+        intro: book.intro.clone(),
+        kind: book.kind.clone(),
+        last_chapter: book.latest_chapter_title.clone(),
+        update_time: book.update_time.clone(),
+        word_count: book.word_count.clone(),
+        book_source_urls: None,
+    }
 }
 
 fn books_match_for_delete(existing: &Book, target: &Book) -> bool {
@@ -1843,6 +1978,100 @@ fn content_type_from_ext(ext: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_remote_book_matches_across_sources() {
+        let existing = Book {
+            name: "神 通者".to_string(),
+            author: "作者：天蚕土豆".to_string(),
+            book_url: "https://source-a.test/book/1".to_string(),
+            origin: "https://source-a.test".to_string(),
+            ..Book::default()
+        };
+        let incoming = Book {
+            name: "神通者".to_string(),
+            author: "天蚕土豆".to_string(),
+            book_url: "https://source-b.test/book/2".to_string(),
+            origin: "https://source-b.test".to_string(),
+            ..Book::default()
+        };
+
+        assert!(books_match_for_save(&existing, &incoming));
+    }
+
+    #[test]
+    fn merging_same_book_retains_each_source_candidate() {
+        let existing = Book {
+            name: "神通者".to_string(),
+            author: "天蚕土豆".to_string(),
+            book_url: "https://source-a.test/book/1".to_string(),
+            origin: "https://source-a.test".to_string(),
+            ..Book::default()
+        };
+        let mut incoming = Book {
+            name: "神通者".to_string(),
+            author: "天蚕土豆".to_string(),
+            book_url: "https://source-b.test/book/2".to_string(),
+            origin: "https://source-b.test".to_string(),
+            ..Book::default()
+        };
+
+        merge_book_source_candidates(&existing, &mut incoming);
+
+        let candidates = incoming.source_candidates.expect("source candidates");
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|item| item.origin == "https://source-a.test"));
+        assert!(candidates.iter().any(|item| item.origin == "https://source-b.test"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_source_saves_keep_one_book_and_both_candidates() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-rust-bookshelf-source-merge-{}",
+            std::process::id()
+        ));
+        let service = BookService::new(
+            HttpClient::new(5, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let first_service = service.clone();
+        let second_service = service.clone();
+        let first = Book {
+            name: "神通者".to_string(),
+            author: "天蚕土豆".to_string(),
+            book_url: "https://source-a.test/book/1".to_string(),
+            origin: "https://source-a.test".to_string(),
+            ..Book::default()
+        };
+        let second = Book {
+            name: "神通者".to_string(),
+            author: "天蚕土豆".to_string(),
+            book_url: "https://source-b.test/book/2".to_string(),
+            origin: "https://source-b.test".to_string(),
+            ..Book::default()
+        };
+
+        let (first_result, second_result) = tokio::join!(
+            first_service.save_book("default", first),
+            second_service.save_book("default", second),
+        );
+        first_result.unwrap();
+        second_result.unwrap();
+
+        let books = service.get_bookshelf("default").await.unwrap();
+        assert_eq!(books.len(), 1);
+        let candidates = books[0]
+            .source_candidates
+            .as_ref()
+            .expect("source candidates");
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|item| item.origin == "https://source-a.test"));
+        assert!(candidates.iter().any(|item| item.origin == "https://source-b.test"));
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+    }
 
     #[tokio::test]
     async fn window_rate_waits_when_existing_starts_reach_limit() {

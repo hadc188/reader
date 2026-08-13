@@ -318,8 +318,8 @@
         @click.stop
       >
         <button :disabled="!readerContextMenu.text" @click="searchContextSelection">搜索选中内容</button>
-        <button @click="bookmarkContextSelection">加入当前页书签</button>
-        <button :disabled="!readerContextMenu.text" @click="replaceContextSelection">按本书替换</button>
+        <button @click="bookmarkContextSelection">加入书签</button>
+        <button @click="openCatalogFromContextMenu">目录</button>
         <button @click="openSourceFromContextMenu">换源</button>
         <button @click="toggleAutoReadingFromContextMenu">{{ store.isAutoScrolling ? '停止自动翻页' : '开始自动翻页' }}</button>
         <button @click="refreshFromContextMenu">刷新</button>
@@ -1310,10 +1310,9 @@ async function bookmarkContextSelection() {
   }
 }
 
-function replaceContextSelection() {
-  const text = readerContextMenu.value.text
+function openCatalogFromContextMenu() {
   closeReaderContextMenu()
-  if (text) addSelectionReplaceRule('book', text)
+  store.openPanel('catalog')
 }
 
 function openSourceFromContextMenu() {
@@ -2449,19 +2448,22 @@ watch(
 /* Slide Drawer Overlay */
 .reader-overlay {
   position: fixed;
-  inset: 0;
+  top: var(--titlebar-height, 30px);
+  right: 0;
+  bottom: 0;
+  left: 0;
   background: rgba(0,0,0,0.4);
   z-index: 40;
 }
 
 .reader-drawer {
   position: fixed;
-  top: 0;
+  top: var(--titlebar-height, 30px);
   bottom: var(--safe-area-bottom);
   left: 0;
   width: min(340px, 85vw);
   box-sizing: border-box;
-  padding-top: calc(var(--titlebar-height, 32px) + var(--safe-area-top));
+  padding-top: var(--safe-area-top);
   z-index: 50;
   box-shadow: 4px 0 24px rgba(0,0,0,0.15);
   transition: background 0.3s;
@@ -2588,10 +2590,10 @@ watch(
   }
 
   .reader-drawer {
-    top: var(--safe-area-top);
+    top: calc(var(--titlebar-height, 30px) + var(--safe-area-top));
     bottom: var(--safe-area-bottom);
     width: min(340px, 85vw);
-    padding-top: var(--safe-area-top);
+    padding-top: 0;
     padding-bottom: var(--safe-area-bottom);
     box-sizing: border-box;
   }

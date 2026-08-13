@@ -13,6 +13,7 @@ const COMMAND_BY_PATH: Record<string, string> = {
   '/reader3/getBookSources': 'get_book_sources',
   '/reader3/loginBookSource': 'login_book_source',
   '/reader3/testBookSources': 'test_book_sources',
+  '/reader3/cancelBookSourceTest': 'cancel_book_source_test',
   '/reader3/deleteInvalidBookSources': 'delete_invalid_book_sources',
   '/reader3/saveBookSource': 'save_book_source',
   '/reader3/saveBookSources': 'save_book_sources',

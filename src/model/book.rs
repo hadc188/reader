@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::search::SearchBook;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Book {
@@ -30,4 +32,8 @@ pub struct Book {
     pub update_time: Option<String>,
     pub can_re_name: Option<String>,
     pub download_urls: Option<String>,
+    /// Per-source search hits retained for stable source switching after the
+    /// book is added to the shelf.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_candidates: Option<Vec<SearchBook>>,
 }

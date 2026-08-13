@@ -73,6 +73,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::book_source::login_book_source,
         commands::book_source::get_explore_kinds,
         commands::book_source::test_book_sources,
+        commands::book_source::cancel_book_source_test,
         commands::book_source::delete_invalid_book_sources,
         commands::book_source::delete_book_source,
         commands::book_source::delete_book_sources,

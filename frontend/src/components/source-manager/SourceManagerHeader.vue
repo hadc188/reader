@@ -5,6 +5,7 @@
       <p>
         共 {{ total }} 个 · 启用 {{ enabled }} 个 · 当前筛选 {{ filtered }} 个
         <span v-if="selected > 0"> · 已选 {{ selected }} 个</span>
+        <span v-if="testing"> · 测试进度 {{ testCompleted }} / {{ testTotal }}（{{ testPercent }}%）</span>
       </p>
     </div>
     <div class="header-actions">
@@ -19,8 +20,14 @@
       <button class="action-btn" type="button" @click="$emit('import-local')">本地导入</button>
       <button class="action-btn" type="button" @click="$emit('open-subscriptions')">远程同步</button>
       <button class="action-btn" type="button" @click="$emit('export')">导出</button>
-      <button class="action-btn" :disabled="testing || total === 0" type="button" @click="$emit('test-sources')">
-        {{ testing ? '测试中...' : '测试书源' }}
+      <button
+        class="action-btn"
+        :class="{ danger: testing }"
+        :disabled="!testing && total === 0"
+        type="button"
+        @click="testing ? $emit('cancel-test') : $emit('test-sources')"
+      >
+        {{ testing ? '中止测试' : '测试书源' }}
       </button>
       <button
         class="action-btn danger"
@@ -41,15 +48,23 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{
+import { computed } from 'vue'
+
+const props = defineProps<{
   total: number
   enabled: number
   filtered: number
   selected: number
   loading: boolean
   testing: boolean
+  testCompleted: number
+  testTotal: number
   invalidCount: number
 }>()
+
+const testPercent = computed(() => (
+  props.testTotal > 0 ? Math.round((props.testCompleted / props.testTotal) * 100) : 0
+))
 
 defineEmits<{
   refresh: []
@@ -57,6 +72,7 @@ defineEmits<{
   'open-subscriptions': []
   export: []
   'test-sources': []
+  'cancel-test': []
   'delete-invalid': []
   create: []
   close: []

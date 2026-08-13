@@ -62,6 +62,7 @@ const showHeader = computed(() => route.name !== 'reader')
 const showBottomNav = computed(() => route.name !== 'reader')
 const titlebarSurface = computed<'settings' | 'reader-panel' | null>(() => {
   if (appStore.showSettingsDrawer) return 'settings'
+  if (appStore.showSourceManager || appStore.showWebdavManager) return 'settings'
   if (route.name === 'reader' && readerStore.activePanel) return 'reader-panel'
   return null
 })
@@ -130,7 +131,6 @@ body {
   display: flex;
   flex-direction: column;
   position: relative;
-  isolation: isolate;
   transition: background var(--duration-normal);
 }
 
@@ -145,7 +145,11 @@ body {
   transition: opacity var(--duration-normal);
 }
 
-.app-shell > .titlebar,
+.app-shell > .titlebar {
+  position: relative;
+  z-index: calc(var(--z-modal) + 20);
+}
+
 .app-shell > .app-body {
   position: relative;
   z-index: 1;
@@ -322,5 +326,19 @@ body.custom-background-active .detail-modal :is(.tag, .action-btn:not(.primary))
 
 .app-main.with-bottom-nav {
   padding-bottom: calc(88px + var(--safe-area-bottom));
+}
+
+/* Teleported dialogs live outside .app-shell. Keep their fixed viewport below
+   the custom titlebar so the draggable area never covers dialog content. */
+:is(
+  .modal-overlay,
+  .modal-container,
+  .drawer-overlay,
+  .reader-overlay,
+  .confirm-overlay,
+  .login-preview-container,
+  .subscription-backdrop
+) {
+  top: var(--titlebar-height, 30px) !important;
 }
 </style>

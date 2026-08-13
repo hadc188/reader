@@ -32,7 +32,6 @@
     </select>
     <div v-if="selectedCount > 0" class="selection-tools">
       <span>已选 {{ selectedCount }}</span>
-      <button class="mini-btn" type="button" @click="$emit('clear-selection')">清空</button>
       <button class="mini-btn danger" type="button" @click="$emit('delete-selection')">删除选中</button>
     </div>
   </section>
@@ -53,7 +52,6 @@ defineEmits<{
   'update:filterText': [value: string]
   'update:filterGroup': [value: string]
   'toggle-current-selection': []
-  'clear-selection': []
   'delete-selection': []
 }>()
 </script>
@@ -171,14 +169,10 @@ defineEmits<{
   }
 
   .selection-tools {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+    display: flex;
+    align-items: center;
     gap: 8px;
     padding: 10px;
-  }
-
-  .selection-tools span {
-    grid-column: 1 / -1;
   }
 
   .selection-tools .mini-btn {

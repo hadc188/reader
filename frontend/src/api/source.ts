@@ -50,11 +50,16 @@ export function testBookSources(params: {
   keyword?: string
   markInvalid?: boolean
   concurrent?: number
+  taskId?: string
 }) {
   if ((params.bookSourceUrls?.length || 0) > MAX_SOURCE_TEST_BATCH_SIZE) {
     throw new Error(`单次最多测试 ${MAX_SOURCE_TEST_BATCH_SIZE} 个书源`)
   }
   return post<BookSourceTestResponse>('/testBookSources', params).then((r) => r.data)
+}
+
+export function cancelBookSourceTest(taskId: string) {
+  return post<{ cancelled: boolean }>('/cancelBookSourceTest', { taskId }).then((r) => r.data)
 }
 
 export function deleteInvalidBookSources() {

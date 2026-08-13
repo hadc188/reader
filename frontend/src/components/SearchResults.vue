@@ -66,6 +66,7 @@
       :books="displayResults"
       :is-search="true"
       :shelf-book-urls="shelfBookUrls"
+      :shelf-book-keys="shelfBookKeys"
       :loading="isSearching && displayResults.length === 0"
       empty-text="未找到相关书籍"
       @click="handleBookClick"
@@ -126,6 +127,10 @@ const sourceByUrl = computed(() => {
 // 已在书架的书 URL 集合，用于搜索卡片显示「已加入」。
 const shelfBookUrls = computed(() => {
   return new Set(shelfStore.books.map((book) => book.bookUrl))
+})
+
+const shelfBookKeys = computed(() => {
+  return new Set(shelfStore.books.map((book) => searchMergeKey(book)))
 })
 
 const sourceGroups = computed(() => {
@@ -333,6 +338,7 @@ async function handleAddToShelf(book: Book | SearchBook) {
       bookUrl: book.bookUrl,
       origin: book.origin,
       coverUrl: book.coverUrl,
+      sourceCandidates: (book as SearchBook).sourceCandidates,
     })
     await shelfStore.fetchBooks()
     appStore.showToast('成功加入书架', 'success')

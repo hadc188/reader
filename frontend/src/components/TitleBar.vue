@@ -136,30 +136,11 @@ onBeforeUnmount(() => cleanup())
 
 .titlebar.surface-open {
   background: var(--titlebar-surface-background) !important;
-  border-bottom-color: transparent;
+  border-bottom-color: color-mix(in srgb, currentColor 12%, transparent);
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
   text-shadow: none;
-}
-
-.titlebar.settings-surface-open {
-  box-shadow: inset -420px -1px 0 color-mix(in srgb, currentColor 10%, transparent);
-}
-
-.titlebar.reader-surface-open {
-  box-shadow: inset 340px -1px 0 color-mix(in srgb, currentColor 10%, transparent);
-}
-
-@media (max-width: 494px) {
-  .titlebar.settings-surface-open {
-    box-shadow: inset -94vw -1px 0 color-mix(in srgb, currentColor 10%, transparent);
-  }
-}
-
-@media (max-width: 400px) {
-  .titlebar.reader-surface-open {
-    box-shadow: inset 85vw -1px 0 color-mix(in srgb, currentColor 10%, transparent);
-  }
+  box-shadow: none;
 }
 
 .titlebar-drag {

@@ -113,6 +113,12 @@
               </svg>
               加入书架
             </button>
+            <button v-else class="action-btn" :disabled="removingFromShelf" @click="removeFromShelf">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <path d="M5 12h14" />
+              </svg>
+              {{ removingFromShelf ? '正在取消...' : '取消加入' }}
+            </button>
             <button class="action-btn" @click="close">关闭</button>
           </div>
         </div>
@@ -132,6 +138,7 @@ import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import type { Book, SearchBook, BookChapter } from '../types'
+import { searchMergeKey } from '../utils/searchRank'
 
 const props = defineProps<{
   modelValue: boolean
@@ -155,6 +162,7 @@ const showAllChapters = ref(false)
 const sourceCandidates = ref<SearchBook[]>([])
 const sourcesLoading = ref(false)
 const selectedSource = ref<SearchBook | null>(null)
+const removingFromShelf = ref(false)
 let sourceSSE: SseLike | null = null
 
 const coverSrc = computed(() => {
@@ -333,6 +341,7 @@ function activeBook(): Book {
       // A different source has its own toc URL; clear the old one so the reader
       // fetches the new source's chapter list instead of failing on a stale one.
       tocUrl: undefined,
+      sourceCandidates: sourceCandidates.value.slice(),
     }
   }
   return base
@@ -340,9 +349,16 @@ function activeBook(): Book {
 
 /** True when the shown book already lives on the shelf (so a source switch should persist). */
 function isShelfBook(): boolean {
+  return Boolean(findShelfBook())
+}
+
+function findShelfBook(): Book | undefined {
   const b = props.book
-  if (!b) return false
-  return shelfStore.books.some((item) => item.bookUrl === b.bookUrl)
+  if (!b) return undefined
+  const identity = searchMergeKey(b)
+  return shelfStore.books.find((item) => (
+    item.bookUrl === b.bookUrl || searchMergeKey(item) === identity
+  ))
 }
 
 /** If the user picked a different source for a shelved book, persist the switch. */
@@ -398,17 +414,25 @@ async function readChapter(index: number) {
 async function addToShelf() {
   const b = activeBook()
   try {
-    await saveBook({
-      name: b.name,
-      author: b.author,
-      bookUrl: b.bookUrl,
-      origin: b.origin,
-      coverUrl: b.coverUrl,
-    })
+    await saveBook(b)
     await shelfStore.fetchBooks()
     appStore.showToast('成功加入书架', 'success')
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '加入书架失败', 'error')
+  }
+}
+
+async function removeFromShelf() {
+  const shelfBook = findShelfBook()
+  if (!shelfBook || removingFromShelf.value) return
+  removingFromShelf.value = true
+  try {
+    await shelfStore.removeBook(shelfBook)
+    appStore.showToast('已取消加入书架', 'success')
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '取消加入失败', 'error')
+  } finally {
+    removingFromShelf.value = false
   }
 }
 </script>

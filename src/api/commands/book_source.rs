@@ -5,12 +5,23 @@ use crate::service::book_source_service::{
     book_source_has_group, set_invalid_book_source_group, INVALID_BOOK_SOURCE_GROUP,
 };
 use crate::util::text::normalize_source_url;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
+use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::task::JoinSet;
 
 const MAX_TEST_SOURCE_BATCH_SIZE: usize = 100;
+static SOURCE_TEST_CANCELLATIONS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Deserialize)]
 pub struct BookSourceUrlParam {
@@ -33,6 +44,13 @@ pub struct TestBookSourcesRequest {
     pub keyword: Option<String>,
     pub mark_invalid: Option<bool>,
     pub concurrent: Option<usize>,
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelBookSourceTestRequest {
+    pub task_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,7 +76,19 @@ struct TestBookSourcesResponse {
     valid: usize,
     invalid: usize,
     marked_invalid: usize,
+    cancelled: bool,
     results: Vec<TestBookSourceItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BookSourceTestProgress {
+    task_id: String,
+    total: usize,
+    completed: usize,
+    valid: usize,
+    invalid: usize,
+    cancelled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,6 +239,7 @@ pub async fn get_explore_kinds(
 #[tauri::command]
 pub async fn test_book_sources(
     state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     req: TestBookSourcesRequest,
 ) -> Result<ApiResponse<serde_json::Value>, AppError> {
     let user_ns = "default";
@@ -230,14 +261,33 @@ pub async fn test_book_sources(
     let concurrent = req.concurrent.unwrap_or(12).clamp(1, 12);
     let keyword = req.keyword.clone();
     let mark_invalid = req.mark_invalid.unwrap_or(true);
-    let outcomes = test_sources_in_parallel(
+    let task_id = req.task_id.filter(|id| !id.trim().is_empty());
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    if let Some(id) = task_id.as_ref() {
+        if let Ok(mut tasks) = SOURCE_TEST_CANCELLATIONS.lock() {
+            if let Some(previous) = tasks.insert(id.clone(), cancel_flag.clone()) {
+                previous.store(true, Ordering::Relaxed);
+            }
+        }
+        emit_source_test_progress(&app, id, sources.len(), 0, 0, 0, false);
+    }
+
+    let (outcomes, cancelled) = test_sources_in_parallel(
         state.book_service.clone(),
         user_ns.to_string(),
         keyword,
         sources,
         concurrent,
+        cancel_flag,
+        app,
+        task_id.clone(),
     )
     .await;
+    if let Some(id) = task_id.as_ref() {
+        if let Ok(mut tasks) = SOURCE_TEST_CANCELLATIONS.lock() {
+            tasks.remove(id);
+        }
+    }
 
     let mut results = Vec::with_capacity(outcomes.len());
     let mut marked_invalid = 0usize;
@@ -280,11 +330,28 @@ pub async fn test_book_sources(
         valid,
         invalid,
         marked_invalid,
+        cancelled,
         results,
     };
     Ok(ApiResponse::ok(
         serde_json::to_value(response).unwrap_or_default(),
     ))
+}
+
+#[tauri::command]
+pub async fn cancel_book_source_test(
+    req: CancelBookSourceTestRequest,
+) -> Result<ApiResponse<serde_json::Value>, AppError> {
+    let cancelled = SOURCE_TEST_CANCELLATIONS
+        .lock()
+        .ok()
+        .and_then(|tasks| tasks.get(&req.task_id).cloned())
+        .map(|flag| {
+            flag.store(true, Ordering::Relaxed);
+            true
+        })
+        .unwrap_or(false);
+    Ok(ApiResponse::ok(serde_json::json!({ "cancelled": cancelled })))
 }
 
 fn normalize_requested_source_urls(
@@ -313,38 +380,115 @@ async fn test_sources_in_parallel(
     keyword: Option<String>,
     sources: Vec<BookSource>,
     concurrent: usize,
-) -> Vec<(
-    BookSource,
-    crate::service::book_service::BookSourceAvailability,
-)> {
-    let permits = Arc::new(Semaphore::new(concurrent.max(1)));
+    cancel_flag: Arc<AtomicBool>,
+    app: tauri::AppHandle,
+    task_id: Option<String>,
+) -> (
+    Vec<(
+        BookSource,
+        crate::service::book_service::BookSourceAvailability,
+    )>,
+    bool,
+) {
+    let total = sources.len();
+    let mut pending = sources.into_iter();
     let mut tasks = JoinSet::new();
 
-    for source in sources {
-        let permit = match permits.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => break,
-        };
+    let spawn_next = |tasks: &mut JoinSet<_>, source: BookSource| {
         let book_service = book_service.clone();
         let user_ns = user_ns.clone();
         let keyword = keyword.clone();
         tasks.spawn(async move {
-            let _permit = permit;
             let availability = book_service
                 .test_book_source_availability(&user_ns, &source, keyword.as_deref())
                 .await;
             (source, availability)
         });
+    };
+
+    for source in pending.by_ref().take(concurrent.max(1)) {
+        spawn_next(&mut tasks, source);
     }
 
     let mut outcomes = Vec::with_capacity(tasks.len());
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(outcome) => outcomes.push(outcome),
-            Err(err) => tracing::error!("book source test task failed: {err}"),
+    let mut valid = 0usize;
+    let mut invalid = 0usize;
+    let mut cancelled = false;
+    while !tasks.is_empty() {
+        if cancel_flag.load(Ordering::Relaxed) {
+            cancelled = true;
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+            break;
+        }
+
+        tokio::select! {
+            result = tasks.join_next() => {
+                if let Some(result) = result {
+                    match result {
+                        Ok(outcome) => {
+                            if outcome.1.valid { valid += 1; } else { invalid += 1; }
+                            outcomes.push(outcome);
+                            if let Some(id) = task_id.as_deref() {
+                                emit_source_test_progress(
+                                    &app,
+                                    id,
+                                    total,
+                                    outcomes.len(),
+                                    valid,
+                                    invalid,
+                                    false,
+                                );
+                            }
+                            if let Some(source) = pending.next() {
+                                spawn_next(&mut tasks, source);
+                            }
+                        }
+                        Err(err) if !err.is_cancelled() => {
+                            tracing::error!("book source test task failed: {err}")
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
-    outcomes
+
+    if let Some(id) = task_id.as_deref() {
+        emit_source_test_progress(
+            &app,
+            id,
+            total,
+            outcomes.len(),
+            valid,
+            invalid,
+            cancelled,
+        );
+    }
+    (outcomes, cancelled)
+}
+
+fn emit_source_test_progress(
+    app: &tauri::AppHandle,
+    task_id: &str,
+    total: usize,
+    completed: usize,
+    valid: usize,
+    invalid: usize,
+    cancelled: bool,
+) {
+    let _ = app.emit(
+        "book-source-test-progress",
+        BookSourceTestProgress {
+            task_id: task_id.to_string(),
+            total,
+            completed,
+            valid,
+            invalid,
+            cancelled,
+        },
+    );
 }
 
 #[tauri::command]
@@ -361,6 +505,10 @@ pub async fn delete_invalid_book_sources(
     for url in &invalid_urls {
         state.book_source_service.delete(&user_ns, url).await?;
     }
+    state
+        .book_service
+        .remove_source_candidates(&user_ns, &invalid_urls.iter().cloned().collect())
+        .await?;
     Ok(ApiResponse::ok(serde_json::json!({
         "deleted": invalid_urls.len()
     })))
@@ -376,6 +524,10 @@ pub async fn delete_book_source(
         .book_source_url
         .ok_or_else(|| AppError::BadRequest("bookSourceUrl required".to_string()))?;
     state.book_source_service.delete(&user_ns, &url).await?;
+    state
+        .book_service
+        .remove_source_candidates(&user_ns, &HashSet::from([url]))
+        .await?;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 
@@ -385,11 +537,17 @@ pub async fn delete_book_sources(
     req: Vec<BookSourceUrlParam>,
 ) -> Result<ApiResponse<serde_json::Value>, AppError> {
     let user_ns = "default";
+    let mut deleted_urls = HashSet::new();
     for item in req {
         if let Some(url) = item.book_source_url {
             state.book_source_service.delete(&user_ns, &url).await?;
+            deleted_urls.insert(url);
         }
     }
+    state
+        .book_service
+        .remove_source_candidates(&user_ns, &deleted_urls)
+        .await?;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 
@@ -398,7 +556,18 @@ pub async fn delete_all_book_sources(
     state: tauri::State<'_, AppState>,
 ) -> Result<ApiResponse<serde_json::Value>, AppError> {
     let user_ns = "default";
+    let deleted_urls = state
+        .book_source_service
+        .list(&user_ns)
+        .await?
+        .into_iter()
+        .map(|source| source.book_source_url)
+        .collect::<HashSet<_>>();
     state.book_source_service.delete_all(&user_ns).await?;
+    state
+        .book_service
+        .remove_source_candidates(&user_ns, &deleted_urls)
+        .await?;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 

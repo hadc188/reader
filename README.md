@@ -17,17 +17,24 @@ Reader 是「阅读3.0」（[Legado](https://github.com/Rimchars/legado)）的�
 
 ## 界面预览
 
-### 自定义书架
+### 书架与阅读
 
-![支持自定义背景的书架](desktop/image/1.png)
+<p align="center"><img src="desktop/image/1.1.png" alt="书架" width="100%" /></p>
+<p align="center"><img src="desktop/image/3.1.png" alt="阅读页面" width="100%" /></p>
 
-### 书源管理
+### 书源与发现
 
-![书源管理与可视化编辑](desktop/image/2.png)
+<p align="center">
+  <img src="desktop/image/2.1.png" alt="书源管理" width="49%" />
+  <img src="desktop/image/4.png" alt="发现书海" width="49%" />
+</p>
 
-### 沉浸阅读
+### 统计与 RSS
 
-![自定义背景的阅读页面](desktop/image/3.png)
+<p align="center">
+  <img src="desktop/image/5.png" alt="阅读数据统计" width="49%" />
+  <img src="desktop/image/6.png" alt="RSS 阅读" width="49%" />
+</p>
 
 ## 项目亮点
 

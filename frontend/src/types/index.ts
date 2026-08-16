@@ -121,6 +121,10 @@ export interface DebugTrace {
   status: number
   body: string
   result: unknown
+  /** 反爬/异常特征提示(202、var buid、验证码、重定向等)。 */
+  warnings?: string[]
+  /** 响应头(Set-Cookie / Location / Content-Type 等)。 */
+  headers?: [string, string][]
 }
 
 // ─── 分组 ───

@@ -6,9 +6,9 @@ use tauri::ipc::Invoke;
 use crate::service::{
     book_group_service::BookGroupService, book_service::BookService,
     book_source_service::BookSourceService, json_document_service::JsonDocumentService,
-    local_epub_book::LocalEpubBookService, local_txt_book::LocalTxtBookService,
-    reading_stats_service::ReadingStatsService, update_service::UpdateService,
-    user_service::UserService,
+    local_epub_book::LocalEpubBookService, local_pdf_book::LocalPdfBookService,
+    local_txt_book::LocalTxtBookService, reading_stats_service::ReadingStatsService,
+    update_service::UpdateService, user_service::UserService,
 };
 use std::sync::Arc;
 
@@ -21,6 +21,7 @@ pub struct AppState {
     pub book_group_service: Arc<BookGroupService>,
     pub local_txt_book_service: Arc<LocalTxtBookService>,
     pub local_epub_book_service: Arc<LocalEpubBookService>,
+    pub local_pdf_book_service: Arc<LocalPdfBookService>,
     pub json_document_service: Arc<JsonDocumentService>,
     pub reading_stats_service: Arc<ReadingStatsService>,
     pub update_service: Arc<UpdateService>,
@@ -40,6 +41,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::book::get_bookshelf,
         commands::book::upload_txt_book,
         commands::book::upload_epub_book,
+        commands::book::upload_pdf_book,
         commands::book::save_book,
         commands::book::save_books,
         commands::book::set_book_source,
@@ -71,6 +73,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::book_source::pin_book_source,
         commands::book_source::unpin_book_source,
         commands::book_source::login_book_source,
+        commands::book_source::set_book_source_cookie,
         commands::book_source::get_explore_kinds,
         commands::book_source::test_book_sources,
         commands::book_source::cancel_book_source_test,
@@ -93,6 +96,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::reading_stats::get_reading_stats_daily,
         commands::reading_stats::get_reading_stats_summary,
         commands::reading_stats::get_reading_stats_by_book,
+        commands::reading_stats::delete_reading_stats_by_book,
         commands::replace_rule::get_replace_rules,
         commands::replace_rule::save_replace_rule,
         commands::replace_rule::save_replace_rules,

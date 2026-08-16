@@ -65,6 +65,32 @@ impl FileCache {
         path.exists()
     }
 
+    /// List all cached chapter file names (md5 hex stems without extension)
+    /// for a book in one directory read. Used by `cached_chapter_count` to
+    /// avoid N individual `path.exists()` system calls.
+    pub async fn list_chapter_files(
+        &self,
+        user_ns: &str,
+        book_key: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let dir = self.book_path(user_ns, book_key);
+        let mut names = Vec::new();
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(names),
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("txt") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+        Ok(names)
+    }
+
     /// Remove all cache for a book (delete the book's cache directory)
     pub async fn remove_book(&self, user_ns: &str, book_key: &str) -> anyhow::Result<bool> {
         let path = self.book_path(user_ns, book_key);

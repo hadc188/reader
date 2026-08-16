@@ -24,6 +24,7 @@
         @touchmove="handleTouchMove"
         @touchend="handleTouchEnd"
         @touchcancel="handleTouchCancel"
+        @contextmenu.prevent="!isPlaceholder(item) && $emit('contextmenu', { book: item, event: $event })"
       >
         <div v-if="isPlaceholder(item)" class="touch-gap-slot" />
         <BookCard
@@ -101,6 +102,7 @@ const emit = defineEmits<{
   delete: [book: Book | SearchBook]
   select: [book: Book | SearchBook]
   addToShelf: [book: Book | SearchBook]
+  contextmenu: [{ book: Book | SearchBook; event: MouseEvent }]
   reorder: [payload: { draggedUrl: string; targetUrl: string }]
 }>()
 

@@ -47,6 +47,7 @@
             empty-text="暂无数据"
             @click="handleBookClick"
             @addToShelf="handleAddToShelf"
+            @contextmenu="handleBookContextMenu"
           />
         </div>
         
@@ -63,6 +64,8 @@
         </div>
       </div>
     </div>
+
+    <BookDetailModal v-model="showDetail" :book="selectedBook" />
   </div>
 </template>
 
@@ -74,6 +77,8 @@ import { useReaderStore } from '../stores/reader'
 import { saveBook } from '../api/bookshelf'
 import { useAppStore } from '../stores/app'
 import BookGrid from '../components/BookGrid.vue'
+import BookDetailModal from '../components/BookDetailModal.vue'
+import { showContextMenu } from '../composables/useContextMenu'
 import type { Book, SearchBook } from '../types'
 import {
   getExploreCategoryKey,
@@ -88,6 +93,8 @@ const router = useRouter()
 
 const scrollContainer = ref<HTMLElement>()
 const openingBookUrl = ref('')
+const selectedBook = ref<Book | SearchBook | null>(null)
+const showDetail = ref(false)
 
 onMounted(async () => {
   await store.init()
@@ -141,6 +148,21 @@ async function handleAddToShelf(book: Book | SearchBook) {
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
   }
+}
+
+function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event: MouseEvent }) {
+  const menuItems = [
+    { label: '开始阅读', action: () => handleBookClick(book) },
+    { label: '查看详情', action: () => handleBookInfo(book) },
+    { divider: true },
+    { label: '加入书架', action: () => handleAddToShelf(book) },
+  ]
+  showContextMenu(event, menuItems, book)
+}
+
+function handleBookInfo(book: Book | SearchBook) {
+  selectedBook.value = book
+  showDetail.value = true
 }
 </script>
 

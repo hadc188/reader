@@ -13,6 +13,7 @@
           active: activeUrl === source.bookSourceUrl,
           selected: selectedUrls.has(source.bookSourceUrl),
         }"
+        @contextmenu.prevent="$emit('contextmenu', { source, event: $event })"
       >
         <label class="row-check" @click.stop>
           <input
@@ -95,6 +96,7 @@ const emit = defineEmits<{
   delete: [source: BookSource]
   pin: [source: BookSource]
   unpin: [source: BookSource]
+  contextmenu: [{ source: BookSource; event: MouseEvent }]
 }>()
 </script>
 

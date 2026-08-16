@@ -82,6 +82,7 @@
               class="article-item"
               :class="{ active: store.activeArticle?.link === article.link && store.activeArticle?.variable === article.variable }"
               @click="handleOpenArticle(article)"
+              @contextmenu.prevent="handleArticleContextMenu($event, article)"
             >
               <div class="article-title">{{ article.title || '无标题' }}</div>
               <div class="article-meta-line">
@@ -130,10 +131,13 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useRssStore } from '../stores/rss'
+import { showContextMenu } from '../composables/useContextMenu'
+import { useAppStore } from '../stores/app'
 import type { RssArticle } from '../types'
 
 const router = useRouter()
 const store = useRssStore()
+const appStore = useAppStore()
 const isMobileLayout = ref(false)
 
 onMounted(async () => {
@@ -221,6 +225,24 @@ async function handleOpenArticle(article: RssArticle & { variable?: string }) {
     return
   }
   await store.openArticle(article)
+}
+
+function handleArticleContextMenu(event: MouseEvent, article: RssArticle & { variable?: string }) {
+  const menuItems = [
+    { label: '打开文章', action: () => handleOpenArticle(article) },
+    {
+      label: '复制链接',
+      action: () => {
+        const url = article.link
+        if (url) {
+          void navigator.clipboard?.writeText(url).then(() => {
+            appStore.showToast('链接已复制', 'success')
+          })
+        }
+      },
+    },
+  ]
+  showContextMenu(event, menuItems, article)
 }
 </script>
 

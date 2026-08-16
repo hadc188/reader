@@ -4,6 +4,9 @@ use crate::model::{book::Book, book_source::BookSource, search::SearchBook};
 use crate::service::local_epub_book::{
     is_local_epub_origin, is_local_epub_url, LOCAL_EPUB_ORIGIN, MAX_EPUB_UPLOAD_BYTES,
 };
+use crate::service::local_pdf_book::{
+    is_local_pdf_origin, is_local_pdf_url, MAX_PDF_UPLOAD_BYTES,
+};
 use crate::service::local_txt_book::{
     is_local_txt_origin, is_local_txt_url, LOCAL_TXT_ORIGIN, MAX_TXT_UPLOAD_BYTES,
 };
@@ -19,6 +22,11 @@ const MAX_AVAILABLE_RESULT_LIMIT: usize = 100;
 const DEFAULT_AVAILABLE_CONCURRENT_COUNT: usize = 16;
 const MAX_AVAILABLE_CONCURRENT_COUNT: usize = 20;
 const AVAILABLE_SOURCE_SSE_RESULT_LIMIT: usize = 20;
+/// 后台扫描软上限: 全扫描不再硬截断, 但当累计找到的有效候选达到此阈值时,
+/// 即使还有源没扫也提前停止。该值远大于前端展示上限(AVAILABLE_SOURCE_SSE_RESULT_LIMIT),
+/// 保证缓存里的候选数足够多、不会被「只有前 20 个」的残缺结果固化, 同时避免
+/// 在源很多(数百个)时把全部启用源都扫一遍造成过大后台开销。
+const AVAILABLE_SOURCE_SSE_SCAN_SOFT_LIMIT: usize = 60;
 
 #[derive(Debug, Deserialize)]
 pub struct SearchBookRequest {
@@ -263,7 +271,7 @@ pub async fn search_book_multi(
         list
     };
 
-    let mut tasks = Vec::new();
+    let mut tasks: FuturesUnordered<_> = FuturesUnordered::new();
     for source in sources {
         let svc = state.book_service.clone();
         let k = key.clone();
@@ -272,9 +280,11 @@ pub async fn search_book_multi(
             svc.search_book(&user_ns, &source, &k, page).await
         }));
     }
+    // 用 FuturesUnordered 先完成先收集, 避免按提交顺序串行 await:
+    // 旧实现 for t in tasks { t.await } 即使后面的源先完成也要等前面的。
     let mut results: Vec<crate::model::search::SearchBook> = Vec::new();
-    for t in tasks {
-        if let Ok(Ok(list)) = t.await {
+    while let Some(res) = tasks.next().await {
+        if let Ok(Ok(list)) = res {
             results.extend(list);
         }
     }
@@ -436,6 +446,20 @@ pub async fn get_book_info(
             serde_json::to_value(book).unwrap_or_default(),
         ));
     }
+    if is_local_pdf_url(&url)
+        || req
+            .book_source_url
+            .as_deref()
+            .is_some_and(is_local_pdf_origin)
+    {
+        let book = state
+            .local_pdf_book_service
+            .get_book_info(&user_ns, &url)
+            .await?;
+        return Ok(ApiResponse::ok(
+            serde_json::to_value(book).unwrap_or_default(),
+        ));
+    }
     let source = resolve_book_source(
         &state,
         &user_ns,
@@ -497,6 +521,27 @@ pub async fn get_chapter_list(
             .ok_or_else(|| AppError::BadRequest("tocUrl or bookUrl required".to_string()))?;
         let chapters = state
             .local_epub_book_service
+            .get_chapter_list(&user_ns, &repair_encoded_url(book_url))
+            .await?;
+        return Ok(ApiResponse::ok(
+            serde_json::to_value(chapters).unwrap_or_default(),
+        ));
+    }
+
+    if req
+        .book_source_url
+        .as_deref()
+        .is_some_and(is_local_pdf_origin)
+        || req.book_url.as_deref().is_some_and(is_local_pdf_url)
+        || req.toc_url.as_deref().is_some_and(is_local_pdf_url)
+    {
+        let book_url = req
+            .book_url
+            .as_deref()
+            .or(req.toc_url.as_deref())
+            .ok_or_else(|| AppError::BadRequest("tocUrl or bookUrl required".to_string()))?;
+        let chapters = state
+            .local_pdf_book_service
             .get_chapter_list(&user_ns, &repair_encoded_url(book_url))
             .await?;
         return Ok(ApiResponse::ok(
@@ -673,6 +718,33 @@ pub async fn get_book_content(
         };
         let content = state
             .local_epub_book_service
+            .get_content(&user_ns, &chapter_url)
+            .await?;
+        return Ok(ApiResponse::ok(serde_json::Value::String(content)));
+    }
+
+    if req
+        .book_source_url
+        .as_deref()
+        .is_some_and(is_local_pdf_origin)
+        || req.chapter_url.as_deref().is_some_and(is_local_pdf_url)
+    {
+        let url = req
+            .chapter_url
+            .as_deref()
+            .ok_or_else(|| AppError::BadRequest("chapterUrl required".to_string()))?;
+        let chapter_url = if is_local_pdf_url(url) && !url.contains('#') {
+            let index = req.index.unwrap_or(0).max(0) as usize;
+            format!(
+                "{}#{}",
+                repair_encoded_url(url).trim_end_matches('#'),
+                index
+            )
+        } else {
+            repair_encoded_url(url)
+        };
+        let content = state
+            .local_pdf_book_service
             .get_content(&user_ns, &chapter_url)
             .await?;
         return Ok(ApiResponse::ok(serde_json::Value::String(content)));
@@ -883,6 +955,26 @@ pub async fn upload_epub_book(
 }
 
 #[tauri::command]
+pub async fn upload_pdf_book(
+    state: tauri::State<'_, AppState>,
+    file: Vec<u8>,
+    file_name: String,
+) -> Result<ApiResponse<Value>, AppError> {
+    let user_ns = "default";
+    if file.len() > MAX_PDF_UPLOAD_BYTES {
+        return Err(AppError::BadRequest("PDF 文件不能超过 100MB".to_string()));
+    }
+    let book = state
+        .local_pdf_book_service
+        .import_pdf_book(&user_ns, &file_name, &file)
+        .await?;
+    let saved = state.book_service.save_book(&user_ns, book).await?;
+    Ok(ApiResponse::ok(
+        serde_json::to_value(saved).unwrap_or_default(),
+    ))
+}
+
+#[tauri::command]
 pub async fn save_book(
     state: tauri::State<'_, AppState>,
     mut req: Book,
@@ -991,6 +1083,7 @@ pub async fn set_book_source(
         .book_url
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| AppError::BadRequest("bookUrl required".to_string()))?;
+    let old_book_url_clone = old_book_url.clone();
     let new_book_url = req
         .new_url
         .filter(|v| !v.trim().is_empty())
@@ -1037,12 +1130,15 @@ pub async fn set_book_source(
     updated.origin_name = Some(new_source.book_source_name.clone());
     updated.toc_url = None;
 
+    // 换源前从旧书缓存读取候选, 既用于元数据回填, 也用于为新书 URL 预置缓存。
+    let mut candidates_for_seed: Vec<SearchBook> = Vec::new();
     if let Some(candidates) = state
         .book_service
         .load_book_sources_cache(&user_ns, &old_book_url)
         .await?
     {
         if let Some(candidate) = candidates
+            .clone()
             .into_iter()
             .find(|item| item.book_url == new_book_url)
         {
@@ -1057,6 +1153,7 @@ pub async fn set_book_source(
             updated.kind = candidate.kind.or(updated.kind);
             updated.latest_chapter_title = candidate.last_chapter.or(updated.latest_chapter_title);
         }
+        candidates_for_seed = candidates;
     }
 
     match state
@@ -1082,6 +1179,27 @@ pub async fn set_book_source(
             ..Book::default()
         };
         let _ = state.book_service.delete_book(&user_ns, &delete_old).await;
+    }
+
+    // 换源后为「新书 URL」预置一份可读书源缓存, 包含换源前已知的全部候选。
+    // 否则新书第一次打开换源面板只会触发全新扫描: 热门书可能因部分源搜到
+    // 但漏掉发起方源自身被前端过滤, 导致「从 A 换到 B 后 B 看到的不含 A」。
+    // 用同一作品的候选集(去重、剔除当前源)预填, 让换源可立即双向看到。
+    let mut seeded: Vec<SearchBook> = Vec::new();
+    let mut seen_seed = std::collections::HashSet::new();
+    for candidate in candidates_for_seed {
+        if candidate.book_url == saved.book_url {
+            continue;
+        }
+        if seen_seed.insert(available_source_sse_result_key(&candidate)) {
+            seeded.push(candidate);
+        }
+    }
+    if old_book_url_clone != saved.book_url && !seeded.is_empty() {
+        let _ = state
+            .book_service
+            .save_book_sources_cache(&user_ns, &saved.book_url, &seeded)
+            .await;
     }
 
     Ok(ApiResponse::ok(
@@ -1157,6 +1275,20 @@ pub async fn save_book_progress(
     } else if is_local_epub_origin(&shelf_book.origin) || is_local_epub_url(&shelf_book.book_url) {
         if let Ok(chapters) = state
             .local_epub_book_service
+            .get_chapter_list(&user_ns, &shelf_book.book_url)
+            .await
+        {
+            if index >= 0 && (index as usize) < chapters.len() {
+                chapter_title = Some(chapters[index as usize].title.clone());
+            }
+            updated.total_chapter_num = Some(chapters.len() as i32);
+            if let Some(last) = chapters.last() {
+                updated.latest_chapter_title = Some(last.title.clone());
+            }
+        }
+    } else if is_local_pdf_origin(&shelf_book.origin) || is_local_pdf_url(&shelf_book.book_url) {
+        if let Ok(chapters) = state
+            .local_pdf_book_service
             .get_chapter_list(&user_ns, &shelf_book.book_url)
             .await
         {
@@ -1858,9 +1990,15 @@ pub async fn get_available_book_source(
 
     let has_more = (last_index + 1).max(0) < sources.len() as i32;
     if !has_more && req.last_index.unwrap_or(-1) < 0 {
+        // 缓存剔除「恰好是当前书源」的条目, 完整列表才会在换源面板再次打开时命中。
+        let cache_list: Vec<SearchBook> = result
+            .iter()
+            .filter(|candidate| candidate.origin != book.origin)
+            .cloned()
+            .collect();
         let _ = state
             .book_service
-            .save_book_sources_cache(&user_ns, &book.book_url, &result)
+            .save_book_sources_cache(&user_ns, &book.book_url, &cache_list)
             .await;
     }
 
@@ -1970,10 +2108,20 @@ pub async fn get_available_book_source_sse(
         let mut seen = std::collections::HashSet::<String>::new();
         let mut tasks = JoinSet::new();
 
+        // 搜索不再因「前端推送满 20 个」就提前截断(否则靠前的源占满名额、后续
+        // 源永远不被扫描、缓存还会固化这份残缺列表)。`emitted` 只控制前端推送。
+        // 但也不无条件扫完全部启用源: 当累计有效候选达到软上限(远大于前端 20)
+        // 时提前停止, 在「缓存足够完整」与「后台扫描开销」间取平衡。
         while next_index < sources.len() || !tasks.is_empty() {
+            // 已收集足够多候选且无在途任务时提前结束, 不再派发新搜索
+            if all_results.len() >= AVAILABLE_SOURCE_SSE_SCAN_SOFT_LIMIT
+                && tasks.is_empty()
+            {
+                break;
+            }
             while tasks.len() < concurrent_count
                 && next_index < sources.len()
-                && emitted < AVAILABLE_SOURCE_SSE_RESULT_LIMIT
+                && all_results.len() < AVAILABLE_SOURCE_SSE_SCAN_SOFT_LIMIT
             {
                 let source_index = next_index;
                 let source = sources[source_index].clone();
@@ -1990,7 +2138,7 @@ pub async fn get_available_book_source_sse(
                 next_index += 1;
             }
 
-            if emitted >= AVAILABLE_SOURCE_SSE_RESULT_LIMIT || tasks.is_empty() {
+            if tasks.is_empty() {
                 break;
             }
 
@@ -1999,28 +2147,34 @@ pub async fn get_available_book_source_sse(
                     last_idx = last_idx.max(source_index);
                     match search_result {
                         Ok(list) => {
+                            // 匹配全部取回用于缓存; 只有给前端推送时才受结果上限约束。
                             let matches = take_available_source_sse_matches(
                                 list,
                                 &target_name,
                                 &target_author,
                                 &mut seen,
-                                AVAILABLE_SOURCE_SSE_RESULT_LIMIT - emitted,
+                                usize::MAX,
                             );
-                            for book in matches {
-                                emitted += 1;
-                                all_results.push(book.clone());
-                                let payload = serde_json::json!({
-                                    "event": "data",
-                                    "lastIndex": source_index,
-                                    "hasMore": next_index < sources.len() || !tasks.is_empty(),
-                                    "data": [book]
-                                });
-                                if on_event.send(payload).is_err() {
-                                    tasks.abort_all();
-                                    return;
-                                }
-                                if emitted >= AVAILABLE_SOURCE_SSE_RESULT_LIMIT {
-                                    break;
+                            // 先全部追加到缓存结果, 再克隆出前 budget 个推送前端。
+                            // 不能用 drain: 它会从 all_results 移除已推送的条目,
+                            // 导致最终缓存只剩未推送部分(少于 20 个结果时缓存几乎为空)。
+                            let push_start = all_results.len();
+                            all_results.extend(matches);
+                            if emitted < AVAILABLE_SOURCE_SSE_RESULT_LIMIT {
+                                let budget = AVAILABLE_SOURCE_SSE_RESULT_LIMIT - emitted;
+                                let end = (push_start + budget).min(all_results.len());
+                                for book in all_results[push_start..end].iter().cloned() {
+                                    emitted += 1;
+                                    let payload = serde_json::json!({
+                                        "event": "data",
+                                        "lastIndex": source_index,
+                                        "hasMore": next_index < sources.len() || !tasks.is_empty(),
+                                        "data": [book]
+                                    });
+                                    if on_event.send(payload).is_err() {
+                                        tasks.abort_all();
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -2040,24 +2194,23 @@ pub async fn get_available_book_source_sse(
             }
         }
 
-        let has_more = next_index < sources.len() || !tasks.is_empty();
-        if has_more {
-            tasks.abort_all();
-        }
-        let final_last_idx = if has_more {
-            last_idx.max(next_index as i32 - 1)
-        } else {
-            last_idx
-        };
+        // 达到后台软上限时，仍可能有尚未扫描的书源；保留“加载更多”，
+        // 让前端可以从最后一个已处理的源继续扫描，而不是把剩余书源隐藏掉。
+        let has_more = next_index < sources.len();
+        let final_last_idx = last_idx;
 
-        // Persist whatever matched so far on a fresh (non-paged) search. We
-        // intentionally save even when has_more is true, otherwise a popular
-        // book that hits the result limit before all sources are queried never
-        // gets cached and every panel open triggers a full re-search.
+        // 全扫描(或达到软上限)完成后才写缓存, 缓存里是「能搜到这本书的源」而非
+        // 被前端结果上限截断的前 20 个。保存前剔除「恰好是当前书源」的条目, 避免
+        // 缓存被「只有当前源」的假阴性结果固化, 导致换源面板查不到其他源。
         if last_index_start < 0 {
+            let cache_list: Vec<SearchBook> = all_results
+                .iter()
+                .filter(|candidate| candidate.origin != book.origin)
+                .cloned()
+                .collect();
             let _ = state_clone
                 .book_service
-                .save_book_sources_cache(&user_ns, &book.book_url, &all_results)
+                .save_book_sources_cache(&user_ns, &book.book_url, &cache_list)
                 .await;
         }
 
@@ -2339,6 +2492,18 @@ async fn cleanup_local_book_files(state: &AppState, user_ns: &str, books: &[Book
                     err
                 );
             }
+        } else if is_local_pdf_origin(&book.origin) || is_local_pdf_url(&book.book_url) {
+            if let Err(err) = state
+                .local_pdf_book_service
+                .delete_book_files(user_ns, &book.book_url)
+                .await
+            {
+                tracing::warn!(
+                    "failed to delete local pdf book files for {}: {:?}",
+                    book.book_url,
+                    err
+                );
+            }
         }
     }
 }
@@ -2426,6 +2591,8 @@ fn is_local_book(book: &Book) -> bool {
         || is_local_txt_url(&book.book_url)
         || is_local_epub_origin(&book.origin)
         || is_local_epub_url(&book.book_url)
+        || is_local_pdf_origin(&book.origin)
+        || is_local_pdf_url(&book.book_url)
 }
 
 fn available_source_sse_result_key(book: &SearchBook) -> String {

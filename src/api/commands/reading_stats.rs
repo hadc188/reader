@@ -11,6 +11,7 @@ pub struct AddReadingStatsRequest {
     pub date: Option<String>,
     pub book_url: Option<String>,
     pub book_name: Option<String>,
+    pub book_author: Option<String>,
 }
 
 /// Accumulate reading time/characters for the current user on a date.
@@ -29,6 +30,7 @@ pub async fn add_reading_stats(
             req.date.as_deref(),
             req.book_url.as_deref(),
             req.book_name.as_deref(),
+            req.book_author.as_deref(),
         )
         .await?;
     Ok(ApiResponse::ok(serde_json::json!({ "saved": true })))
@@ -68,4 +70,18 @@ pub async fn get_reading_stats_by_book(
         .get_by_book(user_ns, &start, &end)
         .await?;
     Ok(ApiResponse::ok(books))
+}
+
+/// Delete all per-book reading stats for a given book_url (across all dates).
+#[tauri::command]
+pub async fn delete_reading_stats_by_book(
+    state: tauri::State<'_, AppState>,
+    book_url: String,
+) -> Result<ApiResponse<serde_json::Value>, AppError> {
+    let user_ns = "default";
+    let deleted = state
+        .reading_stats_service
+        .delete_book_stats(user_ns, &book_url)
+        .await?;
+    Ok(ApiResponse::ok(serde_json::json!({ "deleted": deleted })))
 }

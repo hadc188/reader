@@ -90,7 +90,7 @@
       <input
         ref="localBookFileInputRef"
         type="file"
-        accept=".txt,.epub,text/plain,application/epub+zip"
+        accept=".txt,.epub,.pdf,text/plain,application/epub+zip,application/pdf"
         class="hidden-input"
         @change="handleLocalBookFileChange"
       />
@@ -124,6 +124,7 @@
         @delete="handleDeleteBook"
         @select="shelfStore.toggleSelection($event.bookUrl)"
         @reorder="handleReorderBooks"
+        @contextmenu="handleBookContextMenu"
         />
       </div>
 
@@ -170,13 +171,14 @@ import { useRouter } from 'vue-router'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
-import { uploadEpubBook, uploadTxtBook } from '../api/bookshelf'
+import { uploadEpubBook, uploadPdfBook, uploadTxtBook } from '../api/bookshelf'
 import BookGrid from '../components/BookGrid.vue'
 import BookDetailModal from '../components/BookDetailModal.vue'
 import GroupSelectModal from '../components/bookshelf/GroupSelectModal.vue'
 import GroupManagerModal from '../components/bookshelf/GroupManagerModal.vue'
 import SearchResults from '../components/SearchResults.vue'
 import CacheLibraryModal from '../components/CacheLibraryModal.vue'
+import { showContextMenu } from '../composables/useContextMenu'
 import type { Book, SearchBook } from '../types'
 
 const router = useRouter()
@@ -219,8 +221,8 @@ async function handleLocalBookFileChange(event: Event) {
   if (!file) return
 
   const lowerName = file.name.toLowerCase()
-  if (!lowerName.endsWith('.txt') && !lowerName.endsWith('.epub')) {
-    appStore.showToast('只支持导入 .txt 或 .epub 文件', 'warning')
+  if (!lowerName.endsWith('.txt') && !lowerName.endsWith('.epub') && !lowerName.endsWith('.pdf')) {
+    appStore.showToast('只支持导入 .txt、.epub 或 .pdf 文件', 'warning')
     return
   }
 
@@ -228,7 +230,9 @@ async function handleLocalBookFileChange(event: Event) {
   try {
     const book = lowerName.endsWith('.epub')
       ? await uploadEpubBook(file)
-      : await uploadTxtBook(file)
+      : lowerName.endsWith('.pdf')
+        ? await uploadPdfBook(file)
+        : await uploadTxtBook(file)
     await shelfStore.fetchBooks()
     appStore.showToast(`已导入《${book.name}》`, 'success')
     await handleBookClick(book)
@@ -270,6 +274,21 @@ async function handleDeleteBook(book: Book | SearchBook) {
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
   }
+}
+
+function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event: MouseEvent }) {
+  // 批量编辑模式不弹单本菜单
+  if (shelfStore.editMode) return
+  const menuItems = [
+    { label: '开始阅读', action: () => handleBookClick(book) },
+    { label: '查看详情', action: () => handleBookInfo(book) },
+    { divider: true },
+    { label: '移入分组', action: () => { showGroupSelect.value = true } },
+    { label: '缓存管理', action: () => { showCacheManager.value = true } },
+    { divider: true },
+    { label: '删除', danger: true, action: () => handleDeleteBook(book) },
+  ]
+  showContextMenu(event, menuItems, book)
 }
 
 function toggleEditMode() {

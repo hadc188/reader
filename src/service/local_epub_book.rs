@@ -552,7 +552,9 @@ fn parse_ncx_titles(xml: &str, base: &str) -> HashMap<String, String> {
     let mut buf = Vec::new();
     let mut stack: Vec<NavPointState> = Vec::new();
     let mut capture_text = false;
-    let mut titles = HashMap::new();
+    let mut titles: HashMap<String, String> = HashMap::new();
+    // 记录被多个 navPoint 指向的路径(标题有歧义,不可靠)
+    let mut ambiguous: HashSet<String> = HashSet::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -564,7 +566,7 @@ fn parse_ncx_titles(xml: &str, base: &str) -> HashMap<String, String> {
                         if let Some(path) = join_zip_path(base, &src) {
                             let label = state.label.trim();
                             if !label.is_empty() {
-                                titles.insert(path, label.to_string());
+                                mark_title(&mut titles, &mut ambiguous, path, label);
                             }
                         }
                     }
@@ -576,7 +578,7 @@ fn parse_ncx_titles(xml: &str, base: &str) -> HashMap<String, String> {
                     if let Some(path) = join_zip_path(base, &src) {
                         let label = state.label.trim();
                         if !label.is_empty() {
-                            titles.insert(path, label.to_string());
+                            mark_title(&mut titles, &mut ambiguous, path, label);
                         }
                     }
                 }
@@ -601,6 +603,10 @@ fn parse_ncx_titles(xml: &str, base: &str) -> HashMap<String, String> {
         }
         buf.clear();
     }
+    // 移除有歧义的路径,让章节构建回退到从 HTML 提取标题
+    for path in &ambiguous {
+        titles.remove(path);
+    }
     titles
 }
 
@@ -610,7 +616,8 @@ fn parse_nav_titles(xml: &str, base: &str) -> HashMap<String, String> {
     let mut buf = Vec::new();
     let mut current_href: Option<String> = None;
     let mut current_text = String::new();
-    let mut titles = HashMap::new();
+    let mut titles: HashMap<String, String> = HashMap::new();
+    let mut ambiguous: HashSet<String> = HashSet::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -626,7 +633,7 @@ fn parse_nav_titles(xml: &str, base: &str) -> HashMap<String, String> {
                     if let Some(path) = join_zip_path(base, &href) {
                         let title = current_text.trim();
                         if !title.is_empty() {
-                            titles.insert(path, title.to_string());
+                            mark_title(&mut titles, &mut ambiguous, path, title);
                         }
                     }
                 }
@@ -638,7 +645,28 @@ fn parse_nav_titles(xml: &str, base: &str) -> HashMap<String, String> {
         }
         buf.clear();
     }
+    for path in &ambiguous {
+        titles.remove(path);
+    }
     titles
+}
+
+/// 记录标题映射; 同一路径被多个 navPoint 指向时标记为有歧义。
+fn mark_title(
+    titles: &mut HashMap<String, String>,
+    ambiguous: &mut HashSet<String>,
+    path: String,
+    label: &str,
+) {
+    if ambiguous.contains(&path) {
+        return;
+    }
+    if let Some(_existing) = titles.get(&path) {
+        // 已有标题又来一个不同/相同的 -> 歧义
+        ambiguous.insert(path);
+    } else {
+        titles.insert(path, label.to_string());
+    }
 }
 
 fn extract_html_title(html: &str) -> Option<String> {

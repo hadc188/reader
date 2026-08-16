@@ -65,6 +65,7 @@
               @delete="removeSource"
               @pin="pinSource"
               @unpin="unpinSource"
+              @contextmenu="handleSourceContextMenu"
             />
 
             <SourceEditorPanel
@@ -115,6 +116,25 @@
               </svg>
             </button>
           </div>
+          <div class="login-cookie-import">
+            <p class="login-cookie-tip">
+              应用内的 QQ/微信登录会跳转到系统浏览器完成，登录状态保存在浏览器中，本应用无法直接读取。
+              请在浏览器登录成功后，复制登录后的 Cookie（开发者工具 → Application → Cookies，或抓包），粘贴到下方导入：
+            </p>
+            <textarea
+              v-model="manualCookieText"
+              rows="2"
+              placeholder="手动导入登录 Cookie(抓包获取, 形如 a=1; b=2; ...)"
+            ></textarea>
+            <button
+              class="mini-btn primary"
+              type="button"
+              :disabled="!manualCookieText.trim() || cookieImporting"
+              @click="importManualCookie"
+            >
+              {{ cookieImporting ? '导入中...' : '导入 Cookie' }}
+            </button>
+          </div>
           <iframe class="login-preview-frame" :src="loginPreviewFrameUrl"></iframe>
         </div>
       </div>
@@ -131,6 +151,7 @@ import {
   deleteBookSources,
   deleteInvalidBookSources,
   loginBookSource,
+  setBookSourceCookie,
   saveBookSource,
   saveBookSources,
   testBookSources,
@@ -155,6 +176,7 @@ import { chunkBookSourceUrls, mergeBookSourceTestResponses } from '../utils/sour
 import SourceEditorPanel from './source-manager/SourceEditorPanel.vue'
 import SourceFilterBar from './source-manager/SourceFilterBar.vue'
 import SourceList from './source-manager/SourceList.vue'
+import { showContextMenu } from '../composables/useContextMenu'
 import SourceManagerHeader from './source-manager/SourceManagerHeader.vue'
 import SourceSubscriptionPanel from './source-manager/SourceSubscriptionPanel.vue'
 
@@ -199,6 +221,8 @@ const sourceLoginLoading = ref(false)
 const loginPreviewVisible = ref(false)
 const loginPreviewUrl = ref('')
 const loginPreviewFrameUrl = ref('')
+const manualCookieText = ref('')
+const cookieImporting = ref(false)
 
 const groupList = computed(() => getBookSourceGroups(sources.value))
 
@@ -324,6 +348,25 @@ async function removeSource(source: BookSource) {
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
   }
+}
+
+function handleSourceContextMenu({ source, event }: { source: BookSource; event: MouseEvent }) {
+  const pinned = typeof source.customOrder === 'number' && source.customOrder < 0
+  const enabled = source.enabled !== false
+  const menuItems = [
+    { label: '编辑', action: () => editSource(source) },
+    {
+      label: pinned ? '取消置顶' : '置顶',
+      action: () => (pinned ? unpinSource(source) : pinSource(source)),
+    },
+    {
+      label: enabled ? '停用' : '启用',
+      action: () => toggleSource(source),
+    },
+    { divider: true },
+    { label: '删除', danger: true, action: () => removeSource(source) },
+  ]
+  showContextMenu(event, menuItems, source)
 }
 
 async function removeSelectedSources() {
@@ -565,7 +608,7 @@ async function handleSourceLogin() {
       : ''
     if (result.url?.trim()) {
       loginPreviewUrl.value = result.url
-      loginPreviewFrameUrl.value = buildLoginProxyUrl(parsed.bookSourceUrl, result.url)
+      loginPreviewFrameUrl.value = buildLoginProxyUrl(result.loginSession, result.url)
       loginPreviewVisible.value = true
     }
     appStore.showToast(`书源登录请求已完成，状态 ${result.status}${check}`, 'success')
@@ -576,9 +619,38 @@ async function handleSourceLogin() {
   }
 }
 
-function buildLoginProxyUrl(bookSourceUrl: string, targetUrl: string) {
+async function importManualCookie() {
+  const cookie = manualCookieText.value.trim()
+  if (!cookie) return
+  try {
+    const parsed = JSON.parse(editorText.value) as BookSource
+    if (!parsed.bookSourceUrl?.trim()) throw new Error('书源链接不能为空')
+    cookieImporting.value = true
+    const res = await setBookSourceCookie(parsed.bookSourceUrl, cookie)
+    if (res.saved) {
+      appStore.showToast('Cookie 已导入, VIP 章节将自动携带登录态', 'success')
+      manualCookieText.value = ''
+      loginPreviewVisible.value = false
+    } else {
+      appStore.showToast('Cookie 导入失败', 'error')
+    }
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || 'Cookie 导入失败', 'error')
+  } finally {
+    cookieImporting.value = false
+  }
+}
+
+function buildLoginProxyUrl(loginSession: string, targetUrl: string) {
+  // 登录域直接直连: 起点登录页 JS 依赖 document.domain=qidian.com,
+  // 经 reader.localhost 代理会抛 SecurityError 导致登录功能失效。
+  // 直连真实域名(www/passport/login.qidian.com、*.yuewen.com)时页面功能完整;
+  // 登录 Cookie 通过「登录调试页」的「导入 Cookie」粘贴抓包值写入。
+  if (/^https?:\/\/([\w-]+\.)?(qidian|yuewen)\.com/i.test(targetUrl)) {
+    return targetUrl
+  }
   const params = new URLSearchParams()
-  params.set('bookSourceUrl', bookSourceUrl)
+  params.set('loginSession', loginSession)
   params.set('url', targetUrl)
   return `http://reader.localhost/bookSourceProxy?${params.toString()}`
 }
@@ -866,6 +938,41 @@ watch(() => props.modelValue, (v) => {
   width: 100%;
   border: none;
   background: #fff;
+}
+
+.login-cookie-import {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border-light);
+  background: var(--color-bg);
+}
+
+.login-cookie-import textarea {
+  width: 100%;
+  min-height: 54px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-field, var(--color-bg));
+  color: var(--color-text-primary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.login-cookie-import textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.login-cookie-tip {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
 }
 
 @media (max-width: 900px) {

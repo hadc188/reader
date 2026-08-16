@@ -31,6 +31,13 @@ export async function uploadEpubBook(file: File) {
   })
 }
 
+export async function uploadPdfBook(file: File) {
+  return invokeEnvelope<Book>('upload_pdf_book', {
+    fileName: file.name,
+    file: new Uint8Array(await file.arrayBuffer()),
+  })
+}
+
 export function deleteBook(book: Partial<Book>) {
   return post<string>('/deleteBook', book).then((r) => r.data)
 }

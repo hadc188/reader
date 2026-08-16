@@ -1508,18 +1508,25 @@ export const useReaderStore = defineStore('reader', () => {
     lastServerProgressKey.value = ''
     chaptersLoading.value = true
     try {
-      chapters.value = await getChapterList({
+      // 目录必须先拿到才能决定章节, 但正文请求不与目录串行等待:
+      // 目录到达后立即发正文请求, 二者在网络上并行; 网盘进度读取也不阻塞渲染。
+      const chapterListPromise = getChapterList({
         bookUrl: b.bookUrl,
         bookSourceUrl: b.origin,
         tocUrl: b.tocUrl,
       })
-      const initialChapterContent = await fetchChapterContent(currentIndex.value).catch(() => null)
+      chapters.value = await chapterListPromise
+
+      const contentLoad = fetchChapterContent(currentIndex.value).catch(() => null)
+      const initialChapterContent = await contentLoad
       if (initialChapterContent) {
         preloadedContent.value.set(currentIndex.value, initialChapterContent)
       }
-      await restoreCurrentBookProgressFromLegado(initialChapterContent || undefined).catch((error) => {
-        appStore.showToast((error as Error).message || '读取网盘阅读进度失败', 'warning')
-      })
+      // 网盘进度同步放后台, 不拖慢正文首屏
+      void restoreCurrentBookProgressFromLegado(initialChapterContent || undefined)
+        .catch((error) => {
+          appStore.showToast((error as Error).message || '读取网盘阅读进度失败', 'warning')
+        })
       saveReaderSession()
     } catch (error) {
       loading.value = false
@@ -1661,7 +1668,10 @@ export const useReaderStore = defineStore('reader', () => {
       }
 
       if (config.enablePreload) {
-        setTimeout(() => preloadAroundChapter(index), forceRefresh ? 1500 : 1000)
+        // 预载不与正文首屏串行: 内容到屏幕后再后台预载, 失败静默。
+        window.setTimeout(() => {
+          void preloadAroundChapter(index)
+        }, forceRefresh ? 1500 : 1000)
       }
     } finally {
       loading.value = false
@@ -1672,14 +1682,13 @@ export const useReaderStore = defineStore('reader', () => {
     if (!book.value || !config.enablePreload) return
     const targets = [index + 1, index + 2, index - 1]
       .filter((target, pos, list) => target >= 0 && target < chapters.value.length && list.indexOf(target) === pos)
-    for (const target of targets) {
-      await preloadNextChapter(target)
-    }
+    // 并发预载, 不等彼此
+    await Promise.allSettled(targets.map((target) => preloadNextChapter(target)))
   }
 
   async function preloadNextChapter(index: number) {
     if (!book.value || !config.enablePreload || index >= chapters.value.length || preloadedContent.value.has(index)) return
-    
+
     // Keep max 3 preloaded chapters
     if (preloadedContent.value.size > 3) {
       const firstKey = preloadedContent.value.keys().next().value

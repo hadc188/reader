@@ -49,6 +49,7 @@ impl ReadingStatsService {
         date: Option<&str>,
         book_url: Option<&str>,
         book_name: Option<&str>,
+        book_author: Option<&str>,
     ) -> Result<(), AppError> {
         let date = date.map(String::from).unwrap_or_else(Self::today);
         let seconds = seconds.max(0);
@@ -70,14 +71,19 @@ impl ReadingStatsService {
 
         if let Some(book_url) = book_url.map(str::trim).filter(|value| !value.is_empty()) {
             let book_name = book_name.map(str::trim).unwrap_or_default();
+            let book_author = book_author.map(str::trim).unwrap_or_default();
             sqlx::query(
                 "INSERT INTO reading_book_stats
-                   (user_ns, date, book_url, book_name, seconds, characters)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                   (user_ns, date, book_url, book_name, book_author, seconds, characters)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(user_ns, date, book_url) DO UPDATE SET
                    book_name = CASE
                      WHEN excluded.book_name <> '' THEN excluded.book_name
                      ELSE reading_book_stats.book_name
+                   END,
+                   book_author = CASE
+                     WHEN excluded.book_author <> '' THEN excluded.book_author
+                     ELSE reading_book_stats.book_author
                    END,
                    seconds = seconds + excluded.seconds,
                    characters = characters + excluded.characters",
@@ -86,6 +92,7 @@ impl ReadingStatsService {
             .bind(&date)
             .bind(book_url)
             .bind(book_name)
+            .bind(book_author)
             .bind(seconds)
             .bind(characters)
             .execute(&mut *tx)
@@ -148,17 +155,42 @@ impl ReadingStatsService {
         start: &str,
         end: &str,
     ) -> Result<Vec<BookReadingStats>, AppError> {
+        // 按 (书名, 作者) 联合分组, 而非仅按 book_url 或仅按 book_name。
+        // 原因 1: 同一本小说换源后 book_url 会变成新源的 URL, 按 book_url 分组
+        //         会让同一本书出现多条记录(每个源一条)。
+        // 原因 2: 仅按 book_name 分组会把不同作者的同名书合并成一条,
+        //         删除其中一本会误删另一本。加入作者区分可避免此问题。
+        // 作者缺失时回退为空串参与分组(同名无作者的书仍会合并, 这是可接受的退化)。
         let rows = sqlx::query(
-            "SELECT book_url,
-                    COALESCE(NULLIF(MAX(book_name), ''), book_url) AS book_name,
-                    COALESCE(SUM(seconds), 0) AS seconds,
-                    COALESCE(SUM(characters), 0) AS characters,
-                    MAX(date) AS last_read_date
-             FROM reading_book_stats
-             WHERE user_ns = ?1 AND date >= ?2 AND date <= ?3
-             GROUP BY book_url
-             HAVING SUM(seconds) > 0 OR SUM(characters) > 0
-             ORDER BY seconds DESC, book_name ASC",
+            "WITH agg AS (
+               SELECT
+                 COALESCE(NULLIF(TRIM(book_name), ''), book_url) AS norm_name,
+                 COALESCE(NULLIF(TRIM(book_author), ''), '') AS norm_author,
+                 COALESCE(SUM(seconds), 0) AS seconds,
+                 COALESCE(SUM(characters), 0) AS characters,
+                 MAX(date) AS last_read_date
+               FROM reading_book_stats
+               WHERE user_ns = ?1 AND date >= ?2 AND date <= ?3
+               GROUP BY COALESCE(NULLIF(TRIM(book_name), ''), book_url),
+                        COALESCE(NULLIF(TRIM(book_author), ''), '')
+               HAVING SUM(seconds) > 0 OR SUM(characters) > 0
+             )
+             SELECT
+               agg.norm_name AS book_name,
+               agg.norm_author AS book_author,
+               COALESCE((
+                 SELECT r.book_url FROM reading_book_stats r
+                 WHERE r.user_ns = ?1 AND r.date >= ?2 AND r.date <= ?3
+                   AND COALESCE(NULLIF(TRIM(r.book_name), ''), r.book_url) = agg.norm_name
+                   AND COALESCE(NULLIF(TRIM(r.book_author), ''), '') = agg.norm_author
+                 ORDER BY r.date DESC, r.seconds DESC
+                 LIMIT 1
+               ), agg.norm_name) AS book_url,
+               agg.seconds,
+               agg.characters,
+               agg.last_read_date
+             FROM agg
+             ORDER BY agg.seconds DESC, agg.norm_name ASC",
         )
         .bind(user_ns)
         .bind(start)
@@ -176,6 +208,49 @@ impl ReadingStatsService {
                 last_read_date: row.get("last_read_date"),
             })
             .collect())
+    }
+
+    /// Delete all per-book reading stats rows for a given book. Since get_by_book
+    /// now groups by book_name (not book_url), deletion must also match by book_name
+    /// to remove all rows for that book across different source URLs. The book_url
+    /// passed in is the "latest" URL from the stats display; we resolve it to the
+    /// (book_name, book_author) pair first, then delete all rows matching that pair
+    /// to remove all rows for that book across different source URLs without
+    /// accidentally deleting a different book with the same name.
+    pub async fn delete_book_stats(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+    ) -> Result<u64, AppError> {
+        // 先查出该 book_url 对应的 (书名, 作者), 再按此二元组删除所有记录。
+        // 仅按书名删除会误伤同名不同作者的书; 加入作者可精确区分。
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT
+               COALESCE(NULLIF(TRIM(book_name), ''), book_url) AS name,
+               COALESCE(NULLIF(TRIM(book_author), ''), '') AS author
+             FROM reading_book_stats
+             WHERE user_ns = ?1 AND book_url = ?2 LIMIT 1",
+        )
+        .bind(user_ns)
+        .bind(book_url)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (name, author) = match row {
+            Some(pair) => pair,
+            None => return Ok(0),
+        };
+        let result = sqlx::query(
+            "DELETE FROM reading_book_stats
+             WHERE user_ns = ?1
+               AND COALESCE(NULLIF(TRIM(book_name), ''), book_url) = ?2
+               AND COALESCE(NULLIF(TRIM(book_author), ''), '') = ?3",
+        )
+        .bind(user_ns)
+        .bind(&name)
+        .bind(&author)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -208,6 +283,7 @@ mod tests {
                 date TEXT NOT NULL,
                 book_url TEXT NOT NULL,
                 book_name TEXT NOT NULL DEFAULT '',
+                book_author TEXT NOT NULL DEFAULT '',
                 seconds INTEGER NOT NULL DEFAULT 0,
                 characters INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_ns, date, book_url)
@@ -230,6 +306,7 @@ mod tests {
                 Some("2026-08-08"),
                 Some("book-a"),
                 Some("第一本书"),
+                Some("作者甲"),
             )
             .await
             .unwrap();
@@ -241,6 +318,7 @@ mod tests {
                 Some("2026-08-09"),
                 Some("book-a"),
                 Some("第一本书"),
+                Some("作者甲"),
             )
             .await
             .unwrap();
@@ -252,11 +330,12 @@ mod tests {
                 Some("2026-08-09"),
                 Some("book-b"),
                 Some("第二本书"),
+                Some("作者乙"),
             )
             .await
             .unwrap();
         service
-            .add_reading("default", 30, 0, Some("2026-08-09"), None, None)
+            .add_reading("default", 30, 0, Some("2026-08-09"), None, None, None)
             .await
             .unwrap();
 
@@ -278,5 +357,107 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(daily[0].seconds, 300);
+    }
+
+    #[tokio::test]
+    async fn same_book_different_source_urls_merges_into_one_row() {
+        // 同一本小说换源后 book_url 不同, 但 book_name 相同。
+        // 按书名分组后应合并成一条, 时长累加。
+        let service = setup_service().await;
+        // 源 A 的 URL
+        service
+            .add_reading("default", 120, 300, Some("2026-08-10"), Some("url-a"), Some("斗破苍穹"), Some("天蚕土豆"))
+            .await
+            .unwrap();
+        // 源 B 的 URL (换源后)
+        service
+            .add_reading("default", 180, 500, Some("2026-08-11"), Some("url-b"), Some("斗破苍穹"), Some("天蚕土豆"))
+            .await
+            .unwrap();
+        // 另一本书
+        service
+            .add_reading("default", 60, 100, Some("2026-08-10"), Some("url-c"), Some("凡人修仙"), Some("忘语"))
+            .await
+            .unwrap();
+
+        let books = service.get_by_book("default", "2026-08-10", "2026-08-11").await.unwrap();
+        assert_eq!(books.len(), 2, "同一本书换源后应合并成一条, 实际: {:?}", books);
+        // 时长累加: 120 + 180 = 300
+        let doupo = books.iter().find(|b| b.book_name == "斗破苍穹").unwrap();
+        assert_eq!(doupo.seconds, 300);
+        assert_eq!(doupo.characters, 800);
+        assert_eq!(doupo.last_read_date, "2026-08-11");
+        // book_url 取最近阅读日期对应的 (2026-08-11 → url-b)
+        assert_eq!(doupo.book_url, "url-b");
+    }
+
+    #[tokio::test]
+    async fn delete_book_stats_removes_only_target_book() {
+        let service = setup_service().await;
+        service
+            .add_reading("default", 120, 300, Some("2026-08-08"), Some("book-a"), Some("A书"), Some("甲"))
+            .await
+            .unwrap();
+        service
+            .add_reading("default", 90, 200, Some("2026-08-08"), Some("book-b"), Some("B书"), Some("乙"))
+            .await
+            .unwrap();
+
+        let deleted = service.delete_book_stats("default", "book-a").await.unwrap();
+        assert_eq!(deleted, 1);
+
+        let books = service.get_by_book("default", "2026-08-08", "2026-08-08").await.unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].book_url, "book-b");
+    }
+
+    #[tokio::test]
+    async fn delete_book_stats_removes_all_rows_across_source_urls() {
+        // 换源后同一本书有多个 book_url, 删除时应全部删除
+        let service = setup_service().await;
+        service
+            .add_reading("default", 120, 0, Some("2026-08-08"), Some("url-a"), Some("同一本"), Some("同作者"))
+            .await
+            .unwrap();
+        service
+            .add_reading("default", 180, 0, Some("2026-08-09"), Some("url-b"), Some("同一本"), Some("同作者"))
+            .await
+            .unwrap();
+        service
+            .add_reading("default", 60, 0, Some("2026-08-08"), Some("url-c"), Some("另一本"), Some("其他作者"))
+            .await
+            .unwrap();
+
+        // 用 url-b 删除应删掉 url-a 和 url-b 两条
+        let deleted = service.delete_book_stats("default", "url-b").await.unwrap();
+        assert_eq!(deleted, 2);
+
+        let books = service.get_by_book("default", "2026-08-08", "2026-08-09").await.unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].book_name, "另一本");
+    }
+
+    #[tokio::test]
+    async fn same_name_different_authors_not_merged() {
+        // 不同作者的同名书不应合并, 删除其中一本不影响另一本
+        let service = setup_service().await;
+        service
+            .add_reading("default", 100, 0, Some("2026-08-08"), Some("url-甲"), Some("同名书"), Some("作者甲"))
+            .await
+            .unwrap();
+        service
+            .add_reading("default", 200, 0, Some("2026-08-08"), Some("url-乙"), Some("同名书"), Some("作者乙"))
+            .await
+            .unwrap();
+
+        let books = service.get_by_book("default", "2026-08-08", "2026-08-08").await.unwrap();
+        assert_eq!(books.len(), 2, "同名不同作者的书应分开, 实际: {:?}", books);
+
+        // 删除作者甲的书, 作者乙的书不受影响
+        let deleted = service.delete_book_stats("default", "url-甲").await.unwrap();
+        assert_eq!(deleted, 1);
+        let books = service.get_by_book("default", "2026-08-08", "2026-08-08").await.unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].book_url, "url-乙");
     }
 }

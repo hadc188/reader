@@ -38,6 +38,26 @@
         <span class="trace-url">{{ trace.requestUrl }}</span>
       </div>
 
+      <div v-if="trace.warnings?.length" class="trace-warnings">
+        <div v-for="(w, i) in trace.warnings" :key="i" class="trace-warning">
+          <span class="warn-flag">⚠</span>
+          <span>{{ w }}</span>
+        </div>
+      </div>
+
+      <div v-if="trace.headers?.length" class="trace-headers">
+        <button class="headers-toggle" type="button" @click="headersOpen = !headersOpen">
+          <span class="caret" :class="{ open: headersOpen }">▸</span>
+          响应头（{{ trace.headers.length }}）
+        </button>
+        <div v-if="headersOpen" class="headers-list">
+          <div v-for="([k, v], i) in trace.headers" :key="i" class="header-row">
+            <span class="header-key">{{ k }}</span>
+            <span class="header-val">{{ v }}</span>
+          </div>
+        </div>
+      </div>
+
       <div class="trace-grid">
         <div class="trace-col">
           <h4>原始响应 <small>（截断 {{ bodySizeKB }} KB）</small></h4>
@@ -81,6 +101,7 @@ const inputValue = ref('')
 const running = ref(false)
 const error = ref('')
 const trace = ref<DebugTrace | null>(null)
+const headersOpen = ref(false)
 
 const inputPlaceholder = computed(() => {
   switch (activeStep.value) {
@@ -143,6 +164,7 @@ async function run() {
   running.value = true
   error.value = ''
   trace.value = null
+  headersOpen.value = false
   try {
     trace.value = await debugSourceStep({
       bookSourceUrl,
@@ -268,6 +290,95 @@ async function run() {
 .status-badge.error {
   background: rgba(245, 34, 45, 0.12);
   color: var(--color-danger);
+}
+
+.trace-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.trace-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: rgba(250, 173, 20, 0.1);
+  border: 1px solid rgba(250, 173, 20, 0.28);
+  color: var(--color-warning, #d48806);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.warn-flag {
+  flex-shrink: 0;
+}
+
+.trace-headers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.headers-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.headers-toggle:hover {
+  color: var(--color-primary);
+}
+
+.caret {
+  display: inline-block;
+  transition: transform var(--duration-fast);
+}
+
+.caret.open {
+  transform: rotate(90deg);
+}
+
+.headers-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.header-row {
+  display: flex;
+  gap: 10px;
+  padding: 5px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.header-row:nth-child(odd) {
+  background: var(--color-bg);
+}
+
+.header-key {
+  flex-shrink: 0;
+  min-width: 140px;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+
+.header-val {
+  color: var(--color-text);
+  word-break: break-all;
 }
 
 .trace-grid {

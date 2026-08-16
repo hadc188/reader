@@ -786,7 +786,224 @@ pub fn select_text_list(doc: &Html, rule: &str) -> Vec<String> {
 }
 
 /// XPath support using sxd-xpath
+/// 把 legado/JsoupXpath 的 `...::text`、`...::ownText`、`...::html` 等轴扩展
+/// 拆成 (XPath 路径, 提取器)。返回的路径可供标准 XPath 1.0 解析。
+/// `pub` 供 rule_engine 的节点级 XPath 求值复用。
+/// legado/JsoupXpath 的轴扩展提取器集合。`split_xpath_axis` 只认这些名字,
+/// 避免把标准 XPath 1.0 轴(`child::span` / `parent::node` / `descendant::div`
+/// 等)误当成提取器拆掉, 破坏合法 XPath 语义。
+const LEGADO_XPATH_EXTRACTORS: &[&str] = &[
+    "text",
+    "ownText",
+    "html",
+    "outerHtml",
+    "allText",
+    "textNodes",
+    "node",
+];
+
+/// 标准 XPath 1.0 轴名集合。`::` 前是这些名字时, `::word` 是轴限定(node-test),
+/// 不是 legado 提取器, 不应拆分(如 `child::span` / `parent::node`)。
+const XPATH_AXIS_NAMES: &[&str] = &[
+    "ancestor",
+    "ancestor-or-self",
+    "attribute",
+    "child",
+    "descendant",
+    "descendant-or-self",
+    "following",
+    "following-sibling",
+    "namespace",
+    "parent",
+    "preceding",
+    "preceding-sibling",
+    "self",
+];
+
+pub fn split_xpath_axis(xpath: &str) -> (String, Option<&str>) {
+    // 形如 `//div[@class='x']::text` → 路径 + 提取器 `text`
+    // 注意避开 XPath 合法语法中的 `::`(轴限定, 如 `child::span`):
+    // 只在末尾 `::word` 且 word 属于 legado 已知提取器集合、且 `::` 前不是
+    // 标准 XPath 轴名时, 才拆分。后者用于消歧 `parent::node` 这种 `::` 前
+    // 是轴名的情况(node 既是 legado 提取器又是 XPath 节点测试)。
+    let trimmed = xpath.trim();
+    // 匹配末尾 `::extractor`(extractor 为字母)
+    let len = trimmed.len();
+    let bytes = trimmed.as_bytes();
+    let mut start = len;
+    for &b in bytes.iter().rev() {
+        if b.is_ascii_alphabetic() {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    // 左边必须是 `::`
+    if start < 2 {
+        return (trimmed.to_string(), None);
+    }
+    let left = &trimmed[..start];
+    if !left.ends_with("::") {
+        return (trimmed.to_string(), None);
+    }
+    let extractor = &trimmed[start..];
+    // 只接受 legado 已知提取器; 否则视为标准 XPath 轴, 原样返回。
+    if !LEGADO_XPATH_EXTRACTORS.contains(&extractor) {
+        return (trimmed.to_string(), None);
+    }
+    // `::` 前是标准 XPath 轴名 → 这是轴限定(node-test), 不是 legado 提取器。
+    // 取 `::` 前最后一段(按 `/` 分割)判断轴名。
+    let before = left[..left.len() - 2].trim_end();
+    let last_segment = before.rsplit('/').next().unwrap_or(before);
+    if XPATH_AXIS_NAMES.contains(&last_segment) {
+        return (trimmed.to_string(), None);
+    }
+    let path = before.trim().to_string();
+    (path, Some(extractor))
+}
+
+/// 递归把 sxd_xpath 节点序列化为 HTML 字符串(供 `::html` / `::outerHtml`)
+/// 递归序列化 sxd 节点为 HTML 字符串(含外层标签)。
+fn node_to_html_inner(node: sxd_xpath::nodeset::Node<'_>, text: &mut String) {
+    use sxd_xpath::nodeset::Node;
+    match node {
+        Node::Element(el) => {
+            let name = el.name().local_part();
+            text.push('<');
+            text.push_str(name);
+            for attr in el.attributes() {
+                let a = attr.name();
+                text.push(' ');
+                text.push_str(a.local_part());
+                text.push_str("=\"");
+                text.push_str(&attr.value().replace('"', "&quot;"));
+                text.push('"');
+            }
+            text.push('>');
+            for child in el.children() {
+                use sxd_document::dom::ChildOfElement;
+                match child {
+                    // 子元素 → 递归
+                    ChildOfElement::Element(e) => {
+                        node_to_html_inner(Node::Element(e), text);
+                    }
+                    ChildOfElement::Text(t) => {
+                        text.push_str(
+                            &t.text()
+                                .replace('&', "&amp;")
+                                .replace('<', "&lt;")
+                                .replace('>', "&gt;"),
+                        );
+                    }
+                    ChildOfElement::Comment(c) => {
+                        text.push_str("<!--");
+                        text.push_str(c.text());
+                        text.push_str("-->");
+                    }
+                    ChildOfElement::ProcessingInstruction(pi) => {
+                        if let Some(v) = pi.value() {
+                            text.push_str(&format!("<?{} {}?>", pi.target(), v));
+                        }
+                    }
+                }
+            }
+            text.push_str("</");
+            text.push_str(name);
+            text.push('>');
+        }
+        Node::Text(t) => {
+            text.push_str(
+                &t.text()
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;"),
+            );
+        }
+        Node::Comment(c) => {
+            text.push_str("<!--");
+            text.push_str(c.text());
+            text.push_str("-->");
+        }
+        Node::ProcessingInstruction(pi) => {
+            if let Some(v) = pi.value() {
+                text.push_str(&format!("<?{} {}?>", pi.target(), v));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 序列化节点为 outer HTML(含外层标签)。
+fn node_to_html(node: &sxd_xpath::nodeset::Node<'_>) -> String {
+    let mut out = String::new();
+    node_to_html_inner(*node, &mut out);
+    out
+}
+
+/// 序列化节点的子节点(inner HTML), 不含外层标签本身。
+/// Legado 中 `::html` 返回 inner HTML, `::outerHtml` 返回含外层标签的完整序列化。
+fn node_inner_html(node: &sxd_xpath::nodeset::Node<'_>) -> String {
+    let mut out = String::new();
+    for child in node.children() {
+        node_to_html_inner(child, &mut out);
+    }
+    out
+}
+
+/// 从 sxd 节点按提取器取出文本/html。提取器为 legado/JsoupXpath 轴扩展名。
+pub fn node_extract(node: &sxd_xpath::nodeset::Node<'_>, extractor: &str) -> Option<String> {
+    use sxd_xpath::nodeset::Node;
+    match extractor {
+        // ::text / ::textNodes / ::allText / ::node → 元素树文本
+        "text" | "textNodes" | "allText" | "node" => {
+            let v = node.string_value();
+            if v.trim().is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
+        // ::ownText → 仅直接文本子节点
+        "ownText" => {
+            let mut own = String::new();
+            for child in node.children() {
+                if let Node::Text(t) = child {
+                    own.push_str(t.text().trim());
+                    own.push(' ');
+                }
+            }
+            let v = own.trim().to_string();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
+        // ::html → inner HTML (子节点序列化, 不含外层标签)
+        "html" => {
+            let v = node_inner_html(node);
+            if v.trim().is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
+        // ::outerHtml → outer HTML (含外层标签)
+        "outerHtml" => {
+            let v = node_to_html(node);
+            if v.trim().is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn select_xpath(html: &str, xpath: &str) -> Vec<String> {
+    let (path, extractor) = split_xpath_axis(xpath);
+
     let package = match sxd_document::parser::parse(html) {
         Ok(p) => p,
         Err(_) => return vec![],
@@ -795,10 +1012,20 @@ pub fn select_xpath(html: &str, xpath: &str) -> Vec<String> {
     let document = package.as_document();
     let context = sxd_xpath::Context::new();
 
-    match sxd_xpath::Factory::new().build(xpath) {
+    match sxd_xpath::Factory::new().build(&path) {
         Ok(Some(xpath_expr)) => match xpath_expr.evaluate(&context, document.root()) {
             Ok(value) => match value {
-                sxd_xpath::Value::Nodeset(ns) => ns.into_iter().map(|n| n.string_value()).collect(),
+                sxd_xpath::Value::Nodeset(ns) => {
+                    let nodes: Vec<_> = ns.document_order();
+                    if let Some(ext) = extractor {
+                        nodes
+                            .iter()
+                            .filter_map(|n| node_extract(n, ext))
+                            .collect::<Vec<_>>()
+                    } else {
+                        nodes.iter().map(|n| n.string_value()).collect()
+                    }
+                }
                 sxd_xpath::Value::String(s) => vec![s],
                 sxd_xpath::Value::Number(n) => vec![n.to_string()],
                 sxd_xpath::Value::Boolean(b) => vec![b.to_string()],
@@ -891,5 +1118,119 @@ mod tests {
             Some("abc".to_string())
         );
         assert_eq!(select_text(&doc, "a@href"), Some("/book/1".to_string()));
+    }
+
+    #[test]
+    fn test_xpath_axis_extensions() {
+        // legado/JsoupXpath 轴扩展: `//div::text`、`::ownText`、`::html`
+        let html = r#"<root><div class="x"><span>hello</span> <b>world</b></div><div class="y">seed</div></root>"#;
+
+        // ::text → 元素树文本
+        assert_eq!(
+            select_xpath(html, "//div[@class='x']::text"),
+            vec!["hello world".to_string()]
+        );
+        // 无提取器 → 路径直接原样
+        assert_eq!(
+            select_xpath(html, "//div[@class='y']"),
+            vec!["seed".to_string()]
+        );
+        // ::html → 序列化
+        let got_html = select_xpath(html, "//div[@class='x']::html");
+        assert_eq!(got_html.len(), 1);
+        assert!(got_html[0].contains("hello"));
+        assert!(got_html[0].contains("<span>"));
+        // ::ownText → 该 div 的直接文本只有空白(子元素都被更深层包裹), 允许为空
+        let own = select_xpath(html, "//div[@class='y']::ownText");
+        assert_eq!(own, vec!["seed".to_string()]);
+    }
+
+    #[test]
+    fn test_split_xpath_axis_leaves_standard_xpath_axis_intact() {
+        // 标准 XPath 1.0 轴(child::span / parent::node / descendant::div)
+        // 不能被当成 legado 提取器拆掉, 否则路径被截断、解析失败。
+        assert_eq!(
+            split_xpath_axis("//div/child::span"),
+            ("//div/child::span".to_string(), None)
+        );
+        // parent::node 中 node 既是 legado 提取器又是 XPath 节点测试,
+        // 但 `::` 前是轴名 parent → 不拆
+        assert_eq!(
+            split_xpath_axis("//a/parent::node"),
+            ("//a/parent::node".to_string(), None)
+        );
+        assert_eq!(
+            split_xpath_axis("//div/descendant::div"),
+            ("//div/descendant::div".to_string(), None)
+        );
+        assert_eq!(
+            split_xpath_axis("//div/ancestor::div"),
+            ("//div/ancestor::div".to_string(), None)
+        );
+        assert_eq!(
+            split_xpath_axis("//div/following-sibling::a"),
+            ("//div/following-sibling::a".to_string(), None)
+        );
+        assert_eq!(
+            split_xpath_axis("//div/self::node"),
+            ("//div/self::node".to_string(), None)
+        );
+        // 末尾不是已知提取器名 → 不拆
+        assert_eq!(
+            split_xpath_axis("//div::notARealExtractor"),
+            ("//div::notARealExtractor".to_string(), None)
+        );
+        // 已知提取器仍正常拆分(`::` 前不是轴名)
+        assert_eq!(
+            split_xpath_axis("//div[@class='x']::text"),
+            ("//div[@class='x']".to_string(), Some("text"))
+        );
+        assert_eq!(
+            split_xpath_axis("//div::ownText"),
+            ("//div".to_string(), Some("ownText"))
+        );
+        assert_eq!(
+            split_xpath_axis("//div::html"),
+            ("//div".to_string(), Some("html"))
+        );
+        assert_eq!(
+            split_xpath_axis("//div::outerHtml"),
+            ("//div".to_string(), Some("outerHtml"))
+        );
+        assert_eq!(
+            split_xpath_axis("//div::allText"),
+            ("//div".to_string(), Some("allText"))
+        );
+        assert_eq!(
+            split_xpath_axis("//div::textNodes"),
+            ("//div".to_string(), Some("textNodes"))
+        );
+        // `::` 前是 div(非轴名) → 拆成提取器 node
+        assert_eq!(
+            split_xpath_axis("//div::node"),
+            ("//div".to_string(), Some("node"))
+        );
+        // 无 :: → 原样
+        assert_eq!(split_xpath_axis("//div/span"), ("//div/span".to_string(), None));
+        // 无内容
+        assert_eq!(split_xpath_axis(""), ("".to_string(), None));
+    }
+
+    #[test]
+    fn select_xpath_html_extractor_returns_inner_html() {
+        // ::html 应返回 inner HTML(子节点序列化), 不含外层 div 标签
+        let html = r#"<div><p>hello</p><span>world</span></div>"#;
+        let result = select_xpath(html, "//div::html");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "<p>hello</p><span>world</span>");
+    }
+
+    #[test]
+    fn select_xpath_outer_html_extractor_returns_outer_html() {
+        // ::outerHtml 应返回含外层标签的完整序列化
+        let html = r#"<div><p>hello</p></div>"#;
+        let result = select_xpath(html, "//div::outerHtml");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "<div><p>hello</p></div>");
     }
 }

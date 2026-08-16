@@ -38,6 +38,7 @@
         @click="handleBookClick"
         @info="handleBookInfo"
         @delete="handleRecentDelete"
+        @contextmenu="handleBookContextMenu"
       />
     </div>
 
@@ -53,6 +54,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import BookDetailModal from '../components/BookDetailModal.vue'
 import BookGrid from '../components/BookGrid.vue'
+import { showContextMenu } from '../composables/useContextMenu'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import type { Book, SearchBook } from '../types'
@@ -140,6 +142,18 @@ function handleBookInfo(book: Book | SearchBook) {
 
 async function handleRecentDelete(book: Book | SearchBook) {
   await shelfStore.removeRecentBook(book as Book).catch(() => undefined)
+}
+
+function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event: MouseEvent }) {
+  const currentBook = book as Book
+  const isRss = currentBook.recentKind === 'rss'
+  const menuItems = [
+    { label: isRss ? '打开文章' : '开始阅读', action: () => handleBookClick(book) },
+    { label: '查看详情', action: () => handleBookInfo(book) },
+    { divider: true },
+    { label: '从最近移除', danger: true, action: () => handleRecentDelete(book) },
+  ]
+  showContextMenu(event, menuItems, book)
 }
 
 async function handleClearRecent() {

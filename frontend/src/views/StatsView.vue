@@ -46,7 +46,12 @@
         </header>
 
         <div v-if="bookStats.length" class="book-stats-list">
-          <div v-for="(book, index) in bookStats" :key="book.bookUrl" class="book-stat-row">
+          <div
+            v-for="(book, index) in bookStats"
+            :key="book.bookUrl"
+            class="book-stat-row"
+            @contextmenu.prevent="handleBookStatsContextMenu($event, book)"
+          >
             <span class="book-rank">{{ index + 1 }}</span>
             <div class="book-stat-main">
               <div class="book-stat-meta">
@@ -73,6 +78,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import {
+  deleteReadingStatsByBook,
   getReadingStatsByBook,
   getReadingStatsDaily,
   getReadingStatsSummary,
@@ -80,6 +86,7 @@ import {
   type ReadingStatsSummary,
 } from '../api/readingStats'
 import { useAppStore } from '../stores/app'
+import { showContextMenu } from '../composables/useContextMenu'
 
 const ranges = [
   { days: 7, label: '近7天' },
@@ -121,6 +128,32 @@ function bookProgressWidth(seconds: number) {
 function bookShare(seconds: number) {
   if (!trackedBookSeconds.value) return 0
   return Math.round((seconds / trackedBookSeconds.value) * 100)
+}
+
+function handleBookStatsContextMenu(event: MouseEvent, book: BookReadingStats) {
+  const menuItems = [
+    {
+      label: '删除该书阅读记录',
+      danger: true,
+      action: () => handleDeleteBookStats(book),
+    },
+  ]
+  showContextMenu(event, menuItems, book)
+}
+
+async function handleDeleteBookStats(book: BookReadingStats) {
+  const ok = await appStore.confirmDialog(
+    `确定删除「${book.bookName}」的阅读时长记录？此操作不可恢复。`,
+    { title: '删除阅读记录', danger: true },
+  )
+  if (!ok) return
+  try {
+    await deleteReadingStatsByBook(book.bookUrl)
+    appStore.showToast(`已删除「${book.bookName}」的阅读记录`, 'success')
+    await loadStats()
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '删除失败', 'error')
+  }
 }
 
 function formatNumber(n: number) {

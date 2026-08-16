@@ -57,16 +57,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   async function fetchBooks() {
     loading.value = true
     try {
-      const [serverBooks, browserSummaries] = await Promise.all([
-        getBookshelfWithCacheInfo(),
-        listBrowserCacheSummary().catch(() => []),
-      ])
-      const browserMap = new Map(browserSummaries.map((item) => [item.bookUrl, item.cachedChapterCount]))
-      books.value = serverBooks.map((book) => ({
-        ...book,
-        browserCachedChapterCount: isLocalBook(book) ? 0 : browserMap.get(book.bookUrl) || 0,
-      }))
-      await refreshRecentBooks()
+      await loadBooks()
     } finally {
       loading.value = false
     }
@@ -75,19 +66,24 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   async function refreshBooks() {
     refreshing.value = true
     try {
-      const [serverBooks, browserSummaries] = await Promise.all([
-        getBookshelfWithCacheInfo(),
-        listBrowserCacheSummary().catch(() => []),
-      ])
-      const browserMap = new Map(browserSummaries.map((item) => [item.bookUrl, item.cachedChapterCount]))
-      books.value = serverBooks.map((book) => ({
-        ...book,
-        browserCachedChapterCount: isLocalBook(book) ? 0 : browserMap.get(book.bookUrl) || 0,
-      }))
-      await refreshRecentBooks()
+      await loadBooks()
     } finally {
       refreshing.value = false
     }
+  }
+
+  /// 共用的书架加载逻辑: 并发取服务端书架 + 浏览器缓存摘要, 合并后刷新最近阅读。
+  async function loadBooks() {
+    const [serverBooks, browserSummaries] = await Promise.all([
+      getBookshelfWithCacheInfo(),
+      listBrowserCacheSummary().catch(() => []),
+    ])
+    const browserMap = new Map(browserSummaries.map((item) => [item.bookUrl, item.cachedChapterCount]))
+    books.value = serverBooks.map((book) => ({
+      ...book,
+      browserCachedChapterCount: isLocalBook(book) ? 0 : browserMap.get(book.bookUrl) || 0,
+    }))
+    await refreshRecentBooks()
   }
 
   async function removeBook(book: Book) {
@@ -194,19 +190,23 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   const selectedBookUrls = ref<Set<string>>(new Set())
 
   function toggleSelection(url: string) {
-    if (selectedBookUrls.value.has(url)) {
-      selectedBookUrls.value.delete(url)
+    // Vue 3 的 ref 对 Set 的 mutation(add/delete)不会触发响应式更新,
+    // 必须创建新 Set 重新赋值才能让依赖 selectedBookUrls 的 UI 更新。
+    const next = new Set(selectedBookUrls.value)
+    if (next.has(url)) {
+      next.delete(url)
     } else {
-      selectedBookUrls.value.add(url)
+      next.add(url)
     }
+    selectedBookUrls.value = next
   }
 
   function selectAll() {
-    filteredBooks.value.forEach(b => selectedBookUrls.value.add(b.bookUrl))
+    selectedBookUrls.value = new Set(filteredBooks.value.map(b => b.bookUrl))
   }
 
   function clearSelection() {
-    selectedBookUrls.value.clear()
+    selectedBookUrls.value = new Set()
   }
 
   async function bulkDelete() {
@@ -223,9 +223,8 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
 
   async function bulkSetGroup(groupId: number) {
     const urls = Array.from(selectedBookUrls.value)
-    for (const url of urls) {
-      await apiSaveBookGroupId(url, groupId)
-    }
+    // 并发设置分组, 避免选中 50 本书时串行等 50 个往返
+    await Promise.all(urls.map((url) => apiSaveBookGroupId(url, groupId)))
     // Refresh to get updated groups
     await fetchBooks()
     clearSelection()

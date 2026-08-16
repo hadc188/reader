@@ -12,6 +12,11 @@ export function isLocalEpubBook(book?: BookLike | null) {
   return book.origin?.trim() === 'local-epub' || book.bookUrl?.trim().startsWith('local-epub:')
 }
 
+export function isLocalPdfBook(book?: BookLike | null) {
+  if (!book) return false
+  return book.origin?.trim() === 'local-pdf' || book.bookUrl?.trim().startsWith('local-pdf:')
+}
+
 export function isLocalBook(book?: BookLike | null) {
-  return isLocalTxtBook(book) || isLocalEpubBook(book)
+  return isLocalTxtBook(book) || isLocalEpubBook(book) || isLocalPdfBook(book)
 }

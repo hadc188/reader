@@ -26,6 +26,7 @@ export function addReadingStats(params: {
   date?: string
   bookUrl?: string
   bookName?: string
+  bookAuthor?: string
 }): Promise<{ saved: boolean }> {
   return invokeEnvelope('add_reading_stats', { req: params })
 }
@@ -40,4 +41,8 @@ export function getReadingStatsSummary(): Promise<ReadingStatsSummary> {
 
 export function getReadingStatsByBook(start: string, end: string): Promise<BookReadingStats[]> {
   return invokeEnvelope('get_reading_stats_by_book', { start, end })
+}
+
+export function deleteReadingStatsByBook(bookUrl: string): Promise<{ deleted: number }> {
+  return invokeEnvelope('delete_reading_stats_by_book', { bookUrl })
 }

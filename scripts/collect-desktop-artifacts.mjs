@@ -144,7 +144,11 @@ if (platform === 'windows') {
     throw new Error(`Failed to create macOS app archive: ${appOutput}`)
   }
 } else if (platform === 'linux') {
-  copyArtifact(firstBundleFile('.appimage'), join(outputDir, `${prefix}.AppImage`))
+  const appImage = firstBundleFile('.appimage')
+  execFileSync('bash', [join(root, 'scripts', 'fix-linux-appimage.sh'), appImage], {
+    stdio: 'inherit',
+  })
+  copyArtifact(appImage, join(outputDir, `${prefix}.AppImage`))
   copyArtifact(firstBundleFile('.deb'), join(outputDir, `${prefix}.deb`))
 } else {
   throw new Error(`Unsupported release platform: ${platform}`)

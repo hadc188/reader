@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isLocalBook, isLocalEpubBook, isLocalTxtBook } from './localBook'
+import { isLocalBook, isLocalEpubBook, isLocalPdfBook, isLocalTxtBook } from './localBook'
 
 describe('isLocalTxtBook', () => {
   it('detects uploaded local txt books by origin or url', () => {
@@ -15,5 +15,11 @@ describe('isLocalTxtBook', () => {
     expect(isLocalBook({ origin: 'local-txt', bookUrl: 'anything' })).toBe(true)
     expect(isLocalBook({ origin: 'remote', bookUrl: 'local-epub:abc' })).toBe(true)
     expect(isLocalBook({ origin: 'remote', bookUrl: 'https://example.test/book' })).toBe(false)
+  })
+
+  it('detects uploaded local pdf books', () => {
+    expect(isLocalPdfBook({ origin: 'local-pdf', bookUrl: 'anything' })).toBe(true)
+    expect(isLocalPdfBook({ origin: 'remote', bookUrl: 'local-pdf:abc' })).toBe(true)
+    expect(isLocalBook({ origin: 'remote', bookUrl: 'local-pdf:abc' })).toBe(true)
   })
 })

@@ -72,9 +72,19 @@ pub struct StrResponse {
 }
 
 pub async fn fetch(client: &HttpClient, req: RequestSpec) -> anyhow::Result<FetchResponse> {
+    let request_client = client.client_with_proxy(req.proxy.as_deref())?;
+    fetch_with_client(&request_client, req).await
+}
+
+/// Fetch with a caller-owned client. Book-source callers use a client scoped
+/// to one source, preserving redirects and cookies without sharing them with
+/// another source.
+pub async fn fetch_with_client(
+    request_client: &reqwest::Client,
+    req: RequestSpec,
+) -> anyhow::Result<FetchResponse> {
     let mut last_err: Option<anyhow::Error> = None;
     let max_retries = req.retry;
-    let request_client = client.client_with_proxy(req.proxy.as_deref())?;
     for attempt in 0..=max_retries {
         let req = req.clone();
         let mut builder = match req.method {

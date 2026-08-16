@@ -269,7 +269,7 @@ export const useAppStore = defineStore('app', () => {
     completedBooks: string[]
   }>(initialReadingStats)
   let readingSessionStartedAt = 0
-  let readingSessionBook: { bookUrl: string; bookName: string } | null = null
+  let readingSessionBook: { bookUrl: string; bookName: string; bookAuthor: string } | null = null
 
   function persistStats() {
     localStorage.setItem(STATS_KEY, JSON.stringify(readingStats.value))
@@ -287,6 +287,7 @@ export const useAppStore = defineStore('app', () => {
         seconds: delta,
         bookUrl: readingSessionBook?.bookUrl,
         bookName: readingSessionBook?.bookName,
+        bookAuthor: readingSessionBook?.bookAuthor,
       }).catch(() => undefined)
     }
   }
@@ -328,10 +329,10 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  function setReadingSessionBook(bookUrl?: string, bookName?: string) {
+  function setReadingSessionBook(bookUrl?: string, bookName?: string, bookAuthor?: string) {
     const normalizedUrl = bookUrl?.trim() || ''
     const nextBook = normalizedUrl
-      ? { bookUrl: normalizedUrl, bookName: bookName?.trim() || '未命名书籍' }
+      ? { bookUrl: normalizedUrl, bookName: bookName?.trim() || '未命名书籍', bookAuthor: bookAuthor?.trim() || '' }
       : null
 
     if (readingSessionBook?.bookUrl === nextBook?.bookUrl) {
@@ -345,8 +346,8 @@ export const useAppStore = defineStore('app', () => {
     if (wasRunning) readingSessionStartedAt = Date.now()
   }
 
-  function startReadingSession(bookUrl?: string, bookName?: string) {
-    setReadingSessionBook(bookUrl, bookName)
+  function startReadingSession(bookUrl?: string, bookName?: string, bookAuthor?: string) {
+    setReadingSessionBook(bookUrl, bookName, bookAuthor)
     if (!readingSessionStartedAt) readingSessionStartedAt = Date.now()
   }
 

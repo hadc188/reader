@@ -22,6 +22,7 @@
     <SourceManager v-model="appStore.showSourceManager" />
     <WebdavManager v-model="appStore.showWebdavManager" />
     <ConfirmDialog />
+    <ContextMenu />
 
     <!-- Toast notifications -->
     <div class="toast-container">
@@ -51,6 +52,7 @@ import SettingsDrawer from './components/SettingsDrawer.vue'
 import SourceManager from './components/SourceManager.vue'
 import WebdavManager from './components/WebdavManager.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import ContextMenu from './components/ContextMenu.vue'
 import TitleBar from './components/TitleBar.vue'
 import { resolveWindowClose } from './utils/windowClose'
 

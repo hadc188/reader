@@ -206,8 +206,73 @@ pub async fn login_book_source(
         .get(&user_ns, &url)
         .await?
         .ok_or_else(|| AppError::NotFound("bookSource not found".to_string()))?;
-    let result = state.book_service.login_book_source(&source).await?;
+    let mut result = state.book_service.login_book_source(&source).await?;
+    let login_session = state
+        .book_service
+        .create_source_login_session(&source.book_source_url)
+        .await;
+    if let Some(object) = result.as_object_mut() {
+        object.insert(
+            "loginSession".to_string(),
+            serde_json::Value::String(login_session),
+        );
+    }
     Ok(ApiResponse::ok(result))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSourceCookieParam {
+    pub book_source_url: Option<String>,
+    pub cookie: Option<String>,
+}
+
+/// 手动导入书源登录 Cookie(如通过抓包获取的起点会话)。
+/// Cookie 按完整书源地址隔离存储，后续仅该书源请求自动携带。
+/// 存储前会用该书源做一次搜索校验,避免过期/无效 Cookie 毒化后续所有请求。
+#[tauri::command]
+pub async fn set_book_source_cookie(
+    state: tauri::State<'_, AppState>,
+    req: SetSourceCookieParam,
+) -> Result<ApiResponse<serde_json::Value>, AppError> {
+    let user_ns = "default";
+    let url = req
+        .book_source_url
+        .ok_or_else(|| AppError::BadRequest("bookSourceUrl required".to_string()))?;
+    let cookie = req
+        .cookie
+        .ok_or_else(|| AppError::BadRequest("cookie required".to_string()))?
+        .trim()
+        .to_string();
+    if cookie.is_empty() {
+        return Err(AppError::BadRequest("cookie 不能为空".to_string()));
+    }
+    // 先确认书源存在
+    let source = state
+        .book_source_service
+        .get(&user_ns, &url)
+        .await?
+        .ok_or_else(|| AppError::NotFound("bookSource not found".to_string()))?;
+    // 存储前校验: 带 cookie 跑一次搜索, 无效/过期则拒绝写入, 避免毒化
+    let validate_keyword = source
+        .rule_search
+        .as_ref()
+        .and_then(|r| r.check_key_word.as_deref())
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+        .unwrap_or("斗破苍穹");
+    state
+        .book_service
+        .validate_source_cookie(&user_ns, &source, &cookie, validate_keyword)
+        .await?;
+
+    state
+        .book_service
+        .set_source_cookie(&user_ns, &source.book_source_url, &cookie)
+        .await;
+    Ok(ApiResponse::ok(
+        serde_json::json!({ "success": true, "saved": true, "validated": true }),
+    ))
 }
 
 #[tauri::command]
@@ -509,6 +574,10 @@ pub async fn delete_invalid_book_sources(
         .book_service
         .remove_source_candidates(&user_ns, &invalid_urls.iter().cloned().collect())
         .await?;
+    // 失效源删除时一并清理登录 Cookie, 避免坏 Cookie 留在内存里继续毒化
+    for url in &invalid_urls {
+        state.book_service.clear_source_cookie(&user_ns, url).await;
+    }
     Ok(ApiResponse::ok(serde_json::json!({
         "deleted": invalid_urls.len()
     })))
@@ -526,8 +595,9 @@ pub async fn delete_book_source(
     state.book_source_service.delete(&user_ns, &url).await?;
     state
         .book_service
-        .remove_source_candidates(&user_ns, &HashSet::from([url]))
+        .remove_source_candidates(&user_ns, &HashSet::from([url.clone()]))
         .await?;
+    state.book_service.clear_source_cookie(&user_ns, &url).await;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 
@@ -548,6 +618,10 @@ pub async fn delete_book_sources(
         .book_service
         .remove_source_candidates(&user_ns, &deleted_urls)
         .await?;
+    // 批量删除: 一并清掉这些源的登录 Cookie
+    for url in &deleted_urls {
+        state.book_service.clear_source_cookie(&user_ns, url).await;
+    }
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 
@@ -568,6 +642,10 @@ pub async fn delete_all_book_sources(
         .book_service
         .remove_source_candidates(&user_ns, &deleted_urls)
         .await?;
+    // 清空书源时一并清空全部登录 Cookie
+    for url in &deleted_urls {
+        state.book_service.clear_source_cookie(&user_ns, url).await;
+    }
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 
@@ -596,6 +674,9 @@ fn extract_sources(payload: serde_json::Value) -> Result<Vec<BookSource>, AppErr
                 }
             }
         }
+        // 单个书源对象直接导入(与复制粘贴保存的惯用格式一致)
+        return Ok(vec![book_source_from_value(payload)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?]);
     }
     Err(AppError::BadRequest(
         "invalid book sources payload".to_string(),
@@ -703,6 +784,7 @@ pub async fn set_as_default_book_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn requested_source_urls_rejects_batches_above_limit() {
@@ -713,5 +795,48 @@ mod tests {
         let err = normalize_requested_source_urls(Some(&urls)).unwrap_err();
 
         assert!(matches!(err, AppError::BadRequest(message) if message.contains("100")));
+    }
+
+    #[test]
+    fn extract_sources_accepts_single_source_object() {
+        let payload = json!({
+            "bookSourceName": "single",
+            "bookSourceUrl": "https://single.example",
+            "ruleSearch": {"bookList": ".item"}
+        });
+        let sources = extract_sources(payload).expect("single object should import");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].book_source_name, "single");
+    }
+
+    #[test]
+    fn extract_sources_accepts_array() {
+        let payload = json!([
+            {"bookSourceName": "a", "bookSourceUrl": "https://a.example"},
+            {"bookSourceName": "b", "bookSourceUrl": "https://b.example"}
+        ]);
+        let sources = extract_sources(payload).expect("array should import");
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn extract_sources_accepts_wrapper_key() {
+        let payload = json!({
+            "bookSourceList": [
+                {"bookSourceName": "wrapped", "bookSourceUrl": "https://wrapped.example"}
+            ]
+        });
+        let sources = extract_sources(payload).expect("wrapped list should import");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].book_source_name, "wrapped");
+    }
+
+    #[test]
+    fn extract_sources_rejects_invalid_payload() {
+        // 非对象/数组(字符串、数字等)不是合法书源载荷
+        let err = extract_sources(json!("just a string")).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let err = extract_sources(json!(42)).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
     }
 }

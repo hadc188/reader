@@ -319,6 +319,8 @@
       >
         <button :disabled="!readerContextMenu.text" @click="searchContextSelection">搜索选中内容</button>
         <button @click="bookmarkContextSelection">加入书签</button>
+        <button :disabled="store.currentIndex <= 0 || store.loading" @click="prevChapterFromContextMenu">上一章</button>
+        <button :disabled="!store.hasNext || store.loading" @click="nextChapterFromContextMenu">下一章</button>
         <button @click="openCatalogFromContextMenu">目录</button>
         <button @click="openSourceFromContextMenu">换源</button>
         <button @click="toggleAutoReadingFromContextMenu">{{ store.isAutoScrolling ? '停止自动翻页' : '开始自动翻页' }}</button>
@@ -1273,13 +1275,23 @@ function handleContextMenu(event: MouseEvent) {
   event.preventDefault()
   const text = window.getSelection?.()?.toString().trim() || ''
   const width = 190
-  const height = 270
+  const height = 342
   readerContextMenu.value = {
     visible: true,
     top: Math.min(event.clientY, Math.max(8, window.innerHeight - height - 8)),
     left: Math.min(event.clientX, Math.max(8, window.innerWidth - width - 8)),
     text,
   }
+}
+
+async function prevChapterFromContextMenu() {
+  closeReaderContextMenu()
+  await prevChapter()
+}
+
+async function nextChapterFromContextMenu() {
+  closeReaderContextMenu()
+  await nextChapter()
 }
 
 function closeReaderContextMenu() {
@@ -1856,7 +1868,7 @@ onMounted(async () => {
     }
     appStore.showToast('已恢复最近阅读的离线章节', 'success')
   }
-  appStore.startReadingSession(store.book?.bookUrl, store.book?.name)
+  appStore.startReadingSession(store.book?.bookUrl, store.book?.name, store.book?.author)
   void store.fetchCustomFonts().catch(() => undefined)
   await waitForChapterListReady()
   if (readerViewUnmounted) return

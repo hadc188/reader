@@ -13,7 +13,7 @@ pub struct NetworkProxyStatus {
 }
 
 #[tauri::command]
-pub fn configure_network_proxy(
+pub async fn configure_network_proxy(
     state: tauri::State<'_, AppState>,
     mode: String,
     proxy_url: Option<String>,
@@ -26,6 +26,7 @@ pub fn configure_network_proxy(
     let status = state
         .book_service
         .configure_network_proxy(proxy_mode, proxy_url.as_deref())
+        .await
         .map_err(|error| AppError::BadRequest(error.to_string()))?;
     Ok(NetworkProxyStatus {
         mode: mode.trim().to_ascii_lowercase(),

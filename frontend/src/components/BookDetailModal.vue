@@ -46,7 +46,7 @@
           </div>
 
           <!-- Available Sources -->
-          <div class="source-section">
+          <div v-if="!isLocal" class="source-section">
             <h3>可读书源</h3>
             <div v-if="sourcesLoading && !sourceCandidates.length" class="source-loading">
               <div class="loading-spinner"></div>
@@ -138,6 +138,7 @@ import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import type { Book, SearchBook, BookChapter } from '../types'
+import { isLocalBook } from '../utils/localBook'
 import { searchMergeKey } from '../utils/searchRank'
 
 const props = defineProps<{
@@ -164,6 +165,8 @@ const sourcesLoading = ref(false)
 const selectedSource = ref<SearchBook | null>(null)
 const removingFromShelf = ref(false)
 let sourceSSE: SseLike | null = null
+
+const isLocal = computed(() => isLocalBook(props.book))
 
 const coverSrc = computed(() => {
   if (coverFailed.value || !props.book) return ''
@@ -290,12 +293,18 @@ watch(() => props.modelValue, async (visible) => {
     coverFailed.value = false
     showAllChapters.value = false
     chapters.value = []
-    await sourceStore.fetchSources(true).catch(() => undefined)
-    if (!props.modelValue || !props.book) return
-    loadSourceCandidates()
+    if (isLocal.value) {
+      sourceCandidates.value = []
+      selectedSource.value = null
+      sourcesLoading.value = false
+    } else {
+      await sourceStore.fetchSources(true).catch(() => undefined)
+      if (!props.modelValue || !props.book) return
+      loadSourceCandidates()
+    }
     // Load the current source's chapters; switching source below reloads them.
     const b = props.book as Book
-    if (enabledSourcesByUrl.value.has(b.origin)) {
+    if (isLocal.value || enabledSourcesByUrl.value.has(b.origin)) {
       await loadChaptersFor(b.bookUrl, b.origin)
     }
   } else {

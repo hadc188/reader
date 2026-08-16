@@ -53,6 +53,21 @@ impl HttpClient {
         }
     }
 
+    /// Build a fresh client with its own cookie jar. The shared client is kept
+    /// for unrelated requests (RSS, updates, etc.), while book-source traffic
+    /// uses one client per source so sessions cannot cross-contaminate.
+    pub fn new_client_with_proxy(&self, proxy: Option<&str>) -> anyhow::Result<Client> {
+        let configured_proxy = match proxy.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => resolve_manual_proxy(value)?,
+            None => self
+                .active_proxy
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        };
+        build_client(self.timeout_secs, configured_proxy.as_deref())
+    }
+
     pub fn configure_proxy(
         &self,
         mode: ProxyMode,
@@ -90,6 +105,24 @@ impl HttpClient {
             active: configured_proxy.is_some(),
             address: configured_proxy,
         })
+    }
+
+    /// Discard the reqwest cookie jar by rebuilding the underlying Client with
+    /// the same proxy. Used when a source cookie is changed/cleared so stale
+    /// session cookies accumulated in the jar (e.g. an expired qidian session
+    /// written by an antivirus-degraded page) stop being attached to requests.
+    pub fn reset_cookie_jar(&self) -> anyhow::Result<()> {
+        let configured_proxy = self
+            .active_proxy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let client = build_client(self.timeout_secs, configured_proxy.as_deref())?;
+        *self
+            .client
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
+        Ok(())
     }
 }
 

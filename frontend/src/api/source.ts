@@ -11,10 +11,19 @@ export function loginBookSource(bookSourceUrl: string) {
     success: boolean
     status: number
     url: string
+    loginSession: string
     checkResult?: string | null
     bodyPreview?: string
     bodyHtml?: string
   }>('/loginBookSource', { bookSourceUrl }).then((r) => r.data)
+}
+
+/** 手动导入书源登录 Cookie(如抓包获取的起点会话)。 */
+export function setBookSourceCookie(bookSourceUrl: string, cookie: string) {
+  return post<{ success: boolean; saved: boolean }>('/setBookSourceCookie', {
+    bookSourceUrl,
+    cookie,
+  }).then((r) => r.data)
 }
 
 export function saveBookSource(source: BookSource) {

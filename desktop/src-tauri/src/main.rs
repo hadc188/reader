@@ -15,6 +15,38 @@ use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::NewWindowResponse;
 use tauri::{App, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
+/// Hosts allowed to navigate / open a new window inside the app webview:
+/// the application origins themselves plus the login page family and the
+/// third-party OAuth hosts (QQ/WeChat/captcha).
+///
+/// `on_navigation` and `on_new_window` share this check: an http(s) URL whose
+/// host is not in this list must be handed to the system browser, while the
+/// listed hosts are allowed to stay in-app (the QQ OAuth popup needs a new
+/// app window — opening it in the system browser would log the user in there
+/// and leave the app's session untouched).
+fn host_allowed_in_app(url_host: Option<&str>) -> bool {
+    matches!(
+        url_host,
+        Some("tauri.localhost")
+            | Some("reader.localhost")
+            | Some("localhost")
+            | Some("passport.qidian.com")
+            | Some("passport.yuewen.com")
+            | Some("login.qidian.com")
+            | Some("ywloginstatic.yuewen.com")
+            | Some("open.weixin.qq.com")
+            | Some("xui.ptlogin2.qq.com")
+            | Some("ptlogin2.qq.com")
+            | Some("graph.qq.com")
+            | Some("ssl.ptlogin2.qq.com")
+            | Some("turing.captcha.qcloud.com")
+            | Some("ssl.captcha.qq.com")
+            | Some("captcha.qq.com")
+            | Some("qidian.gtimg.com")
+            | Some("tcaptcha.qq.com")
+    )
+}
+
 fn main() {
     #[cfg(target_os = "windows")]
     const WEBVIEW2_DOWNLOAD_URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
@@ -96,17 +128,13 @@ fn start(app: &mut App) -> anyhow::Result<()> {
         .decorations(false)
         .center()
         .on_navigation(|url| {
-            let is_internal = matches!(
-                url.host_str(),
-                Some("tauri.localhost") | Some("reader.localhost") | Some("localhost")
-            );
             match url.scheme() {
                 // Exporting book sources and downloading backup files navigate
                 // to blob: URLs created by the page itself.
                 "blob" | "about" => true,
-                // Keep the application origins inside the webview. Ordinary
-                // links should use the system browser on every platform.
-                "http" | "https" if is_internal => true,
+                // Keep the application origins and login/OAuth hosts inside the
+                // webview. Ordinary links go to the system browser.
+                "http" | "https" if host_allowed_in_app(url.host_str()) => true,
                 "http" | "https" => {
                     win::open_external(url.as_str());
                     false
@@ -115,10 +143,17 @@ fn start(app: &mut App) -> anyhow::Result<()> {
             }
         })
         .on_new_window(|url, _features| {
-            if matches!(url.scheme(), "http" | "https") {
+            // 与 on_navigation 的 host_allowed_in_app 保持一致: 登录/OAuth 弹窗
+            // (如 QQ OAuth 的 window.open(open.weixin.qq.com/...)) 必须留在应用内,
+            // 否则用户在系统浏览器登录后, 应用 webview 会话仍处于未登录态,
+            // 登录态采集脚本读不到 cookie。非允许列表的 host 才交给系统浏览器。
+            if matches!(url.scheme(), "http" | "https")
+                && !host_allowed_in_app(url.host_str())
+            {
                 win::open_external(url.as_str());
+                return NewWindowResponse::Deny;
             }
-            NewWindowResponse::Deny
+            NewWindowResponse::Allow
         })
         .build()?;
 

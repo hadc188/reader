@@ -72,6 +72,7 @@
       @click="handleBookClick"
       @info="handleBookInfo"
       @addToShelf="handleAddToShelf"
+      @contextmenu="handleBookContextMenu"
     />
 
     <BookDetailModal
@@ -98,6 +99,7 @@ import {
 } from '../utils/searchRank'
 import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
+import { showContextMenu } from '../composables/useContextMenu'
 import type { Book, SearchBook } from '../types'
 
 import { storeToRefs } from 'pinia'
@@ -345,6 +347,19 @@ async function handleAddToShelf(book: Book | SearchBook) {
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')
   }
+}
+
+function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event: MouseEvent }) {
+  const inShelf = shelfBookUrls.value.has(book.bookUrl)
+    || shelfBookKeys.value.has(searchMergeKey(book))
+  const menuItems = [
+    { label: '查看详情', action: () => handleBookInfo(book) },
+    { divider: true },
+    inShelf
+      ? { label: '已在书架', disabled: true }
+      : { label: '加入书架', action: () => handleAddToShelf(book) },
+  ]
+  showContextMenu(event, menuItems, book)
 }
 
 defineEmits<{

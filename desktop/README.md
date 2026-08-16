@@ -45,4 +45,4 @@ npm run build        # 产物 desktop/dist/reader-portable-v<版本>-win-x64.zip
 - **杀毒软件并发编译竞态**：实时扫描会与 cargo 并行写 `.rlib` 冲突（表现为随机 `invalid metadata`/`link.exe 0xC000012D`）。构建/测试请用 `-j 4` 或更低并发；建议给 `target/` 目录加 Defender 排除。
 - **origin 迁移**：从旧 HTTP 版（`http://127.0.0.1:47892`）首次启动，localStorage 偏好（主题/字号/朗读设置等）会重置一次；书架、进度、书源在 SQLite/文件里，不受影响。
 - **WebView2 语音**：`getVoices()` 只有本地 SAPI 语音（无 Edge 云端 "Natural" 语音）。OpenAI 兼容 TTS 通道可用。
-- **登录预览 iframe**：`bookSourceProxy` 的 Cookie 按 `http://reader.localhost` origin 存储，个别站点的登录态可能受影响。
+- **登录预览 iframe**：登录页通过 `bookSourceProxy` 转发；Cookie 只保存在后端按用户和完整书源地址隔离的网络客户端中，不写入 `reader.localhost` 浏览器 Cookie。代理仅允许访问当前书源域名及其子域，切换代理后登录预览会话需要重新打开。

@@ -4,13 +4,37 @@ use crate::model::{
 };
 use crate::parser::{
     html,
-    js::{eval_js, eval_js_with_bindings, with_js_lib},
+    js::{eval_js, eval_js_with_bindings, with_js_lib, with_source_key},
     jsonpath,
+    rule_analyzer::split_top_level,
 };
 use crate::util::text::{apply_regex_replace, normalize_source_url};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use sxd_xpath::{Context as XPathContext, Factory as XPathFactory, Value as XPathValue};
+
+/// 固定 pattern 的正则提升为全局静态, 避免每次字段解析都重新编译。
+/// 这些函数在解析搜索结果列表时对每个字段、每个元素调用, 属于极高频热路径。
+fn inline_js_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap())
+}
+
+fn inline_js_lazy_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\{\{(.*?)\}\}").unwrap())
+}
+
+fn get_template_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"@get:\{([^}]+)\}").unwrap())
+}
+
+fn placeholder_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\$(\d{1,2})").unwrap())
+}
 
 #[derive(Clone, Default)]
 pub struct RuleEngine;
@@ -205,9 +229,11 @@ impl RuleEngine {
         source: &BookSource,
         body: &str,
         base_url: &str,
+        source_key: Option<&str>,
     ) -> (Vec<BookChapter>, Vec<String>) {
         with_js_lib(source.js_lib.as_deref(), || {
-            let rule = source.rule_toc.clone().unwrap_or_default();
+            with_source_key(source_key, || {
+                let rule = source.rule_toc.clone().unwrap_or_default();
             let mut context = HashMap::new();
             let (list_rule, reverse) =
                 normalize_list_rule(rule.chapter_list.as_deref().unwrap_or(""));
@@ -246,21 +272,29 @@ impl RuleEngine {
                     &mut context,
                 ),
             };
-            apply_toc_format_js(&mut chapters, rule.format_js.as_deref(), base_url);
-            if reverse {
-                chapters.reverse();
-            }
-            for (index, chapter) in chapters.iter_mut().enumerate() {
-                chapter.index = index as i32;
-            }
-            (chapters, next_urls)
+                apply_toc_format_js(&mut chapters, rule.format_js.as_deref(), base_url);
+                if reverse {
+                    chapters.reverse();
+                }
+                for (index, chapter) in chapters.iter_mut().enumerate() {
+                    chapter.index = index as i32;
+                }
+                (chapters, next_urls)
+            })
         })
     }
 
-    pub fn content(&self, source: &BookSource, body: &str, base_url: &str) -> String {
+    pub fn content(
+        &self,
+        source: &BookSource,
+        body: &str,
+        base_url: &str,
+        source_key: Option<&str>,
+    ) -> String {
         with_js_lib(source.js_lib.as_deref(), || {
-            let rule = source.rule_content.clone().unwrap_or_default();
-            let mut content_body = body.to_string();
+            with_source_key(source_key, || {
+                let rule = source.rule_content.clone().unwrap_or_default();
+                let mut content_body = body.to_string();
 
             if let Some(source_regex) = rule
                 .source_regex
@@ -319,14 +353,15 @@ impl RuleEngine {
                     }
                 };
 
-                if let Some(replace) = rule.replace_regex.as_deref() {
-                    content = apply_legado_regex(&content, replace);
+                    if let Some(replace) = rule.replace_regex.as_deref() {
+                        content = apply_legado_regex(&content, replace);
+                    }
+
+                    return content;
                 }
 
-                return content;
-            }
-
-            String::new()
+                String::new()
+            })
         })
     }
 
@@ -335,7 +370,7 @@ impl RuleEngine {
         let mut result = rule.to_string();
 
         // Find all {{...}} blocks and evaluate them
-        let re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+        let re = inline_js_re();
         for cap in re.captures_iter(rule) {
             if let Some(js_code) = cap.get(1) {
                 if let Ok(js_result) = eval_js(js_code.as_str(), body, base_url) {
@@ -1396,6 +1431,12 @@ fn pick_json_field(v: &Value, rule: Option<&str>) -> Option<String> {
     if rule.trim_start().starts_with('$') {
         return jsonpath::jsonpath_first_string(v, rule);
     }
+    // 管道串 item 是数组: 字段规则为纯数字时按索引取第 N 段
+    if let Some(arr) = v.as_array() {
+        if let Ok(idx) = rule.trim().parse::<usize>() {
+            return arr.get(idx).and_then(jsonpath::value_to_string);
+        }
+    }
     if let Some(obj) = v.as_object() {
         if let Some(val) = obj.get(rule) {
             return jsonpath::value_to_string(val);
@@ -1439,7 +1480,7 @@ fn interpolate_json_templates(
     base_url: &str,
     ctx: &HashMap<String, String>,
 ) -> String {
-    let re = regex::Regex::new(r"\{\{(.*?)\}\}").unwrap();
+    let re = inline_js_lazy_re();
     re.replace_all(rule, |caps: &regex::Captures| {
         let expr = caps.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
         if expr.is_empty() {
@@ -1483,13 +1524,13 @@ fn interpolate_common_templates(
     base_url: &str,
     ctx: &HashMap<String, String>,
 ) -> String {
-    let get_re = regex::Regex::new(r"@get:\{([^}]+)\}").unwrap();
+    let get_re = get_template_re();
     let with_get = get_re.replace_all(rule, |caps: &regex::Captures| {
         let key = caps.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
         ctx.get(key).cloned().unwrap_or_default()
     });
 
-    let js_re = regex::Regex::new(r"\{\{(.*?)\}\}").unwrap();
+    let js_re = inline_js_lazy_re();
     js_re
         .replace_all(&with_get, |caps: &regex::Captures| {
             let expr = caps.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
@@ -1539,6 +1580,52 @@ fn eval_field_html(rule: &str, el: &scraper::ElementRef, base_url: &str) -> Opti
 }
 
 fn eval_field_html_with_ctx(
+    rule: &str,
+    el: &scraper::ElementRef,
+    base_url: &str,
+    ctx: &mut HashMap<String, String>,
+) -> Option<String> {
+    // legado 字段级链式: `&&`(拼接) / `||`(首个非空) / `%%`(按索引交织)
+    let combo = split_top_level(rule, &["&&", "||", "%%"]);
+    if let Some(operator) = combo.delimiter.as_deref() {
+        let mut results: Vec<String> = Vec::new();
+        let mut or_results: Vec<String> = Vec::new();
+        for part in combo.parts {
+            let part_value = eval_field_html_single_with_ctx(&part, el, base_url, ctx);
+            match operator {
+                "&&" => {
+                    if let Some(v) = part_value {
+                        if !v.is_empty() {
+                            results.push(v);
+                        }
+                    }
+                }
+                "||" => {
+                    or_results.push(part_value.unwrap_or_default());
+                }
+                "%%" => {
+                    results.push(part_value.unwrap_or_default());
+                }
+                _ => {}
+            }
+        }
+        return match operator {
+            // && 拼接所有非空
+            "&&" if !results.is_empty() => Some(results.join("")),
+            // || 取第一个非空
+            "||" => or_results
+                .into_iter()
+                .find(|v| !v.is_empty()),
+            // %% 按索引交织(字段级这里的每一项是单值, 等价于依次拼接)
+            "%%" if !results.is_empty() => Some(results.join("")),
+            _ => None,
+        };
+    }
+
+    eval_field_html_single_with_ctx(rule, el, base_url, ctx)
+}
+
+fn eval_field_html_single_with_ctx(
     rule: &str,
     el: &scraper::ElementRef,
     base_url: &str,
@@ -1668,14 +1755,83 @@ fn eval_field_xpath_with_ctx(
         return Some(res);
     }
 
+    // legado 字段级链式: `&&`(拼接) / `||`(首个非空) / `%%`(按索引交织)
+    let combo = split_top_level(rule, &["&&", "||", "%%"]);
+    if let Some(operator) = combo.delimiter.as_deref() {
+        let parts = combo.parts;
+        match operator {
+            "&&" => {
+                let mut joined = String::new();
+                let mut any = false;
+                for part in parts {
+                    if let Some(v) = eval_field_xpath_with_ctx(&part, node, base_url, ctx) {
+                        if !v.is_empty() {
+                            joined.push_str(&v);
+                            any = true;
+                        }
+                    }
+                }
+                return if any { Some(joined) } else { None };
+            }
+            "||" => {
+                for part in parts {
+                    if let Some(v) = eval_field_xpath_with_ctx(&part, node, base_url, ctx) {
+                        if !v.is_empty() {
+                            return Some(v);
+                        }
+                    }
+                }
+                return None;
+            }
+            "%%" => {
+                let mut zipped = String::new();
+                let mut any = false;
+                for part in parts {
+                    if let Some(v) = eval_field_xpath_with_ctx(&part, node, base_url, ctx) {
+                        if !v.is_empty() {
+                            zipped.push_str(&v);
+                            any = true;
+                        }
+                    }
+                }
+                return if any { Some(zipped) } else { None };
+            }
+            _ => {}
+        }
+    }
+
+    eval_field_xpath_single_with_ctx(rule, node, base_url, ctx)
+}
+
+fn eval_field_xpath_single_with_ctx(
+    rule: &str,
+    node: sxd_xpath::nodeset::Node<'_>,
+    base_url: &str,
+    ctx: &mut HashMap<String, String>,
+) -> Option<String> {
+    if rule.trim().is_empty() {
+        return None;
+    }
+
     let interpolated_rule = interpolate_common_templates(rule, &node.string_value(), base_url, ctx);
     let had_templates = interpolated_rule != rule;
     let (pure_rule, regex_part) = split_legado_regex(&interpolated_rule);
     let (pure, js) = extract_js(&pure_rule);
-    let mut text = if pure.trim().is_empty() {
+    // 拆分 legado 提取器后缀(::text / ::html / ::outerHtml / ::ownText 等)。
+    // xpath_eval_strings 只做纯 XPath 求值; 有提取器时改用 node_extract 精确取值,
+    // 否则 ::html 会退化为 string_value()(纯文本), 与 Legado 语义不符。
+    let (xpath_part, extractor) = html::split_xpath_axis(pure);
+    let xpath_str = xpath_part.trim();
+    let mut text = if xpath_str.is_empty() {
         node.string_value()
+    } else if let Some(ext) = extractor {
+        // 有提取器: 先用 XPath 选出节点, 再按提取器取值
+        xpath_select_nodes(node, xpath_str)
+            .into_iter()
+            .find_map(|n| html::node_extract(&n, ext))
+            .unwrap_or_default()
     } else {
-        xpath_eval_strings(node, pure)
+        xpath_eval_strings(node, xpath_str)
             .into_iter()
             .next()
             .unwrap_or_default()
@@ -1716,7 +1872,8 @@ fn xpath_select_nodes<'a>(
     node: sxd_xpath::nodeset::Node<'a>,
     xpath: &str,
 ) -> Vec<sxd_xpath::nodeset::Node<'a>> {
-    let xpath = xpath.trim();
+    let (path, _extractor) = html::split_xpath_axis(xpath);
+    let xpath = path.trim();
     if xpath.is_empty() {
         return vec![];
     }
@@ -1731,7 +1888,8 @@ fn xpath_select_nodes<'a>(
 }
 
 fn xpath_eval_strings(node: sxd_xpath::nodeset::Node<'_>, xpath: &str) -> Vec<String> {
-    let xpath = xpath.trim();
+    let (path, _extractor) = html::split_xpath_axis(xpath);
+    let xpath = path.trim();
     if xpath.is_empty() {
         return vec![];
     }
@@ -1762,6 +1920,60 @@ fn eval_field_json_with_ctx(
         return Some(res);
     }
 
+    // legado 字段级链式: `&&`(拼接) / `||`(首个非空) / `%%`(按索引交织)
+    let combo = split_top_level(rule, &["&&", "||", "%%"]);
+    if let Some(operator) = combo.delimiter.as_deref() {
+        let parts = combo.parts;
+        match operator {
+            "&&" => {
+                let mut joined = String::new();
+                let mut any = false;
+                for part in parts {
+                    if let Some(v) = eval_field_json_with_ctx(&part, v, base_url, ctx) {
+                        if !v.is_empty() {
+                            joined.push_str(&v);
+                            any = true;
+                        }
+                    }
+                }
+                return if any { Some(joined) } else { None };
+            }
+            "||" => {
+                for part in parts {
+                    if let Some(v) = eval_field_json_with_ctx(&part, v, base_url, ctx) {
+                        if !v.is_empty() {
+                            return Some(v);
+                        }
+                    }
+                }
+                return None;
+            }
+            "%%" => {
+                let mut zipped = String::new();
+                let mut any = false;
+                for part in parts {
+                    if let Some(v) = eval_field_json_with_ctx(&part, v, base_url, ctx) {
+                        if !v.is_empty() {
+                            zipped.push_str(&v);
+                            any = true;
+                        }
+                    }
+                }
+                return if any { Some(zipped) } else { None };
+            }
+            _ => {}
+        }
+    }
+
+    eval_field_json_single_with_ctx(rule, v, base_url, ctx)
+}
+
+fn eval_field_json_single_with_ctx(
+    rule: &str,
+    v: &Value,
+    base_url: &str,
+    ctx: &mut HashMap<String, String>,
+) -> Option<String> {
     let interpolated_rule = interpolate_json_templates(rule, v, base_url, ctx);
     let (pure_rule, regex_part) = split_legado_regex(&interpolated_rule);
     let (pure, js) = extract_js(&pure_rule);
@@ -1782,7 +1994,16 @@ fn eval_field_json_with_ctx(
     };
 
     if let Some(script) = js {
-        if let Ok(res) = eval_js(script, &text, base_url) {
+        // legado 兼容: `@js:` 字段规则(无纯文本部分)以当前 item 的"原始串"作为
+        // `result`/`input`。item 可能是 JSON 对象(→ `JSON.parse(result).xxx`),
+        // 也可能是管道串数组(→ `result.split('|')[n]`, 此时按 `|` 重拼)。
+        // 否则传入已提取的纯文本(如有), 保持既有行为。
+        let js_input = if pure.is_empty() {
+            item_raw_string(v)
+        } else {
+            text.clone()
+        };
+        if let Ok(res) = eval_js(script, &js_input, base_url) {
             text = res;
         }
     }
@@ -2064,12 +2285,79 @@ fn apply_toc_format_js(chapters: &mut [BookChapter], format_js: Option<&str>, ba
     }
 }
 
+/// 返回 item 的"原始串"形式, 供 `@js:` 字段规则作为 `result`/`input`:
+/// - 管道串数组(→ 重拼回 `|` 分隔串, 支持 `result.split('|')`)
+/// - JSON 对象/数组(→ JSON 字符串, 支持 `JSON.parse(result)`)
+/// - 纯字符串(→ 原样, 不带引号)
+fn item_raw_string(v: &Value) -> String {
+    if let Some(arr) = v.as_array() {
+        if arr.iter().all(|e| e.is_string()) {
+            let joined = arr
+                .iter()
+                .filter_map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join("|");
+            if !joined.is_empty() {
+                return joined;
+            }
+        }
+    }
+    match v {
+        Value::String(s) => s.clone(),
+        _ => v.to_string(),
+    }
+}
+
 fn parse_js_output_items(output: &str) -> Option<Vec<Value>> {
-    let value = serde_json::from_str::<Value>(output.trim()).ok()?;
-    match value {
-        Value::Array(items) => Some(items),
-        Value::Object(_) => Some(vec![value]),
-        _ => None,
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // JSON 数组 / 对象 → 现有行为
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return match value {
+            Value::Array(items) => Some(items),
+            Value::Object(_) => Some(vec![value]),
+            _ => None,
+        };
+    }
+    // legado 常见: 每行一个独立 JSON 对象(如 `JSON.stringify(r)` 逐行 join)。
+    // 整体不是合法 JSON, 但逐行解析成功 → 每行作为一条 item。
+    let mut json_items: Vec<Value> = Vec::new();
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if v.is_object() || v.is_array() {
+                json_items.push(v);
+            }
+        }
+    }
+    if !json_items.is_empty() {
+        return Some(json_items);
+    }
+    // legado 管道串兼容: 每行 `名称|作者|链接|封面|简介`(行内至少一个 `|`)
+    // 解析成 Vec<Value>, 每项是 JSON 数组, 字段规则用索引取值(0/1/2...)
+    let mut items = Vec::new();
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts = line
+            .split('|')
+            .map(|s| Value::String(s.trim().to_string()))
+            .collect::<Vec<_>>();
+        if parts.len() >= 2 {
+            items.push(Value::Array(parts));
+        }
+    }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
     }
 }
 
@@ -2225,7 +2513,7 @@ fn capture_rule_value(rule: Option<&str>, captures: &regex::Captures<'_>) -> Opt
     if rule.is_empty() {
         return None;
     }
-    let placeholder = regex::Regex::new(r"\$(\d{1,2})").unwrap();
+    let placeholder = placeholder_re();
     let replaced = placeholder.replace_all(rule, |cap: &regex::Captures| {
         let index = cap
             .get(1)
@@ -2401,6 +2689,96 @@ mod tests {
     }
 
     #[test]
+    fn test_search_books_js_pipe_kv() {
+        // legado 书源常见写法: bookList 返回 `名称|作者|链接` 管道串(逐行),
+        // 字段规则用索引取(0/1/2)。此前引擎只认 JSON 数组, 此测试验证兼容。
+        let engine = RuleEngine::new().unwrap();
+        let source = BookSource {
+            book_source_name: "JS Pipe".to_string(),
+            book_source_url: "https://source.example".to_string(),
+            rule_search: Some(SearchRule {
+                book_list: Some(
+                    "js:['Alpha|Tester|/alpha','Beta|Writer|/beta','Gamma|Author|/gamma'].join('\\n')"
+                        .to_string(),
+                ),
+                name: Some("0".to_string()),
+                author: Some("1".to_string()),
+                book_url: Some("2".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let results = engine.search_books(&source, "<html></html>", "https://books.example");
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].name, "Alpha");
+        assert_eq!(results[0].author, "Tester");
+        assert_eq!(results[0].book_url, "https://books.example/alpha");
+        assert_eq!(results[2].name, "Gamma");
+    }
+
+    #[test]
+    fn test_search_books_js_java_get_content() {
+        // legado 书源用 java.getContent() 拿页面内容, 本引擎应返回 input
+        let engine = RuleEngine::new().unwrap();
+        let source = BookSource {
+            book_source_name: "JS GetContent".to_string(),
+            book_source_url: "https://source.example".to_string(),
+            rule_search: Some(SearchRule {
+                book_list: Some(
+                    "js:JSON.stringify([{name: 'Alpha', author: 'Tester', bookUrl: '/a', intro: java.getContent().slice(0, 10)}])"
+                        .to_string(),
+                ),
+                name: Some("name".to_string()),
+                author: Some("author".to_string()),
+                book_url: Some("bookUrl".to_string()),
+                intro: Some("intro".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let results = engine.search_books(&source, "0123456789", "https://books.example");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Alpha");
+        // java.getContent() 返回 input(即页面 body "0123456789"), 前 10 字符
+        assert_eq!(results[0].intro.as_deref(), Some("0123456789"));
+    }
+
+    #[test]
+    fn test_search_books_js_newline_json_with_js_field_rules() {
+        // 起点修复版_arr 的写法: bookList 逐行输出独立 JSON 对象,
+        // 字段规则用 `@js:result=JSON.parse(result).xxx`(legado 风格)。
+        // 此前引擎既不解析"逐行 JSON", 也不把 item 传给 @js 字段规则 → 搜索全空。
+        let engine = RuleEngine::new().unwrap();
+        let source = BookSource {
+            book_source_name: "JS LineJSON".to_string(),
+            book_source_url: "https://source.example".to_string(),
+            rule_search: Some(SearchRule {
+                book_list: Some(
+                    "js:['{\"bName\":\"Alpha\",\"bAuth\":\"Tester\",\"bid\":\"1001\",\"imgUrl\":\"/c1.jpg\"}','{\"bName\":\"Beta\",\"bAuth\":\"Writer\",\"bid\":\"1002\",\"imgUrl\":\"/c2.jpg\"}'].join('\\n')"
+                        .to_string(),
+                ),
+                name: Some("@js:result=JSON.parse(result).bName".to_string()),
+                author: Some("@js:result=JSON.parse(result).bAuth".to_string()),
+                book_url: Some("@js:result=JSON.parse(result).bid;result='https://m.example.com/book/'+result+'/'".to_string()),
+                cover_url: Some("@js:var o=JSON.parse(result);result=o.imgUrl||o.cover||''".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let results = engine.search_books(&source, "<html></html>", "https://source.example");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].name, "Alpha");
+        assert_eq!(results[0].author, "Tester");
+        assert_eq!(results[0].book_url, "https://m.example.com/book/1001/");
+        assert_eq!(results[0].cover_url.as_deref(), Some("https://source.example/c1.jpg"));
+        assert_eq!(results[1].name, "Beta");
+        assert_eq!(results[1].book_url, "https://m.example.com/book/1002/");
+    }
+
+    #[test]
     fn test_chapter_list_js_and_format_js() {
         let engine = RuleEngine::new().unwrap();
         let source = BookSource {
@@ -2419,7 +2797,7 @@ mod tests {
         };
 
         let (chapters, next_urls) =
-            engine.chapter_list(&source, "<html></html>", "https://books.example");
+            engine.chapter_list(&source, "<html></html>", "https://books.example", None);
         assert!(next_urls.is_empty());
         assert_eq!(chapters.len(), 2);
         assert_eq!(chapters[0].title, "1.One");
@@ -2427,6 +2805,117 @@ mod tests {
         assert!(chapters[0].is_vip);
         assert_eq!(chapters[1].title, "2.Two");
         assert!(chapters[1].is_pay);
+    }
+
+    #[test]
+    fn test_chapter_list_js_pipe_with_js_field_rules() {
+        // 起点修复版_arr 的目录写法: chapterList 逐行输出 `id|V|name|tag` 管道串,
+        // 字段规则用 `@js:result=result.split('|')[n]`。验证管道串经 @js 字段规则可解析。
+        let engine = RuleEngine::new().unwrap();
+        let source = BookSource {
+            book_source_name: "JS TOC Pipe".to_string(),
+            book_source_url: "https://m.example.com/book/1001/".to_string(),
+            rule_toc: Some(TocRule {
+                chapter_list: Some(
+                    "js:['101|V|第一章 测试|2026-08-01','102|F|第二章 继续|2026-08-02'].join('\\n')"
+                        .to_string(),
+                ),
+                chapter_name: Some("@js:result=result.split('|')[2]".to_string()),
+                chapter_url: Some("@js:var bid=source.getKey().match(/\\d+/)[0];result='https://m.example.com/chapter/'+bid+'/'+result.split('|')[0]+'/'".to_string()),
+                is_vip: Some("@js:result=result.split('|')[1].replace(/V/,'true').replace(/F/,'false')".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // source_key 传入书籍 bookUrl, 使 source.getKey().match(/\d+/) 能取到 book id
+        let (chapters, _) = engine.chapter_list(
+            &source,
+            "<html></html>",
+            "https://m.example.com/book/1001/",
+            Some("https://m.example.com/book/1001/"),
+        );
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].title, "第一章 测试");
+        assert!(chapters[0].is_vip);
+        assert_eq!(chapters[0].url, "https://m.example.com/chapter/1001/101/");
+        assert_eq!(chapters[1].title, "第二章 继续");
+        assert!(!chapters[1].is_vip);
+    }
+
+    #[test]
+    fn test_java_crypto_and_encoding_api() {
+        // legado java.* 加密/编码 API 兼容性: digest/HMac/hex/htmlFormat/toNumChapter/timeFormatUTC
+        let engine = RuleEngine::new().unwrap();
+        let source = BookSource {
+            book_source_name: "JS Crypto".to_string(),
+            book_source_url: "https://source.example".to_string(),
+            rule_search: Some(SearchRule {
+                book_list: Some(
+                    "js:JSON.stringify([{name:java.md5Encode16('abc'),author:java.digestHex('abc','MD5'),bookUrl:'/a',intro:java.htmlFormat('a&amp;b'),kind:java.toNumChapter('第12章'),lastChapter:java.hexEncodeToString('hi'),updateTime:java.HMacHex('abc','SHA-256','key')}])"
+                        .to_string(),
+                ),
+                name: Some("name".to_string()),
+                author: Some("author".to_string()),
+                book_url: Some("bookUrl".to_string()),
+                intro: Some("intro".to_string()),
+                kind: Some("kind".to_string()),
+                last_chapter: Some("lastChapter".to_string()),
+                update_time: Some("updateTime".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let results = engine.search_books(&source, "<html></html>", "https://books.example");
+        assert_eq!(results.len(), 1);
+        // md5('abc') = 900150983cd24fb0d6963f7d28e17f72, 取 [8..24] 中间16位
+        assert_eq!(results[0].name, "3cd24fb0d6963f7d");
+        // md5 hex 全量
+        assert_eq!(results[0].author, "900150983cd24fb0d6963f7d28e17f72");
+        // htmlFormat 解码实体
+        assert_eq!(results[0].intro.as_deref(), Some("a&b"));
+        // toNumChapter("第12章") → "12"
+        assert_eq!(results[0].kind.as_deref(), Some("12"));
+        // hexEncodeToString("hi") → "6869"
+        assert_eq!(results[0].last_chapter.as_deref(), Some("6869"));
+        // HMAC-SHA256("abc", key="key") 非空且为 64 位 hex
+        let hmac = results[0].update_time.as_deref().unwrap_or("");
+        assert_eq!(hmac.len(), 64);
+        assert!(hmac.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_field_level_chain_and_or() {
+        // legado 字段级链式: `&&` 拼接、`||` 取首个非空
+        let engine = RuleEngine::new().unwrap();
+        let source = BookSource {
+            book_source_name: "JS Chain".to_string(),
+            book_source_url: "https://source.example".to_string(),
+            rule_search: Some(SearchRule {
+                book_list: Some(
+                    "js:JSON.stringify([{name:'A',author:'X',bookUrl:'/a',b:'B1',c:'C1',x:'',y:'Y1'}])"
+                        .to_string(),
+                ),
+                name: Some("name&&author".to_string()),
+                // b 字段可能有值, 用 `c||b` 验证取第一个非空(c 非空)
+                intro: Some("c||b".to_string()),
+                // `x||y` 中 x 为空 xy下取 y
+                kind: Some("x||y".to_string()),
+                book_url: Some("bookUrl".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let results = engine.search_books(&source, "<html></html>", "https://books.example");
+        assert_eq!(results.len(), 1);
+        // name&&author → "AX"
+        assert_eq!(results[0].name, "AX");
+        // c||b → c 非空取 "C1"
+        assert_eq!(results[0].intro.as_deref(), Some("C1"));
+        // x||y → x 为空取 "Y1"
+        assert_eq!(results[0].kind.as_deref(), Some("Y1"));
     }
 
     #[test]
@@ -2450,7 +2939,7 @@ mod tests {
             </div>
         "#;
 
-        let (chapters, next_urls) = engine.chapter_list(&source, body, "https://books.example");
+        let (chapters, next_urls) = engine.chapter_list(&source, body, "https://books.example", None);
         assert!(next_urls.is_empty());
         assert_eq!(chapters.len(), 2);
         assert_eq!(chapters[0].url, "https://books.example/1");

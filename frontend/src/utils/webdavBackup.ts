@@ -371,6 +371,8 @@ function isLegadoLocalBook(value: JsonRecord) {
 function isReaderLocalBook(book: Book) {
   return book.origin === 'local-txt'
     || book.origin === 'local-epub'
+    || book.origin === 'local-pdf'
     || book.bookUrl.startsWith('local-txt:')
     || book.bookUrl.startsWith('local-epub:')
+    || book.bookUrl.startsWith('local-pdf:')
 }

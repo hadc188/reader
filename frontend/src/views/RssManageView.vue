@@ -65,6 +65,7 @@
           @click="editSource(source)"
           @keydown.enter="editSource(source)"
           @keydown.space.prevent="editSource(source)"
+          @contextmenu.prevent="handleSourceContextMenu($event, source)"
         >
           <label class="row-check" @click.stop>
             <input
@@ -236,6 +237,7 @@ import { useRouter } from 'vue-router'
 import { readRemoteRssSourceFile, readRssSourceFile, saveRssSource } from '../api/rss'
 import { useAppStore } from '../stores/app'
 import { useRssStore } from '../stores/rss'
+import { showContextMenu } from '../composables/useContextMenu'
 import type { RssSource } from '../types'
 import { getVisibleSelection } from '../utils/sourceSelection'
 
@@ -418,6 +420,20 @@ async function handleDelete(source: RssSource) {
     createSource()
   }
   appStore.showToast('RSS 源已删除', 'success')
+}
+
+function handleSourceContextMenu(event: MouseEvent, source: RssSource) {
+  const enabled = source.enabled !== false
+  const menuItems = [
+    { label: '编辑', action: () => editSource(source) },
+    {
+      label: enabled ? '停用' : '启用',
+      action: () => toggleSource(source),
+    },
+    { divider: true },
+    { label: '删除', danger: true, action: () => handleDelete(source) },
+  ]
+  showContextMenu(event, menuItems, source)
 }
 
 async function handleBulkDelete() {

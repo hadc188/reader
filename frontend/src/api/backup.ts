@@ -42,7 +42,7 @@ export interface CustomFontsExport {
 }
 
 export function exportLocalBooks() {
-  return invokeEnvelope<LocalBooksExport>('export_local_books')
+  return invokeEnvelope<LocalBooksExport>('export_local_books', {})
 }
 
 export function importLocalBooks(books: LocalBookExportItem[]) {
@@ -50,7 +50,7 @@ export function importLocalBooks(books: LocalBookExportItem[]) {
 }
 
 export function exportCustomFonts() {
-  return invokeEnvelope<CustomFontsExport>('export_custom_fonts')
+  return invokeEnvelope<CustomFontsExport>('export_custom_fonts', {})
 }
 
 export function importCustomFonts(fonts: CustomFontExportItem[]) {
@@ -58,7 +58,7 @@ export function importCustomFonts(fonts: CustomFontExportItem[]) {
 }
 
 export function exportReadingStats() {
-  return invokeEnvelope<ReadingStatsExport>('export_reading_stats')
+  return invokeEnvelope<ReadingStatsExport>('export_reading_stats', {})
 }
 
 export function importReadingStats(stats: ReadingStatsExport) {

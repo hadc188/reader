@@ -1450,6 +1450,26 @@ impl BookService {
         Ok(count)
     }
 
+    pub async fn cached_chapter_urls(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        chapter_urls: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let book_key = md5_hex(book_url);
+        let cached_files = self.cache.list_chapter_files(user_ns, &book_key).await?;
+        if cached_files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cached_set: std::collections::HashSet<&str> =
+            cached_files.iter().map(|s| s.as_str()).collect();
+        Ok(chapter_urls
+            .iter()
+            .filter(|url| cached_set.contains(md5_hex(url).as_str()))
+            .cloned()
+            .collect())
+    }
+
     pub async fn cache_chapter(
         &self,
         user_ns: &str,

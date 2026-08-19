@@ -18,8 +18,6 @@ import {
 } from '../api/bookmark'
 import { getReplaceRules } from '../api/replaceRule'
 import type { Book, BookChapter, Bookmark, ReplaceRule } from '../types'
-import { getBrowserCachedChapter, setBrowserCachedChapter } from '../utils/browserCache'
-import { isLocalBook } from '../utils/localBook'
 import { saveRecentReadBook } from '../utils/recentBooks'
 import {
   DEFAULT_READER_BACKGROUND_OPACITY,
@@ -59,7 +57,6 @@ export interface ReadConfig {
   firstLineIndent: boolean
   fontColor: string
   pageWidth: number
-  pageMode: 'auto' | 'mobile'
   readMethod: '上下滑动' | '左右翻页' | '上下滚动' | '上下滚动2'
   animateDuration: number
   autoPageMode: 'pixel' | 'paragraph'
@@ -68,7 +65,6 @@ export interface ReadConfig {
   clickAction: 'next' | 'auto' | 'none'
   selectAction: 'popup' | 'ignore'
   chineseMode: 'simplified' | 'traditional'
-  specialMode: 'normal' | 'simple'
   enablePreload: boolean
   backgroundImage: string
   backgroundOpacity: number
@@ -84,7 +80,6 @@ const defaultConfig: ReadConfig = {
   firstLineIndent: true,
   fontColor: '',
   pageWidth: 800,
-  pageMode: 'auto',
   readMethod: '上下滑动',
   animateDuration: 300,
   autoPageMode: 'pixel',
@@ -93,7 +88,6 @@ const defaultConfig: ReadConfig = {
   clickAction: 'auto',
   selectAction: 'ignore',
   chineseMode: 'simplified',
-  specialMode: 'normal',
   enablePreload: false,
   backgroundImage: '',
   backgroundOpacity: DEFAULT_READER_BACKGROUND_OPACITY,
@@ -104,15 +98,16 @@ function loadConfig(): ReadConfig {
   try {
     const saved = localStorage.getItem('readConfig')
     if (saved) {
-      const parsed = JSON.parse(saved) as Partial<ReadConfig>
+      const parsed = JSON.parse(saved) as Partial<ReadConfig> & { specialMode?: unknown }
+      const { specialMode: _legacySpecialMode, ...savedConfig } = parsed
       return {
         ...defaultConfig,
-        ...parsed,
+        ...savedConfig,
         backgroundImage: localStorage.getItem(READER_BACKGROUND_IMAGE_KEY)
-          || (typeof parsed.backgroundImage === 'string' ? parsed.backgroundImage : ''),
-        backgroundOpacity: normalizeReaderBackgroundOpacity(parsed.backgroundOpacity),
-        applyBackgroundToReader: typeof parsed.applyBackgroundToReader === 'boolean'
-          ? parsed.applyBackgroundToReader
+          || (typeof savedConfig.backgroundImage === 'string' ? savedConfig.backgroundImage : ''),
+        backgroundOpacity: normalizeReaderBackgroundOpacity(savedConfig.backgroundOpacity),
+        applyBackgroundToReader: typeof savedConfig.applyBackgroundToReader === 'boolean'
+          ? savedConfig.applyBackgroundToReader
           : true,
       }
     }
@@ -241,6 +236,8 @@ export const useReaderStore = defineStore('reader', () => {
   const bookmarks = ref<Bookmark[]>([])
   const replaceRules = ref<ReplaceRule[]>([])
   const preloadedContent = ref<Map<number, string>>(new Map()) // index -> content
+  const preloadingContent = new Map<number, Promise<string | null>>()
+  let chapterPreloadGeneration = 0
   const isAutoScrolling = ref(false)
   const chapterScrollProgress = ref(0)
   const readChapterKeys = ref<Set<string>>(new Set())
@@ -339,6 +336,8 @@ export const useReaderStore = defineStore('reader', () => {
     config[key] = value
     if (key === 'enablePreload' && !value) {
       preloadedContent.value.clear()
+      preloadingContent.clear()
+      chapterPreloadGeneration += 1
     }
     saveConfig()
   }
@@ -571,6 +570,8 @@ export const useReaderStore = defineStore('reader', () => {
     try {
       const chapterContent = await fetchChapterContent(nextIndex)
       if (chapterContent == null) return false
+      cachePreloadedContent(nextIndex, chapterContent)
+      if (config.enablePreload) void preloadAroundChapter(nextIndex)
       const persistedProgressTime = session.book.durChapterTime || 0
       setActiveChapterState(nextIndex, chapterContent, session.chapterScrollProgress || 0)
       if (book.value) {
@@ -1495,6 +1496,9 @@ export const useReaderStore = defineStore('reader', () => {
   /* ─── Book / chapter ops ─── */
   async function loadBook(b: Book) {
     loading.value = true
+    preloadedContent.value.clear()
+    preloadingContent.clear()
+    chapterPreloadGeneration += 1
     book.value = b
     appStore.setReadingSessionBook(b.bookUrl, b.name)
     chapters.value = []
@@ -1502,7 +1506,6 @@ export const useReaderStore = defineStore('reader', () => {
     appStore.markBookOpened(b.bookUrl)
     currentIndex.value = b.durChapterIndex || 0
     chapterScrollProgress.value = decodeServerProgress(b.durChapterPos)
-    preloadedContent.value.clear()
     loadReadChapterHistory(b)
     progressDirty.value = false
     lastServerProgressKey.value = ''
@@ -1520,7 +1523,8 @@ export const useReaderStore = defineStore('reader', () => {
       const contentLoad = fetchChapterContent(currentIndex.value).catch(() => null)
       const initialChapterContent = await contentLoad
       if (initialChapterContent) {
-        preloadedContent.value.set(currentIndex.value, initialChapterContent)
+        cachePreloadedContent(currentIndex.value, initialChapterContent)
+        if (config.enablePreload) void preloadAroundChapter(currentIndex.value)
       }
       // 网盘进度同步放后台, 不拖慢正文首屏
       void restoreCurrentBookProgressFromLegado(initialChapterContent || undefined)
@@ -1588,6 +1592,15 @@ export const useReaderStore = defineStore('reader', () => {
     lastServerProgressKey.value = nextKey
   }
 
+  function cachePreloadedContent(index: number, chapterContent: string) {
+    preloadedContent.value.set(index, chapterContent)
+    while (preloadedContent.value.size > 3) {
+      const oldestKey = Array.from(preloadedContent.value.keys()).find((key) => key !== index)
+      if (oldestKey === undefined) break
+      preloadedContent.value.delete(oldestKey)
+    }
+  }
+
   async function fetchChapterContent(index: number, forceRefresh = false) {
     if (!book.value || !chapters.value[index]) return null
 
@@ -1595,58 +1608,37 @@ export const useReaderStore = defineStore('reader', () => {
       return preloadedContent.value.get(index) || null
     }
 
+    if (!forceRefresh) {
+      const pending = preloadingContent.get(index)
+      if (pending) return pending
+    }
+
     const chapter = chapters.value[index]
 
-    const isLocal = isLocalBook(book.value)
-    const useBrowserCache = !isLocal
-    const browserCached = useBrowserCache
-      ? await getBrowserCachedChapter(book.value.bookUrl, chapter.url).catch(() => null)
-      : null
-
-    if (!forceRefresh && browserCached) {
-      return browserCached
-    }
-
-    if (!appStore.isOnline && !isLocal) {
-      if (browserCached) {
-        return browserCached
-      }
-      throw new Error('当前处于离线状态，且该章节未缓存到浏览器')
-    }
-
-    let chapterContent = ''
     try {
-      chapterContent = await getBookContent({
+      return await getBookContent({
+        bookUrl: book.value.bookUrl,
         chapterUrl: chapter.url,
         bookSourceUrl: book.value.origin,
         refresh: forceRefresh ? 1 : 0,
       })
     } catch (error) {
-      if (browserCached) {
-        appStore.showToast('网络请求失败，已切换到本地缓存章节', 'warning')
-        return browserCached
+      if (!appStore.isOnline) {
+        throw new Error('当前处于离线状态，未缓存章节无法打开')
       }
       throw error
     }
-
-    if (useBrowserCache) {
-      await setBrowserCachedChapter({
-        bookUrl: book.value.bookUrl,
-        chapterUrl: chapter.url,
-        chapterTitle: chapter.title,
-        content: chapterContent,
-      }).catch(() => undefined)
-    }
-
-    return chapterContent
   }
 
   async function loadChapter(index: number, forceRefresh = false) {
     if (!book.value || !chapters.value[index]) return
 
-    loading.value = true
+    const cachedContent = !forceRefresh ? preloadedContent.value.get(index) : undefined
+    loading.value = cachedContent === undefined
     try {
-      const chapterContent = await fetchChapterContent(index, forceRefresh)
+      const chapterContent = cachedContent !== undefined
+        ? cachedContent
+        : await fetchChapterContent(index, forceRefresh)
       if (chapterContent == null) return
 
       const previousSavedIndex = book.value.durChapterIndex ?? 0
@@ -1659,19 +1651,18 @@ export const useReaderStore = defineStore('reader', () => {
       const initialProgress = cloudProgress ?? (isOpeningSavedChapter ? previousSavedProgress : 0)
       if (cloudProgress != null) pendingLegadoProgress.value = null
 
+      cachePreloadedContent(index, chapterContent)
       setActiveChapterState(index, chapterContent, initialProgress)
       markChapterAsRead(index)
       appStore.markChapterRead(book.value.bookUrl, index, chapters.value.length)
+      loading.value = false
 
       if (!isOpeningSavedChapter) {
-        await persistProgress(index, cloudProgress ?? 0)
+        void persistProgress(index, cloudProgress ?? 0)
       }
 
       if (config.enablePreload) {
-        // 预载不与正文首屏串行: 内容到屏幕后再后台预载, 失败静默。
-        window.setTimeout(() => {
-          void preloadAroundChapter(index)
-        }, forceRefresh ? 1500 : 1000)
+        void preloadAroundChapter(index)
       }
     } finally {
       loading.value = false
@@ -1687,19 +1678,29 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   async function preloadNextChapter(index: number) {
-    if (!book.value || !config.enablePreload || index >= chapters.value.length || preloadedContent.value.has(index)) return
+    if (!book.value || !config.enablePreload || index < 0 || index >= chapters.value.length || preloadedContent.value.has(index)) return
 
-    // Keep max 3 preloaded chapters
-    if (preloadedContent.value.size > 3) {
-      const firstKey = preloadedContent.value.keys().next().value
-      if (firstKey !== undefined) preloadedContent.value.delete(firstKey)
-    }
+    const pending = preloadingContent.get(index)
+    if (pending) return pending
 
-    try {
-      const res = await fetchChapterContent(index)
-      if (!res) return
-      preloadedContent.value.set(index, res)
-    } catch { /* ignore */ }
+    const generation = chapterPreloadGeneration
+    const bookUrl = book.value.bookUrl
+    let request: Promise<string | null>
+    request = fetchChapterContent(index)
+      .then((res) => {
+        if (res && generation === chapterPreloadGeneration && config.enablePreload && book.value?.bookUrl === bookUrl) {
+          cachePreloadedContent(index, res)
+        }
+        return res
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (preloadingContent.get(index) === request) {
+          preloadingContent.delete(index)
+        }
+      })
+    preloadingContent.set(index, request)
+    return request
   }
 
   function normalizeChapterTitle(title?: string) {
@@ -1786,6 +1787,8 @@ export const useReaderStore = defineStore('reader', () => {
     chaptersLoading.value = true
     try {
       preloadedContent.value.clear()
+      preloadingContent.clear()
+      chapterPreloadGeneration += 1
       chapters.value = await getChapterList({
         bookUrl: book.value.bookUrl,
         bookSourceUrl: book.value.origin,
@@ -1873,6 +1876,9 @@ export const useReaderStore = defineStore('reader', () => {
     content.value = ''
     currentIndex.value = 0
     chapterScrollProgress.value = 0
+    preloadedContent.value.clear()
+    preloadingContent.clear()
+    chapterPreloadGeneration += 1
     readChapterKeys.value = new Set()
     stopAutoReading()
   }

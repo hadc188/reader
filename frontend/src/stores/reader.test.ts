@@ -2,9 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAppStore } from './app'
 import { nightThemeIndex, useReaderStore } from './reader'
-import { getBookContent } from '../api/bookshelf'
+import { getBookContent, saveBookProgress } from '../api/bookshelf'
 import { syncLegadoBookProgress } from '../api/webdav'
-import { getBrowserCachedChapter, setBrowserCachedChapter } from '../utils/browserCache'
 import { requestOpenAISpeechAudio } from '../utils/openaiSpeech'
 
 vi.mock('../api/bookshelf', () => ({
@@ -27,11 +26,6 @@ vi.mock('../api/replaceRule', () => ({
 
 vi.mock('../api/webdav', () => ({
   syncLegadoBookProgress: vi.fn(),
-}))
-
-vi.mock('../utils/browserCache', () => ({
-  getBrowserCachedChapter: vi.fn(),
-  setBrowserCachedChapter: vi.fn(),
 }))
 
 vi.mock('../utils/recentBooks', () => ({
@@ -60,16 +54,13 @@ describe('reader local txt chapters', () => {
       clear: vi.fn(() => storage.clear()),
     })
     vi.mocked(getBookContent).mockReset()
-    vi.mocked(getBrowserCachedChapter).mockReset()
-    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
-    vi.mocked(setBrowserCachedChapter).mockReset()
-    vi.mocked(setBrowserCachedChapter).mockResolvedValue(undefined)
+    vi.mocked(saveBookProgress).mockReset()
+    vi.mocked(saveBookProgress).mockResolvedValue('ok')
     vi.mocked(syncLegadoBookProgress).mockReset()
   })
 
-  it('fetches uploaded local txt content from backend even when browser reports offline', async () => {
+  it('fetches uploaded local txt content from backend when offline', async () => {
     vi.mocked(getBookContent).mockResolvedValue('本地正文')
-    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
     const appStore = useAppStore()
     const readerStore = useReaderStore()
     appStore.setOnlineStatus(false)
@@ -85,12 +76,75 @@ describe('reader local txt chapters', () => {
 
     await expect(readerStore.fetchChapterContent(0)).resolves.toBe('本地正文')
 
-    expect(getBrowserCachedChapter).not.toHaveBeenCalled()
     expect(getBookContent).toHaveBeenCalledWith({
+      bookUrl: 'local-txt:abc123',
       chapterUrl: 'local-txt:abc123#0',
       bookSourceUrl: 'local-txt',
       refresh: 0,
     })
+  })
+
+  it('preloads nearby chapters and reuses the completed content when switching', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    readerStore.updateConfig('enablePreload', true)
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'chapter-0', index: 0 },
+      { title: '第二章', url: 'chapter-1', index: 1 },
+      { title: '第三章', url: 'chapter-2', index: 2 },
+    ]
+    vi.mocked(getBookContent).mockImplementation(async ({ chapterUrl }) => `${chapterUrl}-正文`)
+
+    await readerStore.preloadAroundChapter(0)
+    await readerStore.loadChapter(1)
+
+    expect(readerStore.currentIndex).toBe(1)
+    expect(readerStore.content).toBe('chapter-1-正文')
+    const chapterCalls = vi.mocked(getBookContent).mock.calls
+    expect(chapterCalls.filter(([params]) => params.chapterUrl === 'chapter-1')).toHaveLength(1)
+    expect(getBookContent).toHaveBeenCalledWith({
+      bookUrl: 'https://example.test/book',
+      chapterUrl: 'chapter-1',
+      bookSourceUrl: 'test-source',
+      refresh: 0,
+    })
+  })
+
+  it('does not wait for progress saving after cached chapter content is displayed', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    readerStore.updateConfig('enablePreload', true)
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'chapter-0', index: 0 },
+      { title: '第二章', url: 'chapter-1', index: 1 },
+    ]
+    vi.mocked(getBookContent).mockResolvedValue('缓存章节正文')
+    await readerStore.preloadNextChapter(1)
+
+    let resolveProgress: ((value: string) => void) | undefined
+    vi.mocked(saveBookProgress).mockReturnValue(new Promise((resolve) => {
+      resolveProgress = resolve
+    }))
+
+    await readerStore.loadChapter(1)
+
+    expect(readerStore.loading).toBe(false)
+    expect(readerStore.content).toBe('缓存章节正文')
+    resolveProgress?.('ok')
   })
 
   it('keeps the app appearance unchanged when selecting a reading theme', () => {

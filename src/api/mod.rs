@@ -31,6 +31,12 @@ pub struct AppState {
 pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::health,
+        commands::backup::export_local_books,
+        commands::backup::import_local_books,
+        commands::backup::export_custom_fonts,
+        commands::backup::import_custom_fonts,
+        commands::backup::export_reading_stats,
+        commands::backup::import_reading_stats,
         commands::book::search_book,
         commands::book::search_book_multi,
         commands::book::explore_book,
@@ -38,6 +44,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::book::get_chapter_list,
         commands::book::get_book_content,
         commands::book::delete_book_cache,
+        commands::book::get_cached_chapter_urls,
         commands::book::get_bookshelf,
         commands::book::upload_txt_book,
         commands::book::upload_epub_book,
@@ -52,6 +59,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::book::get_shelf_book_with_cache_info,
         commands::book::get_invalid_book_sources,
         commands::book::cache_book_sse,
+        commands::book::cancel_cache_book,
         commands::book::search_book_multi_sse,
         commands::book::search_book_source_sse,
         commands::book::get_available_book_source,

@@ -340,9 +340,8 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComp
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets } from '../stores/reader'
 import { useAppStore } from '../stores/app'
-import { getBookInfo } from '../api/bookshelf'
+import { getBookInfo, getBookshelfWithCacheInfo } from '../api/bookshelf'
 import { applySystemTheme } from '../utils/systemUi'
-import { countBrowserBookCache } from '../utils/browserCache'
 import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
 import { handleReaderFontSizeWheel } from '../utils/readerFontSize'
@@ -411,6 +410,7 @@ let restorePositionTimer: number | null = null
 let persistPositionTimer: number | null = null
 const pendingRestorePosition = ref<SavedReadingPosition | null>(null)
 let pendingRestoreAttempts = 0
+let skipPositionRestoreIndex: number | null = null
 let suppressPositionSaveUntil = 0
 let suppressContinuousScrollSyncUntil = 0
 let suppressContinuousAutoLoadUntil = 0
@@ -509,7 +509,7 @@ const offlineBannerText = computed(() => {
   if (offlineCachedCount.value > 0) {
     return `离线模式：当前书已缓存 ${offlineCachedCount.value} 章，可继续阅读已缓存章节`
   }
-  return '离线模式：当前书尚未缓存到浏览器，未缓存章节将无法打开'
+  return '离线模式：当前书没有本地缓存，未缓存章节将无法打开'
 })
 
 async function refreshOfflineCacheState() {
@@ -517,7 +517,8 @@ async function refreshOfflineCacheState() {
     offlineCachedCount.value = 0
     return
   }
-  offlineCachedCount.value = await countBrowserBookCache(store.book.bookUrl).catch(() => 0)
+  const books = await getBookshelfWithCacheInfo().catch(() => [])
+  offlineCachedCount.value = books.find((book) => book.bookUrl === store.book?.bookUrl)?.cachedChapterCount || 0
 }
 
 let refreshOfflineCacheStateTimer: number | null = null
@@ -703,6 +704,7 @@ const {
   continuousChapters,
   continuousLoadingNext,
   continuousLoadingPrev,
+  previousAutoLoadArmed,
   suppressContinuousSync,
   syncContinuousChapterHtml,
   getContinuousChapter,
@@ -710,7 +712,10 @@ const {
   initializeContinuousChapters,
   syncContinuousToStoreState,
   loadContinuousNext,
+  loadContinuousPrev,
+  armPreviousAutoLoad,
   getContinuousSections,
+  scrollToContinuousChapter,
   pruneReadChapters,
   clearContinuousChapters,
   disposeContinuousReading,
@@ -780,6 +785,11 @@ function pageBackward() {
 // Navigation
 function goHome() {
   persistReadingProgressKeepalive()
+  try {
+    sessionStorage.setItem('reader-skip-offline-restore', '1')
+  } catch {
+    // Ignore unavailable session storage; navigation should still work.
+  }
   router.replace('/')
 }
 
@@ -825,16 +835,39 @@ function persistReadingProgressTemporaryKeepalive() {
   readerProgressExitSaver.flushTemporaryKeepalive()
 }
 
+async function jumpToRenderedContinuousChapter(targetIndex: number) {
+  const chapter = getContinuousChapter(targetIndex)
+  if (!chapter) return false
+
+  // Adjacent chapter already on screen: scroll to its top instead of
+  // refetching and rebuilding the whole continuous list.
+  suppressContinuousScrollSyncUntil = Date.now() + 500
+  suppressContinuousAutoLoadUntil = Date.now() + 500
+  previousAutoLoadArmed.value = false
+  setContinuousActiveChapter(targetIndex, chapter.content, 0)
+  // Marking the chapter read queues pruneReadChapters (hide-read mode) via
+  // the currentIndex watcher. Wait for that prune and its scroll compensation
+  // to settle before measuring offsetTop — scrolling against the pre-prune
+  // layout lands near the chapter tail.
+  await nextTick()
+  if (typeof window !== 'undefined') {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+  }
+  scrollToContinuousChapter(targetIndex, false)
+  return true
+}
+
 async function prevChapter() {
   const targetIndex = store.currentIndex - 1
   if (targetIndex < 0) return
 
   if (!isContinuousMode.value) {
     await store.prevChapter()
-    scrollToTop()
+    scrollToTop('instant')
     return
   }
 
+  if (await jumpToRenderedContinuousChapter(targetIndex)) return
   await rebuildContinuousAtChapter(targetIndex)
 }
 
@@ -844,39 +877,65 @@ async function nextChapter() {
 
   if (!isContinuousMode.value) {
     await store.nextChapter()
-    scrollToTop()
+    scrollToTop('instant')
     return
   }
 
+  if (await jumpToRenderedContinuousChapter(targetIndex)) return
   await rebuildContinuousAtChapter(targetIndex)
 }
 
 async function jumpFromCatalog(targetIndex: number) {
   if (targetIndex < 0 || targetIndex >= store.chapters.length) return
 
-  if (!isContinuousMode.value) {
-    await store.loadChapter(targetIndex)
-    store.closePanel()
-    scrollToTop()
-    return
+  skipPositionRestoreIndex = targetIndex
+  pendingRestorePosition.value = null
+  pendingRestoreAttempts = 0
+  clearRestoreStabilizers()
+  if (restorePositionTimer) {
+    clearTimeout(restorePositionTimer)
+    restorePositionTimer = null
   }
+  if (persistPositionTimer) {
+    clearTimeout(persistPositionTimer)
+    persistPositionTimer = null
+  }
+  suppressPositionSaveUntil = Date.now() + 1200
 
-  await rebuildContinuousAtChapter(targetIndex)
-  store.closePanel()
+  try {
+    if (!isContinuousMode.value) {
+      await store.loadChapter(targetIndex)
+      await nextTick()
+      store.closePanel()
+      scrollToTop('instant')
+      return
+    }
+
+    await rebuildContinuousAtChapter(targetIndex)
+    await nextTick()
+    store.closePanel()
+  } finally {
+    if (skipPositionRestoreIndex === targetIndex) {
+      skipPositionRestoreIndex = null
+    }
+    pendingRestorePosition.value = null
+    pendingRestoreAttempts = 0
+    clearRestoreStabilizers()
+  }
 }
 
 async function rebuildContinuousAtChapter(targetIndex: number) {
   suppressContinuousScrollSyncUntil = Date.now() + 500
   suppressContinuousAutoLoadUntil = Date.now() + 500
-  await initializeContinuousChapters(targetIndex, false)
+  await initializeContinuousChapters(targetIndex, false, true)
 }
 
-function scrollToTop() {
+function scrollToTop(behavior: ScrollBehavior = 'smooth') {
   if (scrollContainerRef.value) {
     if (isHorizontalPageMode.value) {
-      scrollContainerRef.value.scrollTo({ left: 0, behavior: 'smooth' })
+      scrollContainerRef.value.scrollTo({ left: 0, behavior })
     } else {
-      scrollContainerRef.value.scrollTo({ top: 0, behavior: 'smooth' })
+      scrollContainerRef.value.scrollTo({ top: 0, behavior })
     }
   }
 }
@@ -909,6 +968,16 @@ function buildServerSavedPosition(): SavedReadingPosition | null {
 }
 
 function loadSavedReadingPosition() {
+  if (skipPositionRestoreIndex === store.currentIndex) {
+    skipPositionRestoreIndex = null
+    pendingRestorePosition.value = null
+    pendingRestoreAttempts = 0
+    clearRestoreStabilizers()
+    debugPositionLog('skip saved position for chapter jump', {
+      currentIndex: store.currentIndex,
+    })
+    return
+  }
   const key = getPositionStorageKey()
   if (!key) {
     pendingRestorePosition.value = null
@@ -1090,7 +1159,7 @@ function restoreReadingPositionInternal(saved: SavedReadingPosition | null, fina
       return false
     }
     const maxScroll = Math.max(0, container.scrollWidth - container.clientWidth)
-    container.scrollTo({ left: maxScroll * Math.max(0, Math.min(1, saved.progress || 0)), behavior: 'auto' })
+    container.scrollTo({ left: maxScroll * Math.max(0, Math.min(1, saved.progress || 0)), behavior: 'instant' })
     if (finalize) {
       pendingRestorePosition.value = null
       pendingRestoreAttempts = 0
@@ -1184,7 +1253,9 @@ function restoreReadingPositionInternal(saved: SavedReadingPosition | null, fina
     }
   }
 
-  container.scrollTo({ top: Math.max(0, targetTop), behavior: 'auto' })
+  // Position restore must never animate — 'auto' would follow the
+  // container's CSS scroll-behavior: smooth and visibly roll the page.
+  container.scrollTo({ top: Math.max(0, targetTop), behavior: 'instant' })
   if (finalize) {
     pendingRestorePosition.value = null
     pendingRestoreAttempts = 0
@@ -1459,6 +1530,10 @@ function handleScroll() {
 
       const activeIndex = Number(activeSection.dataset.chapterIndex || 0)
       const activeChapter = getContinuousChapter(activeIndex)
+      const firstIndex = Number(sections[0].dataset.chapterIndex || 0)
+      if (activeIndex === firstIndex && container.scrollTop > 12) {
+        armPreviousAutoLoad()
+      }
       const nextSection = sections[sections.indexOf(activeSection) + 1] || null
       const sectionRange = Math.max(
         1,
@@ -1474,8 +1549,13 @@ function handleScroll() {
       }
     }
 
-    if (Date.now() >= suppressContinuousAutoLoadUntil && container.scrollHeight - (container.scrollTop + container.clientHeight) < 480) {
-      loadContinuousNext()
+    if (Date.now() >= suppressContinuousAutoLoadUntil) {
+      if (previousAutoLoadArmed.value && container.scrollTop <= 12) {
+        loadContinuousPrev()
+      }
+      if (container.scrollHeight - (container.scrollTop + container.clientHeight) < 480) {
+        loadContinuousNext()
+      }
     }
   } else if (container) {
     const maxScroll = Math.max(1, container.scrollHeight - container.clientHeight)
@@ -1997,7 +2077,7 @@ watch(() => store.currentIndex, async () => {
     clearReadingClass()
   }
   if (hideReadChaptersMode.value) {
-    pruneReadChapters(store.currentIndex)
+    void pruneReadChapters(store.currentIndex)
   }
   if (!isContinuousMode.value && config.value.enablePreload) {
     store.preloadAroundChapter(store.currentIndex)
@@ -2198,6 +2278,7 @@ watch(
   flex: 1;
   height: 100%;
   overflow-y: auto;
+  overflow-anchor: none;
   position: relative;
   scroll-behavior: smooth;
   overscroll-behavior: contain;

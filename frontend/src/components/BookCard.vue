@@ -73,8 +73,7 @@
       </div>
 
       <div class="card-footer">
-        <div v-if="!isSearch && (browserCachedCount > 0 || serverCachedCount > 0)" class="book-cache-row">
-          <span v-if="browserCachedCount > 0" class="cache-chip primary">离线 {{ browserCachedCount }} 章</span>
+        <div v-if="!isSearch && serverCachedCount > 0" class="book-cache-row">
           <span v-if="serverCachedCount > 0" class="cache-chip">本地 {{ serverCachedCount }} 章</span>
         </div>
         <!-- Search mode: add to shelf -->
@@ -153,7 +152,6 @@ const unreadCount = computed(() => {
   return Math.max(0, b.totalChapterNum - 1 - b.durChapterIndex)
 })
 
-const browserCachedCount = computed(() => isLocalBook(asBook.value) ? 0 : Math.max(0, asBook.value.browserCachedChapterCount || 0))
 const serverCachedCount = computed(() => isLocalBook(asBook.value) ? 0 : Math.max(0, asBook.value.cachedChapterCount || 0))
 const latestChapterText = computed(() => {
   if (props.isSearch) {

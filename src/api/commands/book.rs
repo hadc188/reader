@@ -13,8 +13,14 @@ use crate::service::local_txt_book::{
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use tokio::task::JoinSet;
 
 const DEFAULT_AVAILABLE_RESULT_LIMIT: usize = 20;
@@ -82,6 +88,8 @@ pub struct ChapterListRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct BookContentRequest {
+    #[serde(rename = "bookUrl")]
+    pub book_url: Option<String>,
     #[serde(rename = "chapterUrl", alias = "url", alias = "href")]
     pub chapter_url: Option<String>,
     #[serde(rename = "bookSourceUrl", alias = "origin")]
@@ -97,6 +105,14 @@ pub struct DeleteCacheRequest {
     url: Option<String>,
     #[serde(rename = "bookUrl")]
     book_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CachedChapterUrlsRequest {
+    #[serde(rename = "bookUrl", alias = "url")]
+    book_url: Option<String>,
+    #[serde(rename = "chapterUrls", default)]
+    chapter_urls: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +148,16 @@ pub struct CacheBookRequest {
     refresh: Option<i32>,
     #[serde(rename = "concurrentCount")]
     concurrent_count: Option<i32>,
+}
+
+/// 运行中的整书缓存任务，按 bookUrl 登记，供 cancel_cache_book 中断。
+static CACHE_BOOK_CANCELLATIONS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelCacheBookRequest {
+    pub book_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -753,7 +779,11 @@ pub async fn get_book_content(
     // Determine book_url and chapter_url
     let (book_url, chapter_url) = if let Some(url) = &req.chapter_url {
         // Check if url looks like a book URL (not a chapter URL) and we have an index
-        if req.index.is_some() && !url.contains("/read/") && !url.contains("/chapter/") {
+        if req.book_url.is_none()
+            && req.index.is_some()
+            && !url.contains("/read/")
+            && !url.contains("/chapter/")
+        {
             // url is bookUrl, need to get chapter from index
             let source = resolve_book_source(
                 &state,
@@ -806,15 +836,18 @@ pub async fn get_book_content(
             }
             (url.clone(), chapters[idx].url.clone())
         } else {
-            // url is chapterUrl, try to find book_url from shelf
-            let book_url = if let Ok(Some(shelf_book)) = state
+            // Prefer the explicit book URL so offline reads use the same cache
+            // directory that was used when the chapter was cached.
+            let book_url = if let Some(book_url) = &req.book_url {
+                book_url.clone()
+            } else if let Ok(Some(shelf_book)) = state
                 .book_service
                 .get_shelf_book_by_chapter(&user_ns, url)
                 .await
             {
                 shelf_book.book_url
             } else {
-                url.clone() // fallback to using chapter url as book key
+                url.clone()
             };
             (book_url, url.clone())
         }
@@ -827,7 +860,7 @@ pub async fn get_book_content(
         &user_ns,
         req.book_source_url,
         req.book_source,
-        Some(&chapter_url),
+        Some(&book_url),
     )
     .await?;
 
@@ -901,6 +934,22 @@ pub async fn delete_book_cache(
         "contentCache": deleted_content,
         "chapterListCache": deleted_chapter_list
     })))
+}
+
+#[tauri::command]
+pub async fn get_cached_chapter_urls(
+    state: tauri::State<'_, AppState>,
+    req: CachedChapterUrlsRequest,
+) -> Result<ApiResponse<Value>, AppError> {
+    let user_ns = "default";
+    let book_url = req
+        .book_url
+        .ok_or_else(|| AppError::BadRequest("bookUrl required".to_string()))?;
+    let cached_urls = state
+        .book_service
+        .cached_chapter_urls(&user_ns, &book_url, &req.chapter_urls)
+        .await?;
+    Ok(ApiResponse::ok(serde_json::json!(cached_urls)))
 }
 
 #[tauri::command]
@@ -1510,8 +1559,9 @@ pub async fn cache_book_sse(
         .clone()
         .unwrap_or_else(|| book.book_url.clone());
 
-    // The starting chapter URL for caching (from query params)
-    let start_ch_url = req.toc_url.clone();
+    // 阅读页可传入明确的章节地址；首页未传时从书架保存的阅读进度开始。
+    let start_ch_url = req.toc_url.as_deref();
+    let saved_start_index = book.dur_chapter_index;
     let cache_count = req.count.unwrap_or(0); // 0 means all
 
     let mut chapters = state
@@ -1519,11 +1569,17 @@ pub async fn cache_book_sse(
         .get_chapter_list(&user_ns, &source, &root_toc_url)
         .await?;
 
-    // If a starting URL is provided, narrow down the list
-    if let Some(ch_url) = start_ch_url {
-        if let Some(idx) = chapters.iter().position(|c| c.url == ch_url) {
-            chapters = chapters.split_off(idx);
-        }
+    let chapter_urls = chapters
+        .iter()
+        .map(|chapter| chapter.url.clone())
+        .collect::<Vec<_>>();
+    let start_index = resolve_cache_start_index(
+        &chapter_urls,
+        start_ch_url,
+        saved_start_index,
+    );
+    if start_index > 0 {
+        chapters = chapters.split_off(start_index);
     }
 
     // Limit count if requested
@@ -1535,92 +1591,168 @@ pub async fn cache_book_sse(
         return Err(AppError::BadRequest("没有找到需要缓存的章节".to_string()));
     }
 
-    let book_url = book.book_url.clone();
     let state_clone = state.inner().clone();
     let source_clone = source.clone();
-    let book_url_clone = book_url.clone();
+    let book_url_clone = book.book_url.clone();
     let user_ns_clone = user_ns;
 
+    // 登记取消标志；同一本书重复发起时取消旧任务。
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    if let Ok(mut tasks) = CACHE_BOOK_CANCELLATIONS.lock() {
+        if let Some(previous) = tasks.insert(book_url_clone.clone(), cancel_flag.clone()) {
+            previous.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let registry_key = book_url_clone.clone();
+    let cleanup_flag = cancel_flag.clone();
     tokio::spawn(async move {
-        let mut cached_count = 0usize;
-        if !refresh {
-            for ch in &chapters {
-                if state_clone
-                    .book_service
-                    .is_chapter_cached(&user_ns_clone, &book_url_clone, &ch.url)
-                    .await
-                {
-                    cached_count += 1;
-                }
-            }
-        }
-        let mut success = 0usize;
-        let mut failed = 0usize;
-        let _ = on_event.send(serde_json::json!({
-            "event": "data",
-            "cachedCount": cached_count,
-            "successCount": success,
-            "failedCount": failed
-        }));
+        let total = chapters.len();
+        let cancelled = || cancel_flag.load(Ordering::Relaxed);
 
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrent));
-        let mut tasks: FuturesUnordered<_> = FuturesUnordered::new();
-        for ch in chapters {
-            let already_cached = !refresh
-                && state_clone
-                    .book_service
-                    .is_chapter_cached(&user_ns_clone, &book_url_clone, &ch.url)
-                    .await;
-            if already_cached {
-                continue;
-            }
-            let permit = match sem.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => {
-                    failed += 1;
-                    continue;
-                }
-            };
-            let svc = state_clone.book_service.clone();
-            let src = source_clone.clone();
-            let url = ch.url.clone();
-            let b_url = book_url_clone.clone();
-            let refresh_flag = refresh;
-            let u_ns = user_ns_clone;
-            tasks.push(tokio::spawn(async move {
-                let _permit = permit;
-                svc.cache_chapter(&u_ns, &b_url, &src, &url, refresh_flag)
-                    .await
-            }));
-        }
-
-        while let Some(task) = tasks.next().await {
-            match task {
-                Ok(Ok(_)) => {
-                    success += 1;
-                    cached_count += 1;
-                }
-                _ => {
-                    failed += 1;
+        async {
+            let mut cached_count = 0usize;
+            if !refresh {
+                for ch in &chapters {
+                    if cancelled() {
+                        emit_cache_end(&on_event, total, cached_count, 0, 0, true);
+                        return;
+                    }
+                    if state_clone
+                        .book_service
+                        .is_chapter_cached(&user_ns_clone, &book_url_clone, &ch.url)
+                        .await
+                    {
+                        cached_count += 1;
+                    }
                 }
             }
+            let mut success = 0usize;
+            let mut failed = 0usize;
             let _ = on_event.send(serde_json::json!({
                 "event": "data",
+                "totalChapters": total,
                 "cachedCount": cached_count,
                 "successCount": success,
                 "failedCount": failed
             }));
-        }
 
-        let _ = on_event.send(serde_json::json!({
-            "event": "end",
-            "cachedCount": cached_count,
-            "successCount": success,
-            "failedCount": failed
-        }));
+            let sem = Arc::new(tokio::sync::Semaphore::new(concurrent));
+            let mut tasks: FuturesUnordered<_> = FuturesUnordered::new();
+            let mut aborted = false;
+            for ch in chapters {
+                if cancelled() {
+                    aborted = true;
+                    break;
+                }
+                let already_cached = !refresh
+                    && state_clone
+                        .book_service
+                        .is_chapter_cached(&user_ns_clone, &book_url_clone, &ch.url)
+                        .await;
+                if already_cached {
+                    continue;
+                }
+                let permit = match sem.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                };
+                if cancelled() {
+                    aborted = true;
+                    break;
+                }
+                let svc = state_clone.book_service.clone();
+                let src = source_clone.clone();
+                let url = ch.url.clone();
+                let b_url = book_url_clone.clone();
+                let refresh_flag = refresh;
+                let u_ns = user_ns_clone;
+                tasks.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    svc.cache_chapter(&u_ns, &b_url, &src, &url, refresh_flag)
+                        .await
+                }));
+            }
+
+            // 已在途的请求等待自然结束（受 HTTP 超时约束），不再派发新任务。
+            while let Some(task) = tasks.next().await {
+                match task {
+                    Ok(Ok(_)) => {
+                        success += 1;
+                        cached_count += 1;
+                    }
+                    _ => {
+                        failed += 1;
+                    }
+                }
+                let _ = on_event.send(serde_json::json!({
+                    "event": "data",
+                    "totalChapters": total,
+                    "cachedCount": cached_count,
+                    "successCount": success,
+                    "failedCount": failed
+                }));
+            }
+
+            emit_cache_end(
+                &on_event,
+                total,
+                cached_count,
+                success,
+                failed,
+                aborted || cancelled(),
+            );
+        }
+        .await;
+
+        // 移除登记；若已被同书新任务覆盖则保留新任务的标志。
+        if let Ok(mut tasks) = CACHE_BOOK_CANCELLATIONS.lock() {
+            if let Some(current) = tasks.get(&registry_key) {
+                if Arc::ptr_eq(current, &cleanup_flag) {
+                    tasks.remove(&registry_key);
+                }
+            }
+        }
     });
 
     Ok(())
+}
+
+fn emit_cache_end(
+    on_event: &tauri::ipc::Channel<serde_json::Value>,
+    total: usize,
+    cached_count: usize,
+    success: usize,
+    failed: usize,
+    aborted: bool,
+) {
+    let _ = on_event.send(serde_json::json!({
+        "event": "end",
+        "totalChapters": total,
+        "cachedCount": cached_count,
+        "successCount": success,
+        "failedCount": failed,
+        "aborted": aborted
+    }));
+}
+
+#[tauri::command]
+pub async fn cancel_cache_book(
+    req: CancelCacheBookRequest,
+) -> Result<ApiResponse<serde_json::Value>, AppError> {
+    let cancelled = CACHE_BOOK_CANCELLATIONS
+        .lock()
+        .ok()
+        .and_then(|tasks| tasks.get(&req.book_url).cloned())
+        .map(|flag| {
+            flag.store(true, Ordering::Relaxed);
+            true
+        })
+        .unwrap_or(false);
+    Ok(ApiResponse::ok(serde_json::json!({ "cancelled": cancelled })))
 }
 
 #[tauri::command]
@@ -2586,6 +2718,22 @@ fn cache_count_for_shelf_display(book: &Book, cached_count: usize) -> usize {
     }
 }
 
+fn resolve_cache_start_index(
+    chapter_urls: &[String],
+    requested_start_url: Option<&str>,
+    saved_start_index: Option<i32>,
+) -> usize {
+    if chapter_urls.is_empty() {
+        return 0;
+    }
+    if let Some(index) = requested_start_url
+        .and_then(|url| chapter_urls.iter().position(|chapter_url| chapter_url == url))
+    {
+        return index;
+    }
+    (saved_start_index.unwrap_or(0).max(0) as usize).min(chapter_urls.len() - 1)
+}
+
 fn is_local_book(book: &Book) -> bool {
     is_local_txt_origin(&book.origin)
         || is_local_txt_url(&book.book_url)
@@ -2679,7 +2827,7 @@ mod tests {
     use super::{
         book_matches_delete_target, build_available_book_source_response,
         cache_count_for_shelf_display, fallback_available_book,
-        retain_enabled_source_books, should_use_available_source_cache,
+        resolve_cache_start_index, retain_enabled_source_books, should_use_available_source_cache,
         take_available_source_cached_matches,
         take_available_source_sse_matches, GetAvailableBookSourceRequest,
     };
@@ -2751,6 +2899,27 @@ mod tests {
         };
 
         assert_eq!(cache_count_for_shelf_display(&book, 42), 0);
+    }
+
+    #[test]
+    fn homepage_cache_starts_from_saved_reading_chapter() {
+        let chapter_urls = (0..10)
+            .map(|index| format!("chapter-{index}"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(resolve_cache_start_index(&chapter_urls, None, Some(6)), 6);
+    }
+
+    #[test]
+    fn explicit_cache_start_takes_priority_over_saved_progress() {
+        let chapter_urls = (0..10)
+            .map(|index| format!("chapter-{index}"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            resolve_cache_start_index(&chapter_urls, Some("chapter-3"), Some(6)),
+            3,
+        );
     }
 
     #[test]

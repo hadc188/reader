@@ -250,9 +250,6 @@ export const useAppStore = defineStore('app', () => {
   const showUserManager = ref(false)
   const showWebdavManager = ref(false)
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true)
-  const pwaUpdateAvailable = ref(false)
-  const deferredInstallPrompt = ref<any>(null)
-  const waitingServiceWorker = ref<ServiceWorker | null>(null)
 
   const initialReadingStats = (() => {
     try {
@@ -403,32 +400,6 @@ export const useAppStore = defineStore('app', () => {
     isOnline.value = value
   }
 
-  function setPwaUpdateAvailable(value: boolean) {
-    pwaUpdateAvailable.value = value
-  }
-
-  function setWaitingServiceWorker(value: ServiceWorker | null) {
-    waitingServiceWorker.value = value
-  }
-
-  function setDeferredInstallPrompt(value: any) {
-    deferredInstallPrompt.value = value
-  }
-
-  async function installPwa() {
-    if (!deferredInstallPrompt.value) return false
-    deferredInstallPrompt.value.prompt()
-    const result = await deferredInstallPrompt.value.userChoice.catch(() => null)
-    deferredInstallPrompt.value = null
-    return result?.outcome === 'accepted'
-  }
-
-  function applyPwaUpdate() {
-    if (!waitingServiceWorker.value) return false
-    waitingServiceWorker.value.postMessage({ type: 'SKIP_WAITING' })
-    return true
-  }
-
   // ─── 全局确认弹窗（替代原生 confirm，避免 Tauri 里显示 tauri.localhost）───
   const confirmState = ref<{
     message: string
@@ -457,8 +428,7 @@ export const useAppStore = defineStore('app', () => {
     versionUpdate, versionUpdateLoading, desktopUpdateLoading, desktopUpdateProgress, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
     checkVersionUpdate, dismissVersionUpdateReminder, applyDesktopUpdate,
     showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager,
-    isOnline, pwaUpdateAvailable, deferredInstallPrompt, waitingServiceWorker,
-    setOnlineStatus, setPwaUpdateAvailable, setDeferredInstallPrompt, setWaitingServiceWorker, installPwa, applyPwaUpdate,
+    isOnline, setOnlineStatus,
     readingStats, readingStatsSummary, startReadingSession, stopReadingSession, setReadingSessionBook, markBookOpened, markChapterRead,
     toasts, showToast,
     confirmState, confirmDialog, resolveConfirm,

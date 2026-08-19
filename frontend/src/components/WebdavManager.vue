@@ -356,7 +356,11 @@ async function uploadRemoteBackup() {
     saveRemoteConfig()
     const payload = await createWebdavBackupPayload()
     await uploadLegadoWebdavBackup(remoteDraft.value, buildBackupFilename(), createCompatibleBackupArchiveFiles(payload))
-    appStore.showToast('备份已上传到 WebDAV', 'success')
+    const skipped = payload.skippedLocalBooks?.length || 0
+    appStore.showToast(
+      skipped ? `备份已上传到 WebDAV，${skipped} 本本地书过大未包含` : '备份已上传到 WebDAV',
+      skipped ? 'warning' : 'success',
+    )
     await loadRemoteBackups()
   } catch (error) {
     remoteError.value = (error as Error).message || '上传备份失败'
@@ -525,7 +529,11 @@ async function createBackup() {
       buildBackupFilename(),
       '/backups',
     )
-    appStore.showToast('备份已保存到 /backups', 'success')
+    const skipped = payload.skippedLocalBooks?.length || 0
+    appStore.showToast(
+      skipped ? `备份已保存到 /backups，${skipped} 本本地书过大未包含` : '备份已保存到 /backups',
+      skipped ? 'warning' : 'success',
+    )
     await loadFiles('/backups')
   } catch (error) {
     appStore.showToast((error as Error).message || '备份失败', 'error')

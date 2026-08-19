@@ -33,7 +33,6 @@ export interface Book {
   kind?: string
   updateTime?: string
   cachedChapterCount?: number
-  browserCachedChapterCount?: number
   /** 已发现的同一本书的可读书源，加入书架后继续保留。 */
   sourceCandidates?: SearchBook[]
   recentKind?: 'book' | 'rss'

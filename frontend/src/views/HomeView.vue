@@ -196,11 +196,18 @@ const localBookFileInputRef = ref<HTMLInputElement | null>(null)
 const localBookUploading = ref(false)
 
 onMounted(async () => {
+  let skipOfflineRestore = false
+  try {
+    skipOfflineRestore = sessionStorage.getItem('reader-skip-offline-restore') === '1'
+    sessionStorage.removeItem('reader-skip-offline-restore')
+  } catch {
+    // Ignore unavailable session storage.
+  }
   await Promise.all([
     shelfStore.fetchBooks().catch(() => undefined),
     shelfStore.fetchGroups().catch(() => undefined),
   ])
-  if (!appStore.isOnline) {
+  if (!skipOfflineRestore && !appStore.isOnline) {
     const restored = await readerStore.restorePersistedSession()
     if (restored) {
       appStore.showToast('已恢复最近阅读的离线章节', 'success')

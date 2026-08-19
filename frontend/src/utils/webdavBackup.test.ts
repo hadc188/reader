@@ -1,13 +1,65 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { WebdavBackupPayload } from './webdavBackup'
 import {
   createCompatibleBackupArchiveFiles,
+  createWebdavBackupPayload,
   parseCompatibleBackupArchive,
+  parseWebdavBackup,
+  restoreWebdavBackup,
 } from './webdavBackup'
+import { importCustomFonts, importLocalBooks, importReadingStats } from '../api/backup'
+
+vi.mock('../api/bookmark', () => ({
+  getBookmarks: vi.fn(async () => []),
+  deleteBookmarks: vi.fn(async () => undefined),
+  saveBookmarks: vi.fn(async () => undefined),
+}))
+vi.mock('../api/bookshelf', () => ({
+  getBookshelf: vi.fn(async () => []),
+  getBookGroups: vi.fn(async () => []),
+  saveBooks: vi.fn(async () => undefined),
+  saveBookGroup: vi.fn(async () => undefined),
+  deleteBooks: vi.fn(async () => undefined),
+  deleteBookGroup: vi.fn(async () => undefined),
+}))
+vi.mock('../api/replaceRule', () => ({
+  getReplaceRules: vi.fn(async () => []),
+  deleteReplaceRules: vi.fn(async () => undefined),
+  saveReplaceRules: vi.fn(async () => undefined),
+}))
+vi.mock('../api/rss', () => ({
+  getRssSources: vi.fn(async () => []),
+  deleteRssSource: vi.fn(async () => undefined),
+  saveRssSources: vi.fn(async () => undefined),
+}))
+vi.mock('../api/source', () => ({
+  deleteAllBookSources: vi.fn(async () => undefined),
+  getBookSources: vi.fn(async () => []),
+  saveBookSources: vi.fn(async () => undefined),
+}))
+vi.mock('../api/backup', () => ({
+  exportLocalBooks: vi.fn(async () => ({
+    books: [{ id: 'a'.repeat(32), files: [{ path: 'book.txt', base64: 'dGVzdA==' }] }],
+    skipped: [{ id: 'b'.repeat(32), sizeBytes: 123 }],
+    totalBytes: 4,
+  })),
+  exportCustomFonts: vi.fn(async () => ({
+    fonts: [{ fileName: `${'c'.repeat(32)}__楷体.ttf`, base64: 'Zm9udA==' }],
+    skipped: [],
+    totalBytes: 5,
+  })),
+  exportReadingStats: vi.fn(async () => ({
+    daily: [{ date: '2026-08-11', seconds: 90, characters: 12 }],
+    byBook: [{ date: '2026-08-11', bookUrl: 'https://example.test/book', bookName: '书', bookAuthor: '', seconds: 90, characters: 12 }],
+  })),
+  importLocalBooks: vi.fn(async () => ({ imported: 1 })),
+  importCustomFonts: vi.fn(async () => ({ imported: 1 })),
+  importReadingStats: vi.fn(async () => ({ daily: 1, byBook: 1 })),
+}))
 
 function createPayload(): WebdavBackupPayload {
   return {
-    version: 1,
+    version: 2,
     createdAt: '2026-08-11T00:00:00.000Z',
     app: 'reader-rust-frontend',
     bookshelf: {
@@ -22,6 +74,12 @@ function createPayload(): WebdavBackupPayload {
     bookmarks: [],
     replaceRules: [],
     localState: { theme: 'dark' },
+    localBooks: [{ id: 'a'.repeat(32), files: [{ path: 'book.txt', base64: 'dGVzdA==' }] }],
+    customFonts: [{ fileName: `${'c'.repeat(32)}__楷体.ttf`, base64: 'Zm9udA==' }],
+    readingStats: {
+      daily: [{ date: '2026-08-11', seconds: 90, characters: 12 }],
+      byBook: [],
+    },
   }
 }
 
@@ -35,6 +93,10 @@ describe('compatible backup archives', () => {
     expect(fileMap['reader-rust.json']).toBeTruthy()
     expect(commonBooks).toHaveLength(1)
     expect(groups[0]?.order).toBe(3)
+    // 本地书内容与字体嵌入 reader-rust.json
+    const embedded = JSON.parse(fileMap['reader-rust.json'])
+    expect(embedded.localBooks).toHaveLength(1)
+    expect(embedded.customFonts).toHaveLength(1)
   })
 
   it('restores a Legado archive and skips Android-only local books', () => {
@@ -87,5 +149,82 @@ describe('compatible backup archives', () => {
     expect(() => parseCompatibleBackupArchive({
       'bookshelf.json': '{}',
     })).toThrow('bookshelf.json 不是数据列表')
+  })
+
+  it('accepts v1 backups without local books, fonts or stats', () => {
+    const parsed = parseWebdavBackup(JSON.stringify({
+      version: 1,
+      createdAt: '2026-08-11T00:00:00.000Z',
+      app: 'reader-rust-frontend',
+      bookshelf: { books: [], groups: [] },
+      localState: {},
+    }))
+
+    expect(parsed.localBooks).toEqual([])
+    expect(parsed.customFonts).toEqual([])
+    expect(parsed.readingStats).toEqual({ daily: [], byBook: [] })
+  })
+})
+
+describe('backup payload v2', () => {
+  it('includes local books, fonts and reading stats from the backend exports', async () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    })
+    try {
+      const payload = await createWebdavBackupPayload()
+
+      expect(payload.version).toBe(2)
+      expect(payload.localBooks).toHaveLength(1)
+      expect(payload.skippedLocalBooks).toEqual([{ id: 'b'.repeat(32), sizeBytes: 123 }])
+      expect(payload.customFonts).toHaveLength(1)
+      expect(payload.readingStats?.daily).toHaveLength(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('captures the app preference keys', async () => {
+    const store: Record<string, string> = {
+      'reader-close-to-tray': '1',
+      'reader-boss-key': 'ctrl+alt+b',
+      'reader-hidden-features': '["rss"]',
+    }
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => store[key] ?? null,
+      setItem: (key: string, value: string) => { store[key] = value },
+      removeItem: (key: string) => { delete store[key] },
+    })
+    try {
+      const payload = await createWebdavBackupPayload()
+
+      expect(payload.localState['reader-close-to-tray']).toBe('1')
+      expect(payload.localState['reader-boss-key']).toBe('ctrl+alt+b')
+      expect(payload.localState['reader-hidden-features']).toBe('["rss"]')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('restores local book files before shelf records and imports fonts and stats', async () => {
+    const store: Record<string, string> = {}
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => store[key] ?? null,
+      setItem: (key: string, value: string) => { store[key] = value },
+      removeItem: (key: string) => { delete store[key] },
+    })
+    try {
+      await restoreWebdavBackup(createPayload())
+
+      expect(importLocalBooks).toHaveBeenCalledWith(createPayload().localBooks)
+      expect(importCustomFonts).toHaveBeenCalledWith(createPayload().customFonts)
+      expect(importReadingStats).toHaveBeenCalledWith(expect.objectContaining({
+        daily: [{ date: '2026-08-11', seconds: 90, characters: 12 }],
+      }))
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

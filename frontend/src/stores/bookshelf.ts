@@ -11,8 +11,6 @@ import {
   saveBooks as apiSaveBooks,
 } from '../api/bookshelf'
 import type { Book, BookGroup, SearchBook } from '../types'
-import { deleteBrowserBookCache, listBrowserCacheSummary } from '../utils/browserCache'
-import { isLocalBook } from '../utils/localBook'
 import { clearRecentReadBooks, getRecentReadBookKey, loadRecentReadBooks, removeRecentReadBook } from '../utils/recentBooks'
 
 export const useBookshelfStore = defineStore('bookshelf', () => {
@@ -24,8 +22,6 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   const sorting = ref(false)
 
   async function refreshRecentBooks() {
-    const browserSummaries = await listBrowserCacheSummary().catch(() => [])
-    const browserMap = new Map(browserSummaries.map((item) => [item.bookUrl, item.cachedChapterCount]))
     const shelfMap = new Map(books.value.map((book) => [getRecentReadBookKey(book), book]))
     recentBooks.value = loadRecentReadBooks().map((entry) => {
       const shelfBook = shelfMap.get(getRecentReadBookKey(entry))
@@ -37,10 +33,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
             durChapterTime: entry.recentReadAt,
           }
         : entry
-      return {
-        ...merged,
-        browserCachedChapterCount: isLocalBook(merged) ? 0 : browserMap.get(merged.bookUrl) || merged.browserCachedChapterCount || 0,
-      }
+      return merged
     })
   }
 
@@ -72,23 +65,14 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     }
   }
 
-  /// 共用的书架加载逻辑: 并发取服务端书架 + 浏览器缓存摘要, 合并后刷新最近阅读。
+  /// 共用的书架加载逻辑: 读取书架及应用本地缓存信息后刷新最近阅读。
   async function loadBooks() {
-    const [serverBooks, browserSummaries] = await Promise.all([
-      getBookshelfWithCacheInfo(),
-      listBrowserCacheSummary().catch(() => []),
-    ])
-    const browserMap = new Map(browserSummaries.map((item) => [item.bookUrl, item.cachedChapterCount]))
-    books.value = serverBooks.map((book) => ({
-      ...book,
-      browserCachedChapterCount: isLocalBook(book) ? 0 : browserMap.get(book.bookUrl) || 0,
-    }))
+    books.value = await getBookshelfWithCacheInfo()
     await refreshRecentBooks()
   }
 
   async function removeBook(book: Book) {
     await apiDeleteBook(book)
-    await deleteBrowserBookCache(book.bookUrl).catch(() => undefined)
     books.value = books.value.filter((b) => b.bookUrl !== book.bookUrl)
     await refreshRecentBooks()
   }
@@ -216,7 +200,6 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     
     if (toDelete.length === 0) return
     await apiDeleteBooks(toDelete as Book[])
-    await Promise.all(toDelete.map((book) => deleteBrowserBookCache(book.bookUrl).catch(() => undefined)))
     books.value = books.value.filter(b => !selectedBookUrls.value.has(b.bookUrl))
     clearSelection()
   }

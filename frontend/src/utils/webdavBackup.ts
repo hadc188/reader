@@ -14,10 +14,23 @@ import {
   getBookSources,
   saveBookSources,
 } from '../api/source'
+import {
+  exportCustomFonts,
+  exportLocalBooks,
+  exportReadingStats,
+  importCustomFonts,
+  importLocalBooks,
+  importReadingStats,
+} from '../api/backup'
+import type {
+  CustomFontExportItem,
+  LocalBookExportItem,
+  ReadingStatsExport,
+} from '../api/backup'
 import type { BackupArchiveFile } from '../api/webdav'
 import type { Book, BookGroup, Bookmark, BookSource, ReplaceRule, RssSource } from '../types'
 
-const BACKUP_VERSION = 1
+const BACKUP_VERSION = 2
 const LOCAL_STORAGE_KEYS = [
   'theme',
   'reader-stats',
@@ -30,6 +43,9 @@ const LOCAL_STORAGE_KEYS = [
   'reader-currentIndex',
   'reader-source-subscriptions',
   'reader-legado-sync-enabled',
+  'reader-close-to-tray',
+  'reader-boss-key',
+  'reader-hidden-features',
 ]
 
 export interface WebdavBackupPayload {
@@ -45,6 +61,14 @@ export interface WebdavBackupPayload {
   bookmarks: Bookmark[]
   replaceRules: ReplaceRule[]
   localState: Record<string, string>
+  /** v2: 本地书内容文件(base64), 恢复时写回存储目录。 */
+  localBooks?: LocalBookExportItem[]
+  /** v2: 因超过导出上限未包含在备份中的本地书。 */
+  skippedLocalBooks?: Array<{ id: string; sizeBytes: number }>
+  /** v2: 自定义字体文件(base64)。 */
+  customFonts?: CustomFontExportItem[]
+  /** v2: Rust 侧阅读统计(按日 + 按书)。 */
+  readingStats?: ReadingStatsExport
 }
 
 export interface CompatibleBackupParseResult {
@@ -77,13 +101,16 @@ function applyLocalState(localState: Record<string, string> = {}) {
 }
 
 export async function createWebdavBackupPayload(): Promise<WebdavBackupPayload> {
-  const [books, groups, bookSources, rssSources, bookmarks, replaceRules] = await Promise.all([
+  const [books, groups, bookSources, rssSources, bookmarks, replaceRules, localBooks, customFonts, readingStats] = await Promise.all([
     getBookshelf(),
     getBookGroups(),
     getBookSources(),
     getRssSources(),
     getBookmarks(),
     getReplaceRules(),
+    exportLocalBooks().catch(() => ({ books: [], skipped: [], totalBytes: 0 })),
+    exportCustomFonts().catch(() => ({ fonts: [], skipped: [], totalBytes: 0 })),
+    exportReadingStats().catch(() => ({ daily: [], byBook: [] })),
   ])
 
   return {
@@ -99,6 +126,10 @@ export async function createWebdavBackupPayload(): Promise<WebdavBackupPayload> 
     bookmarks,
     replaceRules,
     localState: captureLocalState(),
+    localBooks: localBooks.books,
+    skippedLocalBooks: localBooks.skipped,
+    customFonts: customFonts.fonts,
+    readingStats,
   }
 }
 
@@ -147,6 +178,11 @@ export function parseWebdavBackup(raw: string) {
     bookmarks: payload.bookmarks || [],
     replaceRules: payload.replaceRules || [],
     localState: payload.localState || {},
+    // v1 备份没有这些字段, 默认为空即可。
+    localBooks: payload.localBooks || [],
+    skippedLocalBooks: payload.skippedLocalBooks || [],
+    customFonts: payload.customFonts || [],
+    readingStats: payload.readingStats || { daily: [], byBook: [] },
   } as WebdavBackupPayload
 }
 
@@ -235,6 +271,11 @@ export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
     deleteAllBookSources().catch(() => undefined),
   ])
 
+  if (payload.app !== 'legado' && payload.localBooks?.length) {
+    // 本地书内容文件先落盘, 再写书架记录, 保证记录指向的文件已存在。
+    await importLocalBooks(payload.localBooks)
+  }
+
   if (payload.bookSources.length) {
     await saveBookSources(payload.bookSources)
   }
@@ -256,6 +297,13 @@ export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
 
   if (payload.app !== 'legado') {
     applyLocalState(payload.localState)
+    // 字体与统计恢复失败不阻断整体恢复(书架已就绪), 静默降级。
+    if (payload.customFonts?.length) {
+      await importCustomFonts(payload.customFonts).catch(() => undefined)
+    }
+    if (payload.readingStats && (payload.readingStats.daily.length || payload.readingStats.byBook.length)) {
+      await importReadingStats(payload.readingStats).catch(() => undefined)
+    }
   }
 }
 

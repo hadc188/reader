@@ -60,6 +60,7 @@ export function getChapterList(params: {
 }
 
 export function getBookContent(params: {
+  bookUrl?: string
   chapterUrl?: string
   bookSourceUrl?: string
   index?: number
@@ -78,6 +79,10 @@ export function saveBookProgress(params: {
 
 export function deleteBookCache(bookUrl: string) {
   return post('/deleteBookCache', { bookUrl }).then((r) => r.data)
+}
+
+export function getCachedChapterUrls(bookUrl: string, chapterUrls: string[]) {
+  return post<string[]>('/getCachedChapterUrls', { bookUrl, chapterUrls }).then((r) => r.data)
 }
 
 // ─── Groups ───

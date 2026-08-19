@@ -16,13 +16,8 @@
       <div v-if="!isLocalBookInServer" class="summary-grid">
         <div class="summary-card">
           <span class="summary-label">本地缓存</span>
-          <strong>{{ serverCachedCount }}</strong>
+          <strong>{{ localCachedCount }}</strong>
           <small>已缓存章节</small>
-        </div>
-        <div class="summary-card">
-          <span class="summary-label">浏览器缓存</span>
-          <strong>{{ browserCachedCount }}</strong>
-          <small>离线可读章节</small>
         </div>
       </div>
 
@@ -48,7 +43,7 @@
 
         <template v-else>
           <div class="info-card">
-            <p>本地缓存保存在应用存储目录；浏览器缓存保存在当前设备的 IndexedDB。断网时阅读页会优先读取浏览器已缓存章节。</p>
+            <p>本地缓存保存在应用存储目录，断网时可以继续阅读已经缓存的章节。</p>
           </div>
 
           <section class="cache-section">
@@ -76,30 +71,6 @@
             </div>
           </section>
 
-          <section class="cache-section">
-            <div class="section-head">
-              <h4>缓存到浏览器</h4>
-              <button class="link-btn" @click="refreshStats">刷新</button>
-            </div>
-            <div class="option-list">
-              <button class="cache-opt" @click="startBrowserCaching(50)">
-                <span class="label">缓存后续 50 章</span>
-                <span class="sub">只保留在当前浏览器</span>
-              </button>
-              <button class="cache-opt" @click="startBrowserCaching(100)">
-                <span class="label">缓存后续 100 章</span>
-                <span class="sub">适合本地离线使用</span>
-              </button>
-              <button class="cache-opt primary" @click="startBrowserCaching(0)">
-                <span class="label">全本缓存到浏览器</span>
-                <span class="sub">持久化到 IndexedDB</span>
-              </button>
-              <button class="cache-opt danger" @click="clearBrowserCache">
-                <span class="label">清除浏览器缓存</span>
-                <span class="sub">删除当前设备离线缓存</span>
-              </button>
-            </div>
-          </section>
         </template>
       </div>
     </div>
@@ -113,8 +84,6 @@ import { useAppStore } from '../../stores/app'
 import { cacheBookSSE } from '../../api/cache'
 import type { SseLike } from '../../api/sse'
 import { getBookshelfWithCacheInfo, deleteBookCache } from '../../api/bookshelf'
-import { countBrowserBookCache, deleteBrowserBookCache } from '../../utils/browserCache'
-import { cacheBookToBrowser, resolveBookChapters } from '../../utils/bookCache'
 import { isLocalBook } from '../../utils/localBook'
 
 const store = useReaderStore()
@@ -125,11 +94,9 @@ const working = ref(false)
 const progress = ref(0)
 const currentStatus = ref('准备中...')
 const currentChapterName = ref('')
-const serverCachedCount = ref(0)
-const browserCachedCount = ref(0)
+const localCachedCount = ref(0)
 const isLocalBookInServer = computed(() => isLocalBook(store.book))
 let sse: SseLike | null = null
-let browserSignal = { cancelled: false }
 
 onMounted(() => {
   refreshStats()
@@ -142,17 +109,12 @@ onUnmounted(() => {
 async function refreshStats() {
   if (!store.book) return
   if (isLocalBookInServer.value) {
-    serverCachedCount.value = 0
-    browserCachedCount.value = 0
+    localCachedCount.value = 0
     return
   }
-  const [serverList, browserCount] = await Promise.all([
-    getBookshelfWithCacheInfo().catch(() => []),
-    countBrowserBookCache(store.book.bookUrl).catch(() => 0),
-  ])
-  const matched = serverList.find((book) => book.bookUrl === store.book?.bookUrl)
-  serverCachedCount.value = matched?.cachedChapterCount || 0
-  browserCachedCount.value = browserCount
+  const localBooks = await getBookshelfWithCacheInfo().catch(() => [])
+  const matched = localBooks.find((book) => book.bookUrl === store.book?.bookUrl)
+  localCachedCount.value = matched?.cachedChapterCount || 0
 }
 
 function startServerCaching(count: number) {
@@ -211,59 +173,10 @@ function startServerCaching(count: number) {
   }
 }
 
-async function startBrowserCaching(count: number) {
-  if (!store.book || isLocalBookInServer.value) return
-  stopWorking()
-  browserSignal = { cancelled: false }
-  working.value = true
-  progress.value = 0
-  currentStatus.value = '准备浏览器缓存...'
-  currentChapterName.value = ''
-
-  try {
-    const chapters = store.chapters.length ? store.chapters : await resolveBookChapters(store.book)
-    const total = count === 0
-      ? Math.max(0, chapters.length - store.currentIndex)
-      : Math.min(count, Math.max(0, chapters.length - store.currentIndex))
-    await cacheBookToBrowser({
-      book: store.book,
-      chapters,
-      startIndex: store.currentIndex,
-      count: count || undefined,
-      signal: browserSignal,
-      onProgress: ({ completed, total, chapterTitle }) => {
-        currentChapterName.value = chapterTitle
-        currentStatus.value = `浏览器缓存中 (${completed}/${total})`
-        progress.value = total > 0 ? Math.round((completed / total) * 100) : 100
-      },
-    })
-    if (!browserSignal.cancelled) {
-      currentStatus.value = `浏览器缓存完成，共 ${total} 章`
-      progress.value = 100
-      appStore.showToast('已缓存到浏览器', 'success')
-    }
-  } catch (error) {
-    currentStatus.value = '浏览器缓存失败'
-    appStore.showToast((error as Error).message || '浏览器缓存失败', 'error')
-  } finally {
-    await refreshStats()
-    window.setTimeout(() => {
-      working.value = false
-    }, 800)
-  }
-}
-
 async function clearServerCache() {
   if (!store.book || isLocalBookInServer.value) return
   await deleteBookCache(store.book.bookUrl)
   appStore.showToast('本地缓存已清除', 'success')
-  await refreshStats()
-}
-
-async function clearBrowserCache() {
-  if (!store.book || isLocalBookInServer.value) return
-  await deleteBrowserBookCache(store.book.bookUrl)
-  appStore.showToast('浏览器缓存已清除', 'success')
   await refreshStats()
 }
 
@@ -275,7 +188,6 @@ function closeSSE() {
 }
 
 function stopWorking() {
-  browserSignal.cancelled = true
   closeSSE()
   working.value = false
 }
@@ -316,7 +228,7 @@ function stopWorking() {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   margin-bottom: 20px;
 }

@@ -29,6 +29,27 @@ pub struct BookReadingStats {
     pub last_read_date: String,
 }
 
+/// 备份导出用: reading_stats 全量按日行。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyStatsRow {
+    pub date: String,
+    pub seconds: i64,
+    pub characters: i64,
+}
+
+/// 备份导出用: reading_book_stats 全量原始行(按日按书)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookStatsRow {
+    pub date: String,
+    pub book_url: String,
+    pub book_name: String,
+    pub book_author: String,
+    pub seconds: i64,
+    pub characters: i64,
+}
+
 impl ReadingStatsService {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -210,6 +231,96 @@ impl ReadingStatsService {
             .collect())
     }
 
+    /// 导出全量按日统计(无日期范围限制), 用于备份。
+    pub async fn get_all_daily(&self, user_ns: &str) -> Result<Vec<DailyStatsRow>, AppError> {
+        let rows = sqlx::query(
+            "SELECT date, seconds, characters FROM reading_stats
+             WHERE user_ns = ?1 ORDER BY date ASC",
+        )
+        .bind(user_ns)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| DailyStatsRow {
+                date: row.get("date"),
+                seconds: row.get("seconds"),
+                characters: row.get("characters"),
+            })
+            .collect())
+    }
+
+    /// 导出全量按书统计原始行(按日按书), 用于备份。
+    pub async fn get_all_book_rows(&self, user_ns: &str) -> Result<Vec<BookStatsRow>, AppError> {
+        let rows = sqlx::query(
+            "SELECT date, book_url, book_name, book_author, seconds, characters
+             FROM reading_book_stats WHERE user_ns = ?1 ORDER BY date ASC",
+        )
+        .bind(user_ns)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| BookStatsRow {
+                date: row.get("date"),
+                book_url: row.get("book_url"),
+                book_name: row.get("book_name"),
+                book_author: row.get("book_author"),
+                seconds: row.get("seconds"),
+                characters: row.get("characters"),
+            })
+            .collect())
+    }
+
+    /// 用备份数据整体替换该用户的统计(覆盖式恢复)。
+    pub async fn replace_all(
+        &self,
+        user_ns: &str,
+        daily: &[DailyStatsRow],
+        book_rows: &[BookStatsRow],
+    ) -> Result<(), AppError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM reading_stats WHERE user_ns = ?1")
+            .bind(user_ns)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM reading_book_stats WHERE user_ns = ?1")
+            .bind(user_ns)
+            .execute(&mut *tx)
+            .await?;
+
+        for row in daily {
+            sqlx::query(
+                "INSERT INTO reading_stats (user_ns, date, seconds, characters)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(user_ns)
+            .bind(row.date.trim())
+            .bind(row.seconds.max(0))
+            .bind(row.characters.max(0))
+            .execute(&mut *tx)
+            .await?;
+        }
+        for row in book_rows {
+            sqlx::query(
+                "INSERT INTO reading_book_stats
+                   (user_ns, date, book_url, book_name, book_author, seconds, characters)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(user_ns)
+            .bind(row.date.trim())
+            .bind(row.book_url.trim())
+            .bind(row.book_name.trim())
+            .bind(row.book_author.trim())
+            .bind(row.seconds.max(0))
+            .bind(row.characters.max(0))
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Delete all per-book reading stats rows for a given book. Since get_by_book
     /// now groups by book_name (not book_url), deletion must also match by book_name
     /// to remove all rows for that book across different source URLs. The book_url
@@ -293,6 +404,47 @@ mod tests {
         .await
         .unwrap();
         ReadingStatsService::new(pool)
+    }
+
+    #[tokio::test]
+    async fn replace_all_round_trips_full_history() {
+        let service = setup_service().await;
+        service
+            .add_reading(
+                "default",
+                100,
+                10,
+                Some("2026-08-01"),
+                Some("old-book"),
+                Some("旧数据"),
+                Some(""),
+            )
+            .await
+            .unwrap();
+
+        let daily = vec![DailyStatsRow {
+            date: "2026-08-11".to_string(),
+            seconds: 90,
+            characters: 12,
+        }];
+        let book_rows = vec![BookStatsRow {
+            date: "2026-08-11".to_string(),
+            book_url: "book-a".to_string(),
+            book_name: "第一本书".to_string(),
+            book_author: "作者甲".to_string(),
+            seconds: 90,
+            characters: 12,
+        }];
+        service.replace_all("default", &daily, &book_rows).await.unwrap();
+
+        let exported_daily = service.get_all_daily("default").await.unwrap();
+        let exported_books = service.get_all_book_rows("default").await.unwrap();
+        assert_eq!(exported_daily, daily);
+        assert_eq!(exported_books, book_rows);
+
+        // 其他用户命名空间不受影响(单用户应用, 仅验证隔离性)。
+        let other = service.get_all_daily("other").await.unwrap();
+        assert!(other.is_empty());
     }
 
     #[tokio::test]

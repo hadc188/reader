@@ -1,5 +1,5 @@
 export const READER_FONT_SIZE_MIN = 12
-export const READER_FONT_SIZE_MAX = 32
+export const READER_FONT_SIZE_MAX = 50
 export const READER_FONT_SIZE_STEP = 1
 
 interface ReaderFontSizeWheelInput {

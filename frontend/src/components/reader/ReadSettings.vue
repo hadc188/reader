@@ -149,15 +149,6 @@
         </div>
       </div>
 
-      <!-- 页面模式 -->
-      <div class="setting-row">
-        <label>页面模式</label>
-        <div class="btn-group">
-          <button class="opt-btn" :class="{ active: config.pageMode === 'auto' }" @click="store.updateConfig('pageMode', 'auto')">自适应</button>
-          <button class="opt-btn" :class="{ active: config.pageMode === 'mobile' }" @click="store.updateConfig('pageMode', 'mobile')">手机模式</button>
-        </div>
-      </div>
-
       <!-- 页面宽度 -->
       <div class="setting-row">
         <label>页面宽度</label>
@@ -177,10 +168,10 @@
       <div class="setting-row">
         <label>翻页方式</label>
         <div class="btn-group">
-          <button class="opt-btn" :class="{ active: config.readMethod === '上下滑动' }" @click="store.updateConfig('readMethod', '上下滑动')">上下滑动</button>
-          <button class="opt-btn" :class="{ active: config.readMethod === '左右翻页' }" @click="store.updateConfig('readMethod', '左右翻页')">左右翻页</button>
-          <button class="opt-btn" :class="{ active: config.readMethod === '上下滚动' }" @click="store.updateConfig('readMethod', '上下滚动')">上下滚动</button>
-          <button class="opt-btn" :class="{ active: config.readMethod === '上下滚动2' }" @click="store.updateConfig('readMethod', '上下滚动2')">上下滚动2</button>
+          <button class="opt-btn" :class="{ active: config.readMethod === '上下滑动' }" title="一次阅读一章内容，手动上下滚动" @click="store.updateConfig('readMethod', '上下滑动')">单章滚动</button>
+          <button class="opt-btn" :class="{ active: config.readMethod === '左右翻页' }" title="将一章内容分成多个页面，左右切换" @click="store.updateConfig('readMethod', '左右翻页')">左右分页</button>
+          <button class="opt-btn" :class="{ active: config.readMethod === '上下滚动' }" title="多章内容首尾相接，向下连续阅读" @click="store.updateConfig('readMethod', '上下滚动')">连续阅读</button>
+          <button class="opt-btn" :class="{ active: config.readMethod === '上下滚动2' }" title="连续阅读，并自动隐藏已经读过的章节" @click="store.updateConfig('readMethod', '上下滚动2')">隐藏已读</button>
         </div>
       </div>
 
@@ -239,9 +230,9 @@
       <div class="setting-row">
         <label>点击翻页</label>
         <div class="btn-group">
-          <button class="opt-btn" :class="{ active: config.clickAction === 'auto' }" @click="store.updateConfig('clickAction', 'auto')">自动翻页</button>
-          <button class="opt-btn" :class="{ active: config.clickAction === 'next' }" @click="store.updateConfig('clickAction', 'next')">仅下滚</button>
-          <button class="opt-btn" :class="{ active: config.clickAction === 'none' }" @click="store.updateConfig('clickAction', 'none')">禁用</button>
+          <button class="opt-btn" :class="{ active: config.clickAction === 'auto' }" title="点击上方后退，点击下方前进，到章节边界时自动切换章节" @click="store.updateConfig('clickAction', 'auto')">自动翻页</button>
+          <button class="opt-btn" :class="{ active: config.clickAction === 'next' }" title="点击正文上方或下方，都只向后阅读" @click="store.updateConfig('clickAction', 'next')">仅下滚</button>
+          <button class="opt-btn" :class="{ active: config.clickAction === 'none' }" title="点击正文不执行翻页或滚动" @click="store.updateConfig('clickAction', 'none')">禁用</button>
         </div>
       </div>
 

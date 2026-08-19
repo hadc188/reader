@@ -9,7 +9,7 @@
           <div class="modal-head">
             <div>
               <h2>缓存管理</h2>
-              <p>查看并清理所有书籍的本地缓存与浏览器缓存</p>
+              <p>查看并清理所有书籍的本地缓存</p>
             </div>
             <div class="head-actions">
               <button class="ghost-btn" @click="refreshData">刷新</button>
@@ -38,7 +38,7 @@
               </div>
               <div class="cache-overview">
                 <span>可离线书籍 {{ offlineReadyCount }} 本</span>
-                <span>浏览器缓存章节 {{ totalBrowserCachedCount }} 章</span>
+                <span>本地缓存章节 {{ totalServerCachedCount }} 章</span>
               </div>
             </div>
 
@@ -48,14 +48,22 @@
                 <p>{{ item.author || '未知作者' }}</p>
                 <div class="cache-stats">
                   <span>本地 {{ item.serverCachedCount }} 章</span>
-                  <span>浏览器 {{ item.browserCachedCount }} 章</span>
+                </div>
+                <div v-if="cacheProgress[item.bookUrl]" class="cache-progress">
+                  <div class="progress-text">
+                    <span>正在缓存 {{ cacheProgress[item.bookUrl].cached }}/{{ cacheProgress[item.bookUrl].total || '…' }} 章</span>
+                    <span v-if="cacheProgress[item.bookUrl].failed > 0" class="progress-failed">失败 {{ cacheProgress[item.bookUrl].failed }}</span>
+                    <span class="progress-percent">{{ progressPercent(item.bookUrl) }}%</span>
+                  </div>
+                  <div class="progress-bar">
+                    <div class="progress-fill" :style="{ width: `${progressPercent(item.bookUrl)}%` }"></div>
+                  </div>
                 </div>
               </div>
               <div class="cache-actions">
-                <button @click="cacheServer(item.book)">{{ cacheActionLabel('本地') }}</button>
-                <button @click="cacheBrowser(item.book)">{{ cacheActionLabel('浏览器') }}</button>
+                <button v-if="cacheProgress[item.bookUrl]" class="abort-btn" @click="abortCache(item.book)">中断缓存</button>
+                <button v-else @click="cacheServer(item.book)">{{ cacheActionLabel }}</button>
                 <button @click="clearServer(item.book)">清本地</button>
-                <button @click="clearBrowser(item.book)">清浏览器</button>
               </div>
             </div>
           </div>
@@ -71,9 +79,8 @@ import { useBookshelfStore } from '../stores/bookshelf'
 import { useAppStore } from '../stores/app'
 import { getBookshelfWithCacheInfo, deleteBookCache } from '../api/bookshelf'
 import type { Book } from '../types'
-import { deleteBrowserBookCache, listBrowserCacheSummary } from '../utils/browserCache'
-import { cacheBookToBrowser } from '../utils/bookCache'
-import { cacheBookSSE } from '../api/cache'
+import { cacheBookSSE, cancelCacheBook } from '../api/cache'
+import type { CacheBookProgressPayload } from '../api/cache'
 import { isLocalBook } from '../utils/localBook'
 
 const props = defineProps<{
@@ -89,11 +96,17 @@ const appStore = useAppStore()
 const loading = ref(false)
 const cacheCount = ref(50)
 const serverBooks = ref<Book[]>([])
-const browserSummaries = ref<Array<{ bookUrl: string; cachedChapterCount: number }>>([])
+
+interface CacheProgress {
+  cached: number
+  total: number
+  failed: number
+}
+
+const cacheProgress = ref<Record<string, CacheProgress>>({})
 
 const mergedBooks = computed(() => {
   const serverMap = new Map(serverBooks.value.map((book) => [book.bookUrl, book.cachedChapterCount || 0]))
-  const browserMap = new Map(browserSummaries.value.map((item) => [item.bookUrl, item.cachedChapterCount]))
 
   return shelfStore.books
     .filter((book) => !isLocalBook(book))
@@ -103,12 +116,12 @@ const mergedBooks = computed(() => {
       name: book.name,
       author: book.author,
       serverCachedCount: serverMap.get(book.bookUrl) || 0,
-      browserCachedCount: browserMap.get(book.bookUrl) || 0,
     }))
 })
 
-const offlineReadyCount = computed(() => mergedBooks.value.filter((item) => item.browserCachedCount > 0).length)
-const totalBrowserCachedCount = computed(() => mergedBooks.value.reduce((sum, item) => sum + item.browserCachedCount, 0))
+const offlineReadyCount = computed(() => mergedBooks.value.filter((item) => item.serverCachedCount > 0).length)
+const totalServerCachedCount = computed(() => mergedBooks.value.reduce((sum, item) => sum + item.serverCachedCount, 0))
+const cacheActionLabel = computed(() => cacheCount.value === 0 ? '缓存全本到本地' : `缓存后续${cacheCount.value}章到本地`)
 
 watch(() => props.modelValue, (visible) => {
   if (visible) {
@@ -120,48 +133,62 @@ function close() {
   emit('update:modelValue', false)
 }
 
-function cacheActionLabel(target: '本地' | '浏览器') {
-  return cacheCount.value === 0 ? `缓存全本到${target}` : `缓存后续${cacheCount.value}章到${target}`
-}
-
-async function awaitSafeBrowserSummary() {
-  return listBrowserCacheSummary().catch(() => [])
-}
-
 async function refreshData() {
   loading.value = true
   try {
-    const [server, browser] = await Promise.all([
-      getBookshelfWithCacheInfo().catch(() => []),
-      awaitSafeBrowserSummary(),
-    ])
-    serverBooks.value = server
-    browserSummaries.value = browser
+    serverBooks.value = await getBookshelfWithCacheInfo().catch(() => [])
   } finally {
     loading.value = false
   }
 }
 
+function progressPercent(bookUrl: string) {
+  const progress = cacheProgress.value[bookUrl]
+  if (!progress || progress.total <= 0) return 0
+  return Math.min(100, Math.round((progress.cached / progress.total) * 100))
+}
+
 function cacheServer(book: Book) {
+  if (cacheProgress.value[book.bookUrl]) return
+  cacheProgress.value = { ...cacheProgress.value, [book.bookUrl]: { cached: 0, total: 0, failed: 0 } }
+
   const sse = cacheBookSSE({ bookUrl: book.bookUrl, count: cacheCount.value, concurrentCount: 8 })
-  sse.addEventListener('end', async () => {
+  sse.addEventListener('message', (event) => {
+    const payload = event.data as CacheBookProgressPayload
+    cacheProgress.value = {
+      ...cacheProgress.value,
+      [book.bookUrl]: {
+        cached: payload.cachedCount ?? 0,
+        total: payload.totalChapters ?? 0,
+        failed: payload.failedCount ?? 0,
+      },
+    }
+  })
+  sse.addEventListener('end', async (event) => {
     sse.close()
-    appStore.showToast(`"${book.name}" 已缓存到本地`, 'success')
+    const aborted = !!(event.data as CacheBookProgressPayload).aborted
+    delete cacheProgress.value[book.bookUrl]
+    cacheProgress.value = { ...cacheProgress.value }
+    appStore.showToast(
+      aborted ? `已中断"${book.name}"的缓存` : `"${book.name}" 已缓存到本地`,
+      aborted ? 'warning' : 'success',
+    )
     await refreshData()
   })
   sse.onerror = () => {
     sse.close()
+    delete cacheProgress.value[book.bookUrl]
+    cacheProgress.value = { ...cacheProgress.value }
     appStore.showToast(`"${book.name}" 本地缓存失败`, 'error')
   }
 }
 
-async function cacheBrowser(book: Book) {
-  try {
-    await cacheBookToBrowser({ book, startIndex: 0, count: cacheCount.value || undefined })
-    appStore.showToast(`"${book.name}" 已缓存到浏览器`, 'success')
-    await refreshData()
-  } catch (error) {
-    appStore.showToast((error as Error).message || '浏览器缓存失败', 'error')
+async function abortCache(book: Book) {
+  const res = await cancelCacheBook(book.bookUrl).catch(() => null)
+  if (!res?.cancelled) {
+    // 后端已无该任务（刚结束或失败），本地状态直接清理。
+    delete cacheProgress.value[book.bookUrl]
+    cacheProgress.value = { ...cacheProgress.value }
   }
 }
 
@@ -171,11 +198,6 @@ async function clearServer(book: Book) {
   await refreshData()
 }
 
-async function clearBrowser(book: Book) {
-  await deleteBrowserBookCache(book.bookUrl)
-  appStore.showToast(`"${book.name}" 浏览器缓存已清除`, 'success')
-  await refreshData()
-}
 </script>
 
 <style scoped>
@@ -350,6 +372,48 @@ async function clearBrowser(book: Book) {
   flex-wrap: wrap;
   justify-content: flex-end;
   align-content: flex-start;
+}
+
+.abort-btn {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.cache-progress {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.progress-text {
+  display: flex;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.progress-failed {
+  color: var(--color-danger);
+}
+
+.progress-percent {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-border-light);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+  transition: width 0.2s ease;
 }
 
 @keyframes spin {

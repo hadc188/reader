@@ -139,9 +139,8 @@
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useReaderStore } from '../../stores/reader'
 import { useAppStore } from '../../stores/app'
+import { getCachedChapterUrls } from '../../api/bookshelf'
 import type { Bookmark } from '../../types'
-import { listBrowserCachedChapterUrls } from '../../utils/browserCache'
-import { isLocalBook } from '../../utils/localBook'
 
 const props = withDefaults(defineProps<{
   initialTab?: 'chapters' | 'bookmarks'
@@ -228,11 +227,14 @@ async function refreshCatalog() {
 }
 
 async function refreshCachedChapterState() {
-  if (!store.book || isLocalBook(store.book) || !store.chapters.length) {
+  if (!store.book || !store.chapters.length) {
     cachedChapterUrls.value = new Set()
     return
   }
-  cachedChapterUrls.value = await listBrowserCachedChapterUrls(store.book.bookUrl).catch(() => new Set())
+  const urls = store.chapters.map((chapter) => chapter.url).filter(Boolean)
+  cachedChapterUrls.value = new Set(
+    await getCachedChapterUrls(store.book.bookUrl, urls).catch(() => []),
+  )
 }
 
 function isChapterCached(chapterUrl?: string) {
@@ -571,8 +573,10 @@ function formatDate(ts?: number) {
 }
 
 .status-badge.read {
-  color: rgba(0,0,0,0.5);
-  background: rgba(0,0,0,0.05);
+  color: inherit;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  border-color: color-mix(in srgb, currentColor 14%, transparent);
+  opacity: 0.72;
 }
 
 .status-badge.cached {

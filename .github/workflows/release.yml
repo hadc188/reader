@@ -120,7 +120,7 @@ jobs:
         run: npm test -- --run
 
       - name: Test Rust core
-        run: cargo test --locked --lib -j 4
+        run: cargo test --lib -j 4
 
       - name: Install desktop dependencies
         working-directory: desktop

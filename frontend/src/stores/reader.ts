@@ -18,6 +18,7 @@ import {
 } from '../api/bookmark'
 import { getReplaceRules } from '../api/replaceRule'
 import type { Book, BookChapter, Bookmark, ReplaceRule } from '../types'
+import { isLocalBook } from '../utils/localBook'
 import { saveRecentReadBook } from '../utils/recentBooks'
 import {
   DEFAULT_READER_BACKGROUND_OPACITY,
@@ -38,6 +39,11 @@ const READER_SESSION_KEY = 'reader-last-session'
 const READER_READ_HISTORY_PREFIX = 'reader-read-history:'
 const READER_BACKGROUND_IMAGE_KEY = 'reader-background-image'
 const SERVER_PROGRESS_SCALE = 10000
+// 目录自动检查: 打开书后台静默检查的节流间隔 / 读到末章再翻页触发的检查节流间隔
+const TOC_OPEN_CHECK_INTERVAL_MS = 30 * 60 * 1000
+export const TOC_END_CHECK_INTERVAL_MS = 60 * 1000
+const TOC_CHECK_TIMES_KEY = 'reader-toc-check-times'
+const TOC_CHECK_TIMES_LIMIT = 200
 
 interface PersistedReaderSession {
   book: Book
@@ -1548,6 +1554,8 @@ export const useReaderStore = defineStore('reader', () => {
           appStore.showToast((error as Error).message || '读取网盘阅读进度失败', 'warning')
         })
       saveReaderSession()
+      // 打开书后台静默检查目录更新(按书 30 分钟节流), 不阻塞首屏渲染
+      void refreshTocFromSource()
     } catch (error) {
       loading.value = false
       throw error
@@ -1798,6 +1806,91 @@ export const useReaderStore = defineStore('reader', () => {
     }
   }
 
+  /* ─── 目录自动更新 ─── */
+  let tocCheckTimes: Record<string, number> | null = null
+  const tocRefreshInFlight = new Map<string, Promise<number>>()
+
+  function loadTocCheckTimes(): Record<string, number> {
+    if (tocCheckTimes) return tocCheckTimes
+    let parsed: Record<string, number> = {}
+    try {
+      const raw = localStorage.getItem(TOC_CHECK_TIMES_KEY)
+      const value = raw ? JSON.parse(raw) : {}
+      if (value && typeof value === 'object') parsed = value
+    } catch { /* 解析失败按空记录处理 */ }
+    tocCheckTimes = parsed
+    return parsed
+  }
+
+  function markTocChecked(bookUrl: string) {
+    const times = loadTocCheckTimes()
+    times[bookUrl] = Date.now()
+    const entries = Object.entries(times)
+    if (entries.length > TOC_CHECK_TIMES_LIMIT) {
+      const kept = entries.sort((a, b) => b[1] - a[1]).slice(0, TOC_CHECK_TIMES_LIMIT)
+      tocCheckTimes = Object.fromEntries(kept)
+    }
+    try {
+      localStorage.setItem(TOC_CHECK_TIMES_KEY, JSON.stringify(tocCheckTimes))
+    } catch { /* 存储写入失败时静默放弃节流记录 */ }
+  }
+
+  /** 强制重抓目录; 分页目录余下页由后端后台写入缓存, 轮询读取直到长度稳定。 */
+  async function fetchTocListWithStabilizing(): Promise<BookChapter[]> {
+    const b = book.value
+    if (!b) return []
+    const base = { bookUrl: b.bookUrl, bookSourceUrl: b.origin, tocUrl: b.tocUrl }
+    let list = await getChapterList({ ...base, refresh: 1 })
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (!list.length) break
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+      const cached = await getChapterList({ ...base })
+      if (cached.length <= list.length) break
+      list = cached
+    }
+    return list
+  }
+
+  async function performRefreshToc(minIntervalMs: number): Promise<number> {
+    const b = book.value
+    if (!b || isLocalBook(b) || !appStore.isOnline) return 0
+    const bookUrl = b.bookUrl
+    if (Date.now() - (loadTocCheckTimes()[bookUrl] || 0) < minIntervalMs) return 0
+    markTocChecked(bookUrl)
+    try {
+      const fresh = await fetchTocListWithStabilizing()
+      // 等待期间可能已切换书籍
+      if (book.value?.bookUrl !== bookUrl) return 0
+      const current = chapters.value
+      if (!current.length || fresh.length <= current.length) return 0
+      // 已有章节需完全对齐(末章 URL 一致)才静默替换, 避免源站目录重排错位阅读进度
+      if (fresh[current.length - 1]?.url !== current[current.length - 1]?.url) return 0
+      const added = fresh.length - current.length
+      chapters.value = fresh
+      saveReaderSession()
+      appStore.showToast(`目录已更新，新增 ${added} 章`, 'success')
+      return added
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * 后台静默刷新书源目录, 返回新增章节数(0 = 无更新/被节流/失败)。
+   * 打开书时按 TOC_OPEN_CHECK_INTERVAL_MS 节流; 读到末章再翻页时按更短间隔触发。
+   */
+  function refreshTocFromSource(minIntervalMs = TOC_OPEN_CHECK_INTERVAL_MS): Promise<number> {
+    const bookUrl = book.value?.bookUrl
+    if (!bookUrl) return Promise.resolve(0)
+    const existing = tocRefreshInFlight.get(bookUrl)
+    if (existing) return existing
+    const task = performRefreshToc(minIntervalMs).finally(() => {
+      if (tocRefreshInFlight.get(bookUrl) === task) tocRefreshInFlight.delete(bookUrl)
+    })
+    tocRefreshInFlight.set(bookUrl, task)
+    return task
+  }
+
   async function refreshChapters() {
     if (!book.value) return
     chaptersLoading.value = true
@@ -1805,12 +1898,8 @@ export const useReaderStore = defineStore('reader', () => {
       preloadedContent.value.clear()
       preloadingContent.clear()
       chapterPreloadGeneration += 1
-      chapters.value = await getChapterList({
-        bookUrl: book.value.bookUrl,
-        bookSourceUrl: book.value.origin,
-        tocUrl: book.value.tocUrl,
-        refresh: 1,
-      })
+      markTocChecked(book.value.bookUrl)
+      chapters.value = await fetchTocListWithStabilizing()
       const targetIndex = Math.max(0, Math.min(chapters.value.length - 1, currentIndex.value))
       if (chapters.value[targetIndex]) {
         await loadChapter(targetIndex, true)
@@ -1948,7 +2037,7 @@ export const useReaderStore = defineStore('reader', () => {
     readChapterKeys, isChapterRead, markChapterAsRead,
     replaceRules, fetchReplaceRules,
     switchSource, preloadNextChapter, preloadAroundChapter,
-    refreshChapters,
+    refreshChapters, refreshTocFromSource,
     isSpeaking, isSpeechLoading, isPaused, speechProgress, startTTS, pauseTTS, stopTTS,
     voiceList, speechConfig, speechStopAt, speechProviderLabel, openAISpeechConfigured,
     systemTtsNativeEventsReliable, systemSpeechSupported,

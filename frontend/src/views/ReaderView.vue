@@ -339,7 +339,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
-import { useReaderStore, fontPresets } from '../stores/reader'
+import { useReaderStore, fontPresets, TOC_END_CHECK_INTERVAL_MS } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { getBookInfo, getBookshelfWithCacheInfo } from '../api/bookshelf'
 import { applySystemTheme } from '../utils/systemUi'
@@ -872,8 +872,17 @@ async function prevChapter() {
 }
 
 async function nextChapter() {
-  const targetIndex = store.currentIndex + 1
-  if (targetIndex >= store.chapters.length) return
+  let targetIndex = store.currentIndex + 1
+  if (targetIndex >= store.chapters.length) {
+    // 已到目录末尾: 静默检查书源新章节(60 秒节流), 有更新则接着往下读
+    const added = await store.refreshTocFromSource(TOC_END_CHECK_INTERVAL_MS)
+    if (added <= 0) {
+      appStore.showToast('已经是最新章节了', 'success')
+      return
+    }
+    targetIndex = store.currentIndex + 1
+    if (targetIndex >= store.chapters.length) return
+  }
 
   if (!isContinuousMode.value) {
     await store.nextChapter()

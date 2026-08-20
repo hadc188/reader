@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAppStore } from './app'
 import { nightThemeIndex, useReaderStore } from './reader'
-import { getBookContent, saveBookProgress } from '../api/bookshelf'
+import { getBookContent, getChapterList, saveBookProgress } from '../api/bookshelf'
 import { syncLegadoBookProgress } from '../api/webdav'
 import { requestOpenAISpeechAudio } from '../utils/openaiSpeech'
 
@@ -54,6 +54,7 @@ describe('reader local txt chapters', () => {
       clear: vi.fn(() => storage.clear()),
     })
     vi.mocked(getBookContent).mockReset()
+    vi.mocked(getChapterList).mockReset()
     vi.mocked(saveBookProgress).mockReset()
     vi.mocked(saveBookProgress).mockResolvedValue('ok')
     vi.mocked(syncLegadoBookProgress).mockReset()
@@ -412,5 +413,108 @@ describe('reader local txt chapters', () => {
     expect(audio.currentTime).toBe(4)
 
     readerStore.stopTTS()
+  })
+})
+
+describe('reader toc auto refresh', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+      clear: vi.fn(() => storage.clear()),
+    })
+    vi.mocked(getChapterList).mockReset()
+  })
+
+  function setupRemoteBook(readerStore: ReturnType<typeof useReaderStore>) {
+    readerStore.book = {
+      name: '连载书',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+    }
+    readerStore.chapters = [{ title: '第一章', url: 'chapter-0', index: 0 }]
+  }
+
+  it('appends new chapters and toasts when the source toc grows', async () => {
+    vi.useFakeTimers()
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    setupRemoteBook(readerStore)
+    const fullList = [
+      { title: '第一章', url: 'chapter-0', index: 0 },
+      { title: '第二章', url: 'chapter-1', index: 1 },
+      { title: '第三章', url: 'chapter-2', index: 2 },
+    ]
+    vi.mocked(getChapterList).mockResolvedValue(fullList)
+
+    const task = readerStore.refreshTocFromSource()
+    await vi.advanceTimersByTimeAsync(1200)
+    await expect(task).resolves.toBe(2)
+    expect(readerStore.chapters).toHaveLength(3)
+    expect(appStore.toasts.some((toast) => toast.message.includes('目录已更新'))).toBe(true)
+  })
+
+  it('keeps the old toc when the source reorders existing chapters', async () => {
+    vi.useFakeTimers()
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    setupRemoteBook(readerStore)
+    vi.mocked(getChapterList).mockResolvedValue([
+      { title: '重排第一章', url: 'renumbered-0', index: 0 },
+      { title: '重排第二章', url: 'renumbered-1', index: 1 },
+    ])
+
+    const task = readerStore.refreshTocFromSource()
+    await vi.advanceTimersByTimeAsync(1200)
+    await expect(task).resolves.toBe(0)
+    expect(readerStore.chapters).toHaveLength(1)
+    expect(readerStore.chapters[0].url).toBe('chapter-0')
+  })
+
+  it('throttles repeated checks per book', async () => {
+    vi.useFakeTimers()
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    setupRemoteBook(readerStore)
+    vi.mocked(getChapterList).mockResolvedValue([
+      { title: '第一章', url: 'chapter-0', index: 0 },
+    ])
+
+    const first = readerStore.refreshTocFromSource()
+    await vi.advanceTimersByTimeAsync(1200)
+    await expect(first).resolves.toBe(0)
+    const callsAfterFirst = vi.mocked(getChapterList).mock.calls.length
+
+    const second = readerStore.refreshTocFromSource()
+    await expect(second).resolves.toBe(0)
+    expect(vi.mocked(getChapterList).mock.calls.length).toBe(callsAfterFirst)
+  })
+
+  it('skips local books entirely', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    readerStore.book = {
+      name: '本地书',
+      author: '本地导入',
+      origin: 'local-txt',
+      bookUrl: 'local-txt:abc123',
+    }
+    readerStore.chapters = [{ title: '第一章', url: 'local-txt:abc123#0', index: 0 }]
+
+    await expect(readerStore.refreshTocFromSource()).resolves.toBe(0)
+    expect(getChapterList).not.toHaveBeenCalled()
   })
 })

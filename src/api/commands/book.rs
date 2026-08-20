@@ -598,14 +598,9 @@ pub async fn get_chapter_list(
         ));
     };
 
-    // Check if we have cached chapters
-    if do_refresh {
-        let _ = state
-            .book_service
-            .delete_chapter_list_cache(&user_ns, &toc_url)
-            .await;
-    }
-
+    // 刷新时只跳过缓存读取, 不先删缓存: 前端会自动后台刷新目录,
+    // 失败的刷新(网络抖动/离线)必须保住旧缓存供下次离线打开; 成功时下方
+    // save_chapter_list_cache 自然覆盖。
     if !do_refresh {
         if let Ok(Some(cached)) = state
             .book_service

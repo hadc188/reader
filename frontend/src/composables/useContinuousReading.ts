@@ -26,21 +26,6 @@ export function useContinuousReading(
   let continuousStateSyncTimer: number | null = null
   let continuousGeneration = 0
 
-  function shouldHideChapter(index: number, keepIndex?: number) {
-    if (!hideReadChaptersMode.value) return false
-    if (typeof keepIndex === 'number' && index === keepIndex) return false
-    return store.isChapterRead(index)
-  }
-
-  function findNextVisibleIndex(startIndex: number, keepIndex?: number) {
-    for (let index = startIndex; index < store.chapters.length; index += 1) {
-      if (!shouldHideChapter(index, keepIndex)) {
-        return index
-      }
-    }
-    return -1
-  }
-
   async function pruneReadChapters(targetIndex = store.currentIndex) {
     if (!hideReadChaptersMode.value) return
     const kept = continuousChapters.value.filter((chapter) => chapter.index >= targetIndex)
@@ -135,10 +120,9 @@ export function useContinuousReading(
     if (generation !== continuousGeneration || !isContinuousMode.value) return
     scrollToContinuousChapter(targetIndex, smooth)
 
-    const nextIndex = hideReadChaptersMode.value
-      ? findNextVisibleIndex(targetIndex + 1, targetIndex)
-      : targetIndex + 1
-    if (nextIndex < 0) return
+    // 向后追加紧邻的下一章, 不按已读状态跳章: 「隐藏已读」只隐藏身后翻过的
+    // 章节(pruneReadChapters), 回看后再往下读应逐章推进而不是直接跳到未读章。
+    const nextIndex = targetIndex + 1
 
     void (async () => {
       const next = await buildContinuousChapter(nextIndex).catch(() => null)
@@ -174,10 +158,8 @@ export function useContinuousReading(
       // adding a section does not reliably emit another scroll event.
       while (continuousChapters.value.length) {
         const last = continuousChapters.value[continuousChapters.value.length - 1]
-        const nextIndex = hideReadChaptersMode.value
-          ? findNextVisibleIndex(last.index + 1, store.currentIndex)
-          : last.index + 1
-        if (nextIndex < 0 || nextIndex >= store.chapters.length) break
+        const nextIndex = last.index + 1
+        if (nextIndex >= store.chapters.length) break
 
         const next = await buildContinuousChapter(nextIndex)
         if (generation !== continuousGeneration || !next || getContinuousChapter(next.index)) break

@@ -47,6 +47,7 @@ const LOCAL_STORAGE_KEYS = [
   'reader-boss-key',
   'reader-hidden-features',
   'reader-auto-check-update',
+  'reader-toc-check-times',
 ]
 
 export interface WebdavBackupPayload {

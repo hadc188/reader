@@ -114,7 +114,14 @@ export function useContinuousReading(
     if (generation !== continuousGeneration || !isContinuousMode.value) return
 
     continuousChapters.value = previous ? [previous, current] : [current]
-    setContinuousActiveChapter(targetIndex, current.content, 0)
+    // 打开书/重建当前章节时保留已记录的章节进度(loadBook/loadChapter 设置的
+    // 上次阅读位置); 仅主动跳章(includePrevious)落到章节开头。若这里硬编码 0,
+    // 会把 durChapterPos 一并清零, 打开书时位置恢复读到清零后的假"服务器进度"。
+    setContinuousActiveChapter(
+      targetIndex,
+      current.content,
+      includePrevious ? 0 : store.chapterScrollProgress,
+    )
 
     await nextTick()
     if (generation !== continuousGeneration || !isContinuousMode.value) return

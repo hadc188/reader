@@ -117,4 +117,24 @@ describe('hide-read continuous mode advancement', () => {
     await pruneReadChapters(store.currentIndex + 1)
     expect(continuousChapters.value.map((chapter) => chapter.index)).toEqual([12])
   })
+
+  it('keeps the saved chapter progress when initializing at the open position', async () => {
+    const { store, initializeContinuousChapters } = setupHarness()
+    // loadBook/loadChapter 设置的上次阅读位置, 打开书时不得被初始化清零
+    store.setChapterScrollProgress(0.42)
+
+    await initializeContinuousChapters(11, false)
+
+    expect(store.chapterScrollProgress).toBe(0.42)
+    expect(store.book?.durChapterPos).toBe(4200)
+  })
+
+  it('resets progress to the chapter top on deliberate jumps', async () => {
+    const { store, initializeContinuousChapters } = setupHarness()
+    store.setChapterScrollProgress(0.42)
+
+    await initializeContinuousChapters(11, false, true)
+
+    expect(store.chapterScrollProgress).toBe(0)
+  })
 })

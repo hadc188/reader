@@ -225,6 +225,51 @@ describe('reader local txt chapters', () => {
     expect(localStorage.removeItem).toHaveBeenCalledWith('reader-background-image')
   })
 
+  it('updates the open-position snapshot when accepting newer Legado progress', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    appStore.setLegadoWebdavConfig({
+      url: 'https://dav.example.test/',
+      account: 'reader',
+      password: 'secret',
+      directory: 'legado',
+    })
+    // loadBook 快照的旧入口位置(第0章开头)
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTime: 1000,
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'chapter-0', index: 0 },
+      { title: '第二章', url: 'chapter-1', index: 1 },
+    ]
+    readerStore.content = '旧章节正文'
+    vi.mocked(syncLegadoBookProgress).mockResolvedValue({
+      configured: true,
+      uploaded: false,
+      remote: {
+        name: '测试书籍',
+        author: '测试作者',
+        durChapterIndex: 1,
+        durChapterPos: 4,
+        durChapterTime: 123456,
+        durChapterTitle: '第二章',
+      },
+    })
+    vi.mocked(getBookContent).mockResolvedValue('12345678')
+
+    await readerStore.restoreCurrentBookProgressFromLegado()
+
+    // 快照必须跟着云端进度走(用云端原始字数位置), 否则 loadSavedReadingPosition 会丢弃远端位置
+    expect(readerStore.openPosition).toEqual({ index: 1, position: 4, time: 123456 })
+  })
+
   it('restores the newer Legado chapter and position before reading', async () => {
     const appStore = useAppStore()
     const readerStore = useReaderStore()

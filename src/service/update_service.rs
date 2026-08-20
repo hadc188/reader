@@ -15,7 +15,10 @@ const APP_NAMESPACE: &str = "_app";
 const UPDATE_CACHE_NAME: &str = "version-update-cache";
 const UPDATE_PREFERENCES_NAME: &str = "version-update-preferences";
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/hadc188/reader/releases/latest";
-const UPDATE_CACHE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
+/// 成功检查的缓存有效期。设置抽屉打开时用它展示缓存结果。
+const UPDATE_CACHE_TTL_MS: i64 = 60 * 60 * 1000;
+/// 上次检查失败后的重试间隔: 网络波动不应长时间掩盖新版本。
+const UPDATE_ERROR_RETRY_MS: i64 = 15 * 60 * 1000;
 const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 /// 直连 GitHub 失败时依次尝试的镜像前缀(前缀式加速代理)。
 /// 镜像内容仍会经过大小/格式/便携包结构校验, 校验失败即丢弃。
@@ -97,8 +100,13 @@ impl UpdateService {
         let preferences = self.load_preferences().await?;
         let mut cache = self.load_cache().await?.unwrap_or_default();
         let now = now_ts() * 1000;
-        let stale =
-            cache.checked_at <= 0 || now.saturating_sub(cache.checked_at) >= UPDATE_CACHE_TTL_MS;
+        // 失败的检查用更短的重试间隔, 避免一次网络失败把新版本提示掩盖数小时。
+        let ttl = if cache.error.is_some() {
+            UPDATE_ERROR_RETRY_MS
+        } else {
+            UPDATE_CACHE_TTL_MS
+        };
+        let stale = cache.checked_at <= 0 || now.saturating_sub(cache.checked_at) >= ttl;
 
         if force || stale {
             match self.fetch_latest_release().await {

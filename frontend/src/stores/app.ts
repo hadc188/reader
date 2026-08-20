@@ -221,7 +221,10 @@ export const useAppStore = defineStore('app', () => {
   const canCheckVersionUpdate = computed(() => true)
   const hasVersionUpdateReminder = computed(() => !!versionUpdate.value?.shouldRemind)
 
-  async function checkVersionUpdate(force = false, opts: { notify?: 'toast' | 'dialog' } = {}) {
+  async function checkVersionUpdate(
+    force = false,
+    opts: { notify?: 'toast' | 'dialog'; silent?: boolean } = {},
+  ) {
     if (versionUpdateLoading.value) return versionUpdate.value
     versionUpdateLoading.value = true
     try {
@@ -238,7 +241,7 @@ export const useAppStore = defineStore('app', () => {
       }
       return info
     } catch (error) {
-      if (force) {
+      if (force && !opts.silent) {
         showToast((error as Error).message || '检查更新失败', 'error')
       }
       return null
@@ -265,7 +268,10 @@ export const useAppStore = defineStore('app', () => {
   /** 应用启动时的自动检查, 受「自动检查更新」开关控制。 */
   async function runStartupVersionCheck() {
     if (!autoCheckUpdate.value) return
-    await checkVersionUpdate(false, { notify: 'dialog' })
+    // 强制拉新: 启动检查若读缓存, 上次检查后新发布的版本要等缓存过期才可见,
+    // 用户感知就是「打开了应用却没有更新弹窗」。每次启动一次请求远低于限额。
+    // 失败静默: 离线/网络波动时不弹错误打扰。
+    await checkVersionUpdate(true, { notify: 'dialog', silent: true })
   }
 
   async function dismissVersionUpdateReminder(version = versionUpdate.value?.latestVersion || '') {

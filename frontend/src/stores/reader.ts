@@ -254,6 +254,18 @@ export const useReaderStore = defineStore('reader', () => {
   const currentIndex = ref(0)
   const content = ref('')
   const loading = ref(false)
+  /** 打开书时的入口位置快照(书架记录的章节/进度/时间)。
+   *  位置恢复只能用稳定来源(localStorage + 本快照); 活状态(durChapterPos 等)
+   *  会被初始化滚动等 UI 过程改写, 读它做恢复会拿到清零后的假数据。 */
+  const openPosition = ref<{ index: number; position: number; time: number } | null>(null)
+
+  function snapshotOpenPosition(source: Book) {
+    openPosition.value = {
+      index: source.durChapterIndex ?? 0,
+      position: typeof source.durChapterPos === 'number' ? source.durChapterPos : 0,
+      time: source.durChapterTime ?? 0,
+    }
+  }
   const chaptersLoading = ref(false)
   const bookmarks = ref<Bookmark[]>([])
   const replaceRules = ref<ReplaceRule[]>([])
@@ -585,6 +597,7 @@ export const useReaderStore = defineStore('reader', () => {
     if (!session?.book || !session.chapters?.length) return false
 
     book.value = session.book
+    snapshotOpenPosition(session.book)
     chapters.value = session.chapters
     loadReadChapterHistory(session.book)
 
@@ -794,6 +807,13 @@ export const useReaderStore = defineStore('reader', () => {
       durChapterPos: encodedRemoteProgress,
       durChapterTitle: title,
       durChapterTime: remote.durChapterTime,
+    })
+    // 云端进度是更权威的入口位置: 同步更新快照, 保证随后 loadSavedReadingPosition
+    // 把远端位置作为"服务器来源"参与比较(否则快照停留书架旧值, 云端进度被丢弃)。
+    // 跨章时 remoteProgress 编码为 0, 快照须用云端原始字数位置(pendingLegadoProgress)。
+    snapshotOpenPosition({
+      ...book.value,
+      durChapterPos: pendingLegadoProgress.value?.position ?? encodedRemoteProgress,
     })
     saveReaderSession()
     appStore.showToast('已读取手机端阅读进度', 'success')
@@ -1522,6 +1542,7 @@ export const useReaderStore = defineStore('reader', () => {
     preloadingContent.clear()
     chapterPreloadGeneration += 1
     book.value = b
+    snapshotOpenPosition(b)
     appStore.setReadingSessionBook(b.bookUrl, b.name)
     chapters.value = []
     content.value = ''
@@ -1977,6 +1998,7 @@ export const useReaderStore = defineStore('reader', () => {
 
   function clear() {
     book.value = null
+    openPosition.value = null
     chapters.value = []
     content.value = ''
     currentIndex.value = 0
@@ -2020,7 +2042,7 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   return {
-    book, chapters, currentIndex, content, loading, chaptersLoading,
+    book, chapters, currentIndex, content, loading, chaptersLoading, openPosition,
     currentChapter, hasNext, hasPrev, readingProgress,
       loadBook, loadChapter, fetchChapterContent, setActiveChapterState, refreshContent, nextChapter, prevChapter, clear,
       chapterScrollProgress, setChapterScrollProgress,

@@ -385,8 +385,7 @@ interface SavedReadingPosition {
 const CONTINUOUS_POSITION_ANCHOR_RATIO = 0.12
 
 function debugPositionLog(message: string, payload?: unknown) {
-  void message
-  void payload
+  console.log('[pos]', message, payload ?? '')
 }
 
 const config = computed(() => store.config)
@@ -411,6 +410,23 @@ let persistPositionTimer: number | null = null
 const pendingRestorePosition = ref<SavedReadingPosition | null>(null)
 let pendingRestoreAttempts = 0
 let skipPositionRestoreIndex: number | null = null
+let skipPositionRestoreUntil = 0
+
+/** 标记某章节的进入来自滚动/主动跳转, 无需恢复上次阅读位置。带 1 秒过期,
+ *  避免残留标记误吞后续打开书籍时的位置恢复(如阅读器内书架换书不重挂载)。 */
+function markSkipPositionRestore(index: number) {
+  skipPositionRestoreIndex = index
+  skipPositionRestoreUntil = Date.now() + 1000
+}
+
+function shouldSkipPositionRestore(index: number) {
+  if (skipPositionRestoreIndex == null) return false
+  if (Date.now() >= skipPositionRestoreUntil) {
+    skipPositionRestoreIndex = null
+    return false
+  }
+  return skipPositionRestoreIndex === index
+}
 let suppressPositionSaveUntil = 0
 let suppressContinuousScrollSyncUntil = 0
 let suppressContinuousAutoLoadUntil = 0
@@ -844,6 +860,8 @@ async function jumpToRenderedContinuousChapter(targetIndex: number) {
   suppressContinuousScrollSyncUntil = Date.now() + 500
   suppressContinuousAutoLoadUntil = Date.now() + 500
   previousAutoLoadArmed.value = false
+  // 主动跳章落在章节开头, 不恢复上次位置
+  markSkipPositionRestore(targetIndex)
   setContinuousActiveChapter(targetIndex, chapter.content, 0)
   // Marking the chapter read queues pruneReadChapters (hide-read mode) via
   // the currentIndex watcher. Wait for that prune and its scroll compensation
@@ -897,7 +915,7 @@ async function nextChapter() {
 async function jumpFromCatalog(targetIndex: number) {
   if (targetIndex < 0 || targetIndex >= store.chapters.length) return
 
-  skipPositionRestoreIndex = targetIndex
+  markSkipPositionRestore(targetIndex)
   pendingRestorePosition.value = null
   pendingRestoreAttempts = 0
   clearRestoreStabilizers()
@@ -936,6 +954,8 @@ async function jumpFromCatalog(targetIndex: number) {
 async function rebuildContinuousAtChapter(targetIndex: number) {
   suppressContinuousScrollSyncUntil = Date.now() + 500
   suppressContinuousAutoLoadUntil = Date.now() + 500
+  // 重建后落在目标章节开头, 不恢复上次位置
+  markSkipPositionRestore(targetIndex)
   await initializeContinuousChapters(targetIndex, false, true)
 }
 
@@ -964,20 +984,22 @@ function normalizePositionTimestamp(value?: number | null) {
   return value < 1_000_000_000_000 ? value * 1000 : value
 }
 
+/** 从打开书时的入口快照构造位置来源(书架/会话记录的进度)。
+ *  不读活状态(durChapterPos/durChapterTime): 初始化滚动到章节顶部等过程
+ *  会把它们清零, 用清零后的假数据会压过 localStorage 里的真实位置。 */
 function buildServerSavedPosition(): SavedReadingPosition | null {
-  if (!store.book) return null
-  if (store.book.durChapterIndex !== store.currentIndex) return null
-  const rawPos = typeof store.book.durChapterPos === 'number' ? store.book.durChapterPos : 0
-  const progress = rawPos > 1 ? rawPos / 10000 : rawPos
+  const snapshot = store.openPosition
+  if (!snapshot || snapshot.index !== store.currentIndex) return null
+  const progress = snapshot.position > 1 ? snapshot.position / 10000 : snapshot.position
   return {
-    chapterIndex: store.currentIndex,
+    chapterIndex: snapshot.index,
     progress: Math.max(0, Math.min(1, progress || 0)),
-    updatedAt: normalizePositionTimestamp(store.book.durChapterTime),
+    updatedAt: normalizePositionTimestamp(snapshot.time),
   }
 }
 
 function loadSavedReadingPosition() {
-  if (skipPositionRestoreIndex === store.currentIndex) {
+  if (shouldSkipPositionRestore(store.currentIndex)) {
     skipPositionRestoreIndex = null
     pendingRestorePosition.value = null
     pendingRestoreAttempts = 0
@@ -1008,7 +1030,14 @@ function loadSavedReadingPosition() {
     }
 
     if (serverSaved && serverSaved.chapterIndex === store.currentIndex) {
-      if (!selected || normalizePositionTimestamp(serverSaved.updatedAt) > normalizePositionTimestamp(selected.updatedAt)) {
+      // 两个来源进度一致时保留本地(带段落级精度 paragraphIndex);
+      // 服务器位置只在实际更新(跨设备同步)时采用。
+      const agreeWithLocal = !!selected
+        && Math.abs((serverSaved.progress || 0) - (selected.progress || 0)) < 0.02
+      if (
+        !agreeWithLocal
+        && (!selected || normalizePositionTimestamp(serverSaved.updatedAt) > normalizePositionTimestamp(selected.updatedAt))
+      ) {
         selected = serverSaved
         source = 'server'
       }
@@ -1549,6 +1578,13 @@ function handleScroll() {
       const progress = Math.max(0, Math.min(1, (container.scrollTop - activeSection.offsetTop) / sectionRange))
       if (activeChapter) {
         if (store.currentIndex !== activeIndex || store.content !== activeChapter.content) {
+          // 自然滚动进入新章节: 视口本身就是正确的阅读位置, 跳过位置恢复。
+          // 否则短章节下(进度接近 1)恢复会与滚动/裁剪补偿拉扯, 把视口拽到章节尾部。
+          // 仅在索引变化时标记 —— 内容差异但索引相同的分支不触发 currentIndex
+          // watcher, 标记无人消费会成为残留。
+          if (store.currentIndex !== activeIndex) {
+            markSkipPositionRestore(activeIndex)
+          }
           setContinuousActiveChapter(activeIndex, activeChapter.content, progress)
         } else {
           store.setChapterScrollProgress(progress)
@@ -2019,7 +2055,9 @@ onMounted(async () => {
   scheduleRefreshOfflineCacheState()
   updateHorizontalMetrics()
   await rebuildHorizontalPages()
-  if (isContinuousMode.value) {
+  // 章节列表 watcher(2114)可能已完成初始化并应用了位置恢复; 这里只在列表
+  // 尚未初始化时补一次, 否则重复初始化会把已恢复的视口拽回章节开头。
+  if (isContinuousMode.value && !continuousChapters.value.length) {
     await initializeContinuousChapters(store.currentIndex, false)
   }
   scheduleRestoreReadingPosition()
@@ -2116,6 +2154,9 @@ watch(
   async ([chapterCount, chaptersLoading, loadingNow, continuousMode]) => {
     if (!continuousMode || !chapterCount || chaptersLoading || loadingNow || continuousChapters.value.length) return
     await initializeContinuousChapters(store.currentIndex, false)
+    // 打开书籍期间位置恢复的重试预算(~1 秒)可能被目录网络耗时耗尽,
+    // 章节就绪后在这里重新读取保存位置再调度恢复。
+    loadSavedReadingPosition()
     scheduleRestoreReadingPosition()
   },
   { immediate: true },

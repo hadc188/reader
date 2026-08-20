@@ -170,6 +170,23 @@
               <small class="boss-key-hint">需包含 Ctrl、Alt 或 Shift，F1 至 F12 可单独使用</small>
             </div>
             <template v-if="appStore.canCheckVersionUpdate">
+              <div class="setting-switch-row">
+                <div class="setting-switch-copy">
+                  <span>自动检查更新</span>
+                  <small>{{ appStore.autoCheckUpdate ? '启动时检查版本，有更新时弹窗提示' : '启动时不检查版本更新' }}</small>
+                </div>
+                <button
+                  class="switch-control"
+                  :class="{ on: appStore.autoCheckUpdate }"
+                  type="button"
+                  role="switch"
+                  :aria-checked="appStore.autoCheckUpdate"
+                  aria-label="自动检查更新"
+                  @click="appStore.setAutoCheckUpdate(!appStore.autoCheckUpdate)"
+                >
+                  <span></span>
+                </button>
+              </div>
               <div
                 class="status-card"
                 :class="{ accent: appStore.hasVersionUpdateReminder, muted: appStore.versionUpdateLoading && !appStore.desktopUpdateLoading }"

@@ -5,14 +5,13 @@ type ReaderStore = ReturnType<typeof useReaderStore>
 const OPENAI_SPEECH_CHUNK_CHAR_LIMIT = 70
 const OPENAI_PRELOAD_CHUNK_LIMIT = 5
 const OPENAI_MERGED_SEGMENT_CHAR_LIMIT = 260
+/** 手动输入暂停自动滚动后, 静止多久恢复滚动。 */
+const AUTO_SCROLL_MANUAL_RESUME_MS = 1200
 
 interface AutoPlaybackConfig {
-  autoPageMode: string
   clickAction: string
-  scrollPixel: number
-  pageSpeed: number
-  fontSize: number
-  lineHeight: number
+  /** 自动滚动速度, 像素/秒。 */
+  autoScrollSpeed: number
 }
 
 interface SpeechSegment {
@@ -44,9 +43,9 @@ export function useReaderAutoPlayback(
   prevChapter: () => void | Promise<void>,
 ) {
   let autoScrollId: number | null = null
-  let autoParagraphTimer: number | null = null
-  let autoReadingParagraphIndex = -1
-  let autoReadingProcessing = false
+  let autoScrollResumeTimer: number | null = null
+  let lastAutoScrollTime = 0
+  let autoScrollRemainder = 0
   let speechRestartTimer: number | null = null
   let isSpeechTransitioning = false
   let currentSpeechParagraph: HTMLElement | null = null
@@ -348,13 +347,24 @@ export function useReaderAutoPlayback(
     showParagraph(paragraph)
   }
 
-  function runAutoScroll() {
+  function runAutoScroll(timestamp?: number) {
     if (!store.isAutoScrolling || !scrollContainerRef.value) return
 
     const container = scrollContainerRef.value
-    const speed = Math.max(1, config.value.scrollPixel) * (config.value.pageSpeed / 1000) * 0.5
+    // 按真实帧间隔折算位移, 高刷新率屏幕下速度不变。
+    const now = timestamp ?? performance.now()
+    const deltaMs = lastAutoScrollTime ? Math.min(100, now - lastAutoScrollTime) : 16
+    lastAutoScrollTime = now
 
-    container.scrollTop += speed
+    // 必须显式 instant: 容器 CSS 是 scroll-behavior: smooth, 直接赋 scrollTop
+    // 会被转成慢启动的平滑动画, 每帧重启动画的起步段, 步长越大实际越慢。
+    // 位移按整像素滚动, 不足 1px 的部分累积到下一帧, 低速(如 2px/秒)也能匀速前进。
+    const raw = (config.value.autoScrollSpeed * deltaMs) / 1000 + autoScrollRemainder
+    const whole = Math.floor(raw)
+    autoScrollRemainder = raw - whole
+    if (whole >= 1) {
+      container.scrollBy({ top: whole, behavior: 'instant' })
+    }
 
     if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
       if (config.value.clickAction === 'auto' && store.hasNext) {
@@ -367,72 +377,39 @@ export function useReaderAutoPlayback(
     }
   }
 
-  function runAutoParagraph() {
-    if (!store.isAutoScrolling) return
-    if (autoReadingProcessing) return
-
-    const list = getFilteredParagraphs()
-    if (!list.length) return
-
-    autoReadingProcessing = true
-
-    if (autoReadingParagraphIndex < 0) {
-      const current = getCurrentParagraph()
-      autoReadingParagraphIndex = current ? Math.max(0, list.indexOf(current)) : 0
-    }
-
-    if (autoReadingParagraphIndex >= list.length) {
-      autoReadingParagraphIndex = -1
-      autoReadingProcessing = false
-      if (store.hasNext) {
-        Promise.resolve(nextChapter()).then(() => {
-          window.setTimeout(() => {
-            if (store.isAutoScrolling && config.value.autoPageMode === 'paragraph') {
-              runAutoParagraph()
-            }
-          }, 300)
-        })
-      } else {
-        stopAutoScroll()
-      }
-      return
-    }
-
-    const current = list[autoReadingParagraphIndex]
-    markReadingParagraph(current)
-    showParagraph(current)
-
-    const estimatedLineCount = Math.max(1, Math.ceil(current.offsetHeight / (config.value.fontSize * config.value.lineHeight)))
-    const delayTime = Math.max(300, config.value.pageSpeed * estimatedLineCount)
-
-    autoReadingProcessing = false
-    autoParagraphTimer = window.setTimeout(() => {
-      autoReadingParagraphIndex += 1
-      runAutoParagraph()
-    }, delayTime)
-  }
-
   function startAutoScroll() {
-    if (config.value.autoPageMode === 'paragraph') {
-      if (autoParagraphTimer) return
-      runAutoParagraph()
-      return
-    }
     if (autoScrollId) return
+    lastAutoScrollTime = 0
+    autoScrollRemainder = 0
     runAutoScroll()
   }
 
-  function stopAutoScroll() {
-    store.isAutoScrolling = false
-    autoReadingParagraphIndex = -1
-    autoReadingProcessing = false
+  /**
+   * 手动输入(滚轮/触摸/点击/按键)时暂停自动滚动, 静止片刻后自动恢复。
+   * 自动滚动期间用户仍可自由拖动阅读位置。
+   */
+  function pauseAutoScrollForManualInput() {
+    if (!store.isAutoScrolling) return
     if (autoScrollId) {
       cancelAnimationFrame(autoScrollId)
       autoScrollId = null
     }
-    if (autoParagraphTimer) {
-      clearTimeout(autoParagraphTimer)
-      autoParagraphTimer = null
+    if (autoScrollResumeTimer) clearTimeout(autoScrollResumeTimer)
+    autoScrollResumeTimer = window.setTimeout(() => {
+      autoScrollResumeTimer = null
+      if (store.isAutoScrolling) startAutoScroll()
+    }, AUTO_SCROLL_MANUAL_RESUME_MS)
+  }
+
+  function stopAutoScroll() {
+    store.isAutoScrolling = false
+    if (autoScrollId) {
+      cancelAnimationFrame(autoScrollId)
+      autoScrollId = null
+    }
+    if (autoScrollResumeTimer) {
+      clearTimeout(autoScrollResumeTimer)
+      autoScrollResumeTimer = null
     }
     if (!store.isSpeaking) {
       clearReadingClass()
@@ -682,25 +659,6 @@ export function useReaderAutoPlayback(
     isSpeechTransitioning = false
   }
 
-  function resetAutoParagraphIndex() {
-    autoReadingParagraphIndex = -1
-  }
-
-  function handleContentChanged() {
-    autoReadingParagraphIndex = -1
-    if (store.isAutoScrolling && config.value.autoPageMode === 'paragraph') {
-      if (autoParagraphTimer) {
-        clearTimeout(autoParagraphTimer)
-        autoParagraphTimer = null
-      }
-      window.setTimeout(() => {
-        if (store.isAutoScrolling && config.value.autoPageMode === 'paragraph') {
-          runAutoParagraph()
-        }
-      }, 100)
-    }
-  }
-
   function disposeAutoPlayback() {
     cancelSpeechTransition()
     stopAutoScroll()
@@ -711,13 +669,12 @@ export function useReaderAutoPlayback(
     clearReadingClass,
     startAutoScroll,
     stopAutoScroll,
+    pauseAutoScrollForManualInput,
     startSpeech,
     speechPrev,
     speechNext,
     restartSpeechFromCurrentParagraph,
     cancelSpeechTransition,
-    resetAutoParagraphIndex,
-    handleContentChanged,
     disposeAutoPlayback,
   }
 }

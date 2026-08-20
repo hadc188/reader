@@ -22,6 +22,7 @@
     <SourceManager v-model="appStore.showSourceManager" />
     <WebdavManager v-model="appStore.showWebdavManager" />
     <ConfirmDialog />
+    <UpdateProgressDialog />
     <ContextMenu />
 
     <!-- Toast notifications -->
@@ -52,6 +53,7 @@ import SettingsDrawer from './components/SettingsDrawer.vue'
 import SourceManager from './components/SourceManager.vue'
 import WebdavManager from './components/WebdavManager.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import UpdateProgressDialog from './components/UpdateProgressDialog.vue'
 import ContextMenu from './components/ContextMenu.vue'
 import TitleBar from './components/TitleBar.vue'
 import { resolveWindowClose } from './utils/windowClose'
@@ -88,7 +90,7 @@ const stopBackgroundClassSync = watch(showCustomBackground, (active) => {
 }, { immediate: true })
 
 onMounted(() => {
-  void appStore.checkVersionUpdate()
+  void appStore.runStartupVersionCheck()
   void appStore.applyBossKey().catch(() => undefined)
   void appStore.applyNetworkProxy().catch(() => undefined)
 })

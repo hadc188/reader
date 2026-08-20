@@ -43,6 +43,19 @@ impl HttpClient {
             .clone()
     }
 
+    /// 当前是否有代理生效。
+    pub fn active_proxy(&self) -> Option<String> {
+        self.active_proxy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// 完全不走代理的直连客户端。用于代理出口 IP 被目标站点限流时的回退。
+    pub fn client_direct(&self) -> anyhow::Result<Client> {
+        build_client(self.timeout_secs, None)
+    }
+
     pub fn client_with_proxy(&self, proxy: Option<&str>) -> anyhow::Result<Client> {
         match proxy.map(str::trim).filter(|value| !value.is_empty()) {
             Some(value) => {

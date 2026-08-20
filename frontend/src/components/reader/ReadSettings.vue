@@ -102,23 +102,37 @@
         </div>
       </div>
       <!-- 字体大小 -->
-      <div class="setting-row">
-        <label>字体大小</label>
-        <div class="stepper">
-          <button class="step-btn" @click="step('fontSize', -1, READER_FONT_SIZE_MIN, READER_FONT_SIZE_MAX)">A-</button>
-          <span class="step-val">{{ config.fontSize }}</span>
-          <button class="step-btn" @click="step('fontSize', 1, READER_FONT_SIZE_MIN, READER_FONT_SIZE_MAX)">A+</button>
+      <div class="setting-row slider-row">
+        <div class="slider-head">
+          <label>字体大小</label>
+          <span class="slider-value">{{ config.fontSize }}</span>
         </div>
+        <input
+          type="range"
+          class="settings-slider"
+          :min="READER_FONT_SIZE_MIN"
+          :max="READER_FONT_SIZE_MAX"
+          step="1"
+          :value="config.fontSize"
+          @input="updateSlider('fontSize', $event)"
+        >
       </div>
 
       <!-- 字体粗细 -->
-      <div class="setting-row">
-        <label>字体粗细</label>
-        <div class="stepper">
-          <button class="step-btn" @click="step('fontWeight', -100, 100, 900)">—</button>
-          <span class="step-val">{{ config.fontWeight }}</span>
-          <button class="step-btn" @click="step('fontWeight', 100, 100, 900)">+</button>
+      <div class="setting-row slider-row">
+        <div class="slider-head">
+          <label>字体粗细</label>
+          <span class="slider-value">{{ config.fontWeight }}</span>
         </div>
+        <input
+          type="range"
+          class="settings-slider"
+          min="100"
+          max="900"
+          step="100"
+          :value="config.fontWeight"
+          @input="updateSlider('fontWeight', $event)"
+        >
       </div>
 
       <!-- 段落行高 -->
@@ -176,20 +190,27 @@
       </div>
 
       <!-- 动画时长 -->
-      <div class="setting-row">
-        <label>动画时长</label>
-        <div class="stepper">
-          <button class="step-btn" @click="step('animateDuration', -50, 0, 1000)">—</button>
-          <span class="step-val">{{ config.animateDuration }}</span>
-          <button class="step-btn" @click="step('animateDuration', 50, 0, 1000)">+</button>
+      <div class="setting-row slider-row">
+        <div class="slider-head">
+          <label>动画时长</label>
+          <span class="slider-value">{{ config.animateDuration === 0 ? '关闭' : `${config.animateDuration} ms` }}</span>
         </div>
+        <input
+          type="range"
+          class="settings-slider"
+          min="0"
+          max="1000"
+          step="50"
+          :value="config.animateDuration"
+          @input="updateSlider('animateDuration', $event)"
+        >
       </div>
 
       <!-- 自动阅读 -->
       <div class="setting-row">
         <label>自动阅读</label>
-        <button 
-          class="opt-btn wide" 
+        <button
+          class="opt-btn wide"
           :class="{ active: store.isAutoScrolling }"
           @click="store.isAutoScrolling = !store.isAutoScrolling"
         >
@@ -197,33 +218,21 @@
         </button>
       </div>
 
-      <!-- 自动翻页模式 -->
-      <div class="setting-row">
-        <label>滚动方式</label>
-        <div class="btn-group">
-          <button class="opt-btn" :class="{ active: config.autoPageMode === 'pixel' }" @click="store.updateConfig('autoPageMode', 'pixel')">像素滚动</button>
-          <button class="opt-btn" :class="{ active: config.autoPageMode === 'paragraph' }" @click="store.updateConfig('autoPageMode', 'paragraph')">段落滚动</button>
-        </div>
-      </div>
-
-      <!-- 滚动像素 -->
-      <div class="setting-row">
-        <label>滚动像素</label>
-        <div class="stepper">
-          <button class="step-btn" @click="step('scrollPixel', -1, 1, 10)">—</button>
-          <span class="step-val">{{ config.scrollPixel }}</span>
-          <button class="step-btn" @click="step('scrollPixel', 1, 1, 10)">+</button>
-        </div>
-      </div>
-
       <!-- 滚动速度 -->
-      <div class="setting-row">
-        <label>垂直速度</label>
-        <div class="stepper">
-          <button class="step-btn" @click="step('pageSpeed', -100, 100, 5000)">—</button>
-          <span class="step-val">{{ config.pageSpeed }}</span>
-          <button class="step-btn" @click="step('pageSpeed', 100, 100, 5000)">+</button>
+      <div class="setting-row slider-row">
+        <div class="slider-head">
+          <label>滚动速度</label>
+          <span class="slider-value">{{ config.autoScrollSpeed }} px/秒</span>
         </div>
+        <input
+          type="range"
+          class="settings-slider"
+          min="0"
+          max="100"
+          step="1"
+          :value="autoScrollSpeedSlider"
+          @input="updateAutoScrollSpeedSlider"
+        >
       </div>
 
       <!-- 点击翻页 (全屏热区) -->
@@ -490,9 +499,43 @@ function isThemeActive(index: number) {
     : !store.isNight && store.themeIndex === index
 }
 
-function step(key: 'fontSize' | 'fontWeight' | 'pageWidth' | 'animateDuration' | 'scrollPixel' | 'pageSpeed', delta: number, min: number, max: number) {
+function step(key: 'pageWidth', delta: number, min: number, max: number) {
   const val = Math.max(min, Math.min(max, (config.value[key] as number) + delta))
   store.updateConfig(key, val)
+}
+
+function updateSlider(key: 'fontSize' | 'fontWeight' | 'animateDuration', event: Event) {
+  const value = Number((event.target as HTMLInputElement).value)
+  if (Number.isFinite(value)) {
+    store.updateConfig(key, value)
+  }
+}
+
+// 滚动速度用对数刻度映射到滑条(2 → 500 px/秒):
+// 低速段调节精细, 高速段跨度大, 全程都好拖。
+const AUTO_SCROLL_SPEED_MIN = 2
+const AUTO_SCROLL_SPEED_MAX = 500
+
+const autoScrollSpeedSlider = computed(() => speedToSlider(config.value.autoScrollSpeed))
+
+function updateAutoScrollSpeedSlider(event: Event) {
+  const sliderValue = Number((event.target as HTMLInputElement).value)
+  if (!Number.isFinite(sliderValue)) return
+  store.updateConfig('autoScrollSpeed', sliderToSpeed(sliderValue))
+}
+
+function sliderToSpeed(sliderValue: number) {
+  const ratio = Math.pow(AUTO_SCROLL_SPEED_MAX / AUTO_SCROLL_SPEED_MIN, sliderValue / 100)
+  return Math.max(
+    AUTO_SCROLL_SPEED_MIN,
+    Math.min(AUTO_SCROLL_SPEED_MAX, Math.round(AUTO_SCROLL_SPEED_MIN * ratio)),
+  )
+}
+
+function speedToSlider(speed: number) {
+  const sliderValue = 100 * Math.log(Math.max(AUTO_SCROLL_SPEED_MIN, speed) / AUTO_SCROLL_SPEED_MIN)
+    / Math.log(AUTO_SCROLL_SPEED_MAX / AUTO_SCROLL_SPEED_MIN)
+  return Math.max(0, Math.min(100, Math.round(sliderValue)))
 }
 
 function stepFloat(key: 'lineHeight' | 'paragraphSpacing', delta: number, min: number, max: number) {
@@ -806,6 +849,68 @@ onMounted(async () => {
   border-radius: 20px;
   border: 1px solid rgba(0,0,0,0.12);
   overflow: hidden;
+}
+
+/* Sliders */
+.slider-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.slider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.slider-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+.settings-slider {
+  width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.settings-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--settings-font, currentColor) 20%, transparent);
+}
+
+.settings-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--settings-font, currentColor);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+.settings-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--settings-font, currentColor) 20%, transparent);
+}
+
+.settings-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--settings-font, currentColor);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 
 .step-btn {

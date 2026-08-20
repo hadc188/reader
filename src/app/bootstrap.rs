@@ -36,7 +36,7 @@ pub async fn build_state(cfg: &AppConfig) -> anyhow::Result<AppState> {
     let parser = RuleEngine::new()?;
     let cache = FileCache::new(format!("{}/cache", cfg.storage_dir));
 
-    let book_service = Arc::new(BookService::new(http, parser, cache, &cfg.storage_dir));
+    let book_service = Arc::new(BookService::new(http.clone(), parser, cache, &cfg.storage_dir));
     let book_source_service = Arc::new(BookSourceService::new(repo, &cfg.storage_dir));
     let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
     let local_epub_book_service = Arc::new(LocalEpubBookService::new(&cfg.storage_dir));
@@ -48,9 +48,9 @@ pub async fn build_state(cfg: &AppConfig) -> anyhow::Result<AppState> {
     let reading_stats_service = Arc::new(ReadingStatsService::new(pool.clone()));
     let update_service = Arc::new(UpdateService::new(
         json_document_service.clone(),
-        cfg.request_timeout_secs,
+        http.clone(),
         format!("v{}", env!("CARGO_PKG_VERSION")),
-    )?);
+    ));
 
     Ok(AppState {
         config: cfg.clone(),

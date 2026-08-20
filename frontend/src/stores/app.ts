@@ -192,6 +192,26 @@ export const useAppStore = defineStore('app', () => {
   }
 
   // ─── User (single-user desktop: no auth) ───
+  const AUTO_CHECK_UPDATE_KEY = 'reader-auto-check-update'
+  const initialAutoCheckUpdate = (() => {
+    try {
+      return localStorage.getItem(AUTO_CHECK_UPDATE_KEY) !== '0'
+    } catch {
+      return true
+    }
+  })()
+  /** 启动时自动检查版本更新并在有更新时弹窗提示。 */
+  const autoCheckUpdate = ref(initialAutoCheckUpdate)
+
+  function setAutoCheckUpdate(value: boolean) {
+    autoCheckUpdate.value = value
+    try {
+      localStorage.setItem(AUTO_CHECK_UPDATE_KEY, value ? '1' : '0')
+    } catch {
+      // Ignore unavailable storage; keep runtime state anyway.
+    }
+  }
+
   const versionUpdate = ref<VersionUpdateInfo | null>(null)
   const versionUpdateLoading = ref(false)
   const desktopUpdateLoading = ref(false)
@@ -201,7 +221,7 @@ export const useAppStore = defineStore('app', () => {
   const canCheckVersionUpdate = computed(() => true)
   const hasVersionUpdateReminder = computed(() => !!versionUpdate.value?.shouldRemind)
 
-  async function checkVersionUpdate(force = false) {
+  async function checkVersionUpdate(force = false, opts: { notify?: 'toast' | 'dialog' } = {}) {
     if (versionUpdateLoading.value) return versionUpdate.value
     versionUpdateLoading.value = true
     try {
@@ -210,7 +230,11 @@ export const useAppStore = defineStore('app', () => {
       versionUpdateChecked.value = true
       if (info.shouldRemind && info.latestVersion && versionUpdateToastVersion !== info.latestVersion) {
         versionUpdateToastVersion = info.latestVersion
-        showToast(`发现新版本 ${info.latestVersion}`, 'warning')
+        if (opts.notify === 'dialog') {
+          void promptVersionUpdate(info)
+        } else {
+          showToast(`发现新版本 ${info.latestVersion}`, 'warning')
+        }
       }
       return info
     } catch (error) {
@@ -221,6 +245,27 @@ export const useAppStore = defineStore('app', () => {
     } finally {
       versionUpdateLoading.value = false
     }
+  }
+
+  async function promptVersionUpdate(info: VersionUpdateInfo) {
+    const go = await confirmDialog(
+      `最新版本 ${info.latestVersion} 已发布，是否立即更新？\n（下载已自动接入系统/应用代理，直连失败时会尝试镜像加速）`,
+      { title: '发现新版本' },
+    )
+    if (!go) return
+    // 直接在更新进度弹窗中展示下载进度并开始应用内更新。
+    updateDialogVisible.value = true
+    const result = await applyDesktopUpdate()
+    if (!result && desktopUpdateProgress.value?.stage !== 'failed') {
+      // 未真正开始下载(如已是最新版本), 不停留在进度弹窗。
+      updateDialogVisible.value = false
+    }
+  }
+
+  /** 应用启动时的自动检查, 受「自动检查更新」开关控制。 */
+  async function runStartupVersionCheck() {
+    if (!autoCheckUpdate.value) return
+    await checkVersionUpdate(false, { notify: 'dialog' })
   }
 
   async function dismissVersionUpdateReminder(version = versionUpdate.value?.latestVersion || '') {
@@ -246,6 +291,12 @@ export const useAppStore = defineStore('app', () => {
   // ─── UI State ───
   const showLoginModal = ref(false)
   const showSettingsDrawer = ref(false)
+  /** 更新进度弹窗(确认更新后直接展示下载进度, 不跳转设置抽屉)。 */
+  const updateDialogVisible = ref(false)
+
+  function closeUpdateProgressDialog() {
+    updateDialogVisible.value = false
+  }
   const showSourceManager = ref(false)
   const showUserManager = ref(false)
   const showWebdavManager = ref(false)
@@ -426,8 +477,10 @@ export const useAppStore = defineStore('app', () => {
     bossKeyEnabled, bossKeyShortcut, applyBossKey, setBossKeyEnabled, setBossKeyShortcut,
     networkProxyMode, networkProxyUrl, networkProxyStatus, applyNetworkProxy, setNetworkProxy,
     versionUpdate, versionUpdateLoading, desktopUpdateLoading, desktopUpdateProgress, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
+    autoCheckUpdate, setAutoCheckUpdate, runStartupVersionCheck,
     checkVersionUpdate, dismissVersionUpdateReminder, applyDesktopUpdate,
     showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager,
+    updateDialogVisible, closeUpdateProgressDialog,
     isOnline, setOnlineStatus,
     readingStats, readingStatsSummary, startReadingSession, stopReadingSession, setReadingSessionBook, markBookOpened, markChapterRead,
     toasts, showToast,

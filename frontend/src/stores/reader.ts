@@ -59,9 +59,8 @@ export interface ReadConfig {
   pageWidth: number
   readMethod: '上下滑动' | '左右翻页' | '上下滚动' | '上下滚动2'
   animateDuration: number
-  autoPageMode: 'pixel' | 'paragraph'
-  scrollPixel: number
-  pageSpeed: number
+  /** 自动阅读滚动速度, 像素/秒。 */
+  autoScrollSpeed: number
   clickAction: 'next' | 'auto' | 'none'
   selectAction: 'popup' | 'ignore'
   chineseMode: 'simplified' | 'traditional'
@@ -82,9 +81,7 @@ const defaultConfig: ReadConfig = {
   pageWidth: 800,
   readMethod: '上下滑动',
   animateDuration: 300,
-  autoPageMode: 'pixel',
-  scrollPixel: 1,
-  pageSpeed: 1000,
+  autoScrollSpeed: 30,
   clickAction: 'auto',
   selectAction: 'ignore',
   chineseMode: 'simplified',
@@ -98,11 +95,30 @@ function loadConfig(): ReadConfig {
   try {
     const saved = localStorage.getItem('readConfig')
     if (saved) {
-      const parsed = JSON.parse(saved) as Partial<ReadConfig> & { specialMode?: unknown }
-      const { specialMode: _legacySpecialMode, ...savedConfig } = parsed
+      const parsed = JSON.parse(saved) as Partial<ReadConfig> & {
+        specialMode?: unknown
+        autoPageMode?: unknown
+        scrollPixel?: number
+        pageSpeed?: number
+      }
+      const {
+        specialMode: _legacySpecialMode,
+        autoPageMode: _legacyAutoPageMode,
+        scrollPixel: legacyScrollPixel,
+        pageSpeed: legacyPageSpeed,
+        ...savedConfig
+      } = parsed
+      // 旧版像素滚动速度 = scrollPixel × pageSpeed/1000 × 0.5 像素/帧(60fps),
+      // 折算成像素/秒 = scrollPixel × pageSpeed × 0.03, 默认组合恰为 30。
+      const legacyAutoScrollSpeed = typeof legacyScrollPixel === 'number' && typeof legacyPageSpeed === 'number'
+        ? legacyScrollPixel * legacyPageSpeed * 0.03
+        : defaultConfig.autoScrollSpeed
       return {
         ...defaultConfig,
         ...savedConfig,
+        autoScrollSpeed: typeof savedConfig.autoScrollSpeed === 'number' && savedConfig.autoScrollSpeed > 0
+          ? Math.min(500, Math.max(2, Math.round(savedConfig.autoScrollSpeed)))
+          : Math.min(500, Math.max(2, Math.round(legacyAutoScrollSpeed))),
         backgroundImage: localStorage.getItem(READER_BACKGROUND_IMAGE_KEY)
           || (typeof savedConfig.backgroundImage === 'string' ? savedConfig.backgroundImage : ''),
         backgroundOpacity: normalizeReaderBackgroundOpacity(savedConfig.backgroundOpacity),

@@ -104,7 +104,7 @@
       >
         <span class="auto-reading-indicator" aria-hidden="true"></span>
         <span class="auto-reading-label">自动翻页中</span>
-        <span class="auto-reading-mode">{{ autoReadingModeLabel }}</span>
+        <span class="auto-reading-mode">平滑</span>
         <button type="button" title="停止自动翻页" aria-label="停止自动翻页" @click="stopAutoReadingFromStatus">
           <span aria-hidden="true"></span>
         </button>
@@ -148,7 +148,8 @@
       :class="{ 'horizontal-page-mode': isHorizontalPageMode }"
       ref="scrollContainerRef"
       @scroll="handleScroll"
-      @mousedown="stopAutoScroll"
+      @mousedown="pauseAutoScrollForManualInput"
+      @wheel="pauseAutoScrollForManualInput"
       @touchstart="handleTouchStart"
       @touchmove="handleTouchMove"
       @touchend="handleTouchEnd"
@@ -393,7 +394,6 @@ const theme = computed(() => store.currentTheme)
 const chromeTheme = computed(() => store.chromeTheme)
 const hasReaderBackground = computed(() => Boolean(config.value.backgroundImage) && config.value.applyBackgroundToReader)
 const readerColorScheme = computed(() => store.isNight || theme.value.name === '暗灰' ? 'dark' : 'light')
-const autoReadingModeLabel = computed(() => config.value.autoPageMode === 'paragraph' ? '段落' : '平滑')
 
 const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
@@ -698,7 +698,7 @@ const horizontalPageTransform = computed(() => {
 const horizontalPageTransitionDuration = computed(() => {
   const duration = Number(config.value.animateDuration) || 0
   if (duration <= 0) return '0ms'
-  return `${Math.min(220, duration)}ms`
+  return `${duration}ms`
 })
 const {
   continuousChapters,
@@ -1309,23 +1309,18 @@ const {
   clearReadingClass,
   startAutoScroll,
   stopAutoScroll,
+  pauseAutoScrollForManualInput,
   startSpeech,
   speechPrev,
   speechNext,
   restartSpeechFromCurrentParagraph,
   cancelSpeechTransition,
-  resetAutoParagraphIndex,
-  handleContentChanged,
   disposeAutoPlayback,
 } = useReaderAutoPlayback(
   store,
   computed(() => ({
-    autoPageMode: config.value.autoPageMode,
     clickAction: config.value.clickAction,
-    scrollPixel: config.value.scrollPixel,
-    pageSpeed: config.value.pageSpeed,
-    fontSize: config.value.fontSize,
-    lineHeight: config.value.lineHeight,
+    autoScrollSpeed: config.value.autoScrollSpeed,
   })),
   isContinuousMode,
   scrollContainerRef,
@@ -1443,7 +1438,9 @@ function handleGlobalClick(e: MouseEvent) {
   }
   if (store.isAutoScrolling) return
   
-  if (isHorizontalPageMode.value && isMobile.value) {
+  // 左右分页模式: 全平台按横向分区(左 30% 上一页, 右 30% 下一页),
+  // 竖向分区只适用于滚动模式。
+  if (isHorizontalPageMode.value) {
     const x = e.clientX / window.innerWidth
     if (x < 0.3) {
       clickZoneAction('prev')
@@ -1465,20 +1462,21 @@ function handleGlobalClick(e: MouseEvent) {
 }
 
 function clickZoneAction(zone: 'prev' | 'menu' | 'next') {
-  if (store.isAutoScrolling) return
-
   if (zone === 'menu') {
     if (isMobile.value) {
       showControls.value = !showControls.value
     }
     return
   }
-  
+
   if (config.value.clickAction === 'none') return
-  
+
   const container = scrollContainerRef.value
   if (!container) return
-  
+
+  // 自动滚动时点击翻页区: 先暂停让本次翻页/滚动生效, 静止后自动恢复。
+  pauseAutoScrollForManualInput()
+
   if (isHorizontalPageMode.value) {
     if (zone === 'next') pageForward()
     else pageBackward()
@@ -1589,7 +1587,7 @@ function handleScroll() {
 }
 
 function handleTouchStart(event: TouchEvent) {
-  stopAutoScroll()
+  pauseAutoScrollForManualInput()
   hideSelectionMenu()
   const touch = event.touches[0]
   if (!touch) return
@@ -1753,6 +1751,11 @@ function handleKeydown(e: KeyboardEvent) {
   if (!container) return
 
   const h = container.clientHeight
+
+  // 自动滚动期间的导航按键同样先暂停, 静止后自动恢复。
+  if ([' ', 'Space', 'ArrowDown', 'PageDown', 'ArrowUp', 'PageUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) {
+    pauseAutoScrollForManualInput()
+  }
 
   switch (e.key) {
     case ' ':
@@ -1923,11 +1926,29 @@ async function waitForChapterListReady() {
   })
 }
 
+let horizontalWheelLockUntil = 0
+
 function handleReaderWheel(event: WheelEvent) {
   if (store.activePanel) return
 
   const target = event.target as HTMLElement | null
   if (target?.closest('input, textarea, select, button, .reader-context-menu')) {
+    return
+  }
+
+  // 左右分页模式: 滚轮/触控板横向滑动手势直接翻页。
+  // 不受「点击翻页: 禁用」影响, 避免禁用后除键盘外无法翻页。
+  if (isHorizontalPageMode.value && !event.ctrlKey) {
+    event.preventDefault()
+    const now = Date.now()
+    if (now < horizontalWheelLockUntil) return
+    if (event.deltaY > 0 || event.deltaX > 0) {
+      horizontalWheelLockUntil = now + 180
+      pageForward()
+    } else if (event.deltaY < 0 || event.deltaX < 0) {
+      horizontalWheelLockUntil = now + 180
+      pageBackward()
+    }
     return
   }
 
@@ -2027,13 +2048,6 @@ onUnmounted(() => {
   store.closePanel()
 })
 
-watch(() => config.value.autoPageMode, () => {
-  if (!store.isAutoScrolling) return
-  stopAutoScroll()
-  store.isAutoScrolling = true
-  startAutoScroll()
-})
-
 watch(() => config.value.readMethod, async () => {
   clearSelectionState()
   if (isContinuousMode.value) {
@@ -2072,7 +2086,6 @@ watch(
 
 watch(() => store.currentIndex, async () => {
   loadSavedReadingPosition()
-  resetAutoParagraphIndex()
   if (!store.isSpeaking) {
     clearReadingClass()
   }
@@ -2100,7 +2113,6 @@ watch(
 )
 
 watch(() => store.content, () => {
-  resetAutoParagraphIndex()
   if (isContinuousMode.value) {
     const current = getContinuousChapter(store.currentIndex)
     if (current) {
@@ -2110,7 +2122,6 @@ watch(() => store.content, () => {
       void initializeContinuousChapters(store.currentIndex, false)
     }
   }
-  handleContentChanged()
   handleContentUpdated()
   scheduleRefreshOfflineCacheState()
   scheduleRestoreReadingPosition()

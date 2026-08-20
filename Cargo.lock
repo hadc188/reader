@@ -3830,7 +3830,7 @@ dependencies = [
 
 [[package]]
 name = "reader-desktop"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "anyhow",
  "reader-rust",
@@ -3846,7 +3846,7 @@ dependencies = [
 
 [[package]]
 name = "reader-rust"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "aes",
  "anyhow",

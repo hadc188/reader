@@ -6,6 +6,7 @@ use reqwest::header::{ACCEPT, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
+use crate::crawler::http_client::HttpClient;
 use crate::error::error::AppError;
 use crate::service::json_document_service::JsonDocumentService;
 use crate::util::time::now_ts;
@@ -15,11 +16,15 @@ const UPDATE_CACHE_NAME: &str = "version-update-cache";
 const UPDATE_PREFERENCES_NAME: &str = "version-update-preferences";
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/hadc188/reader/releases/latest";
 const UPDATE_CACHE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
+const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
+/// 直连 GitHub 失败时依次尝试的镜像前缀(前缀式加速代理)。
+/// 镜像内容仍会经过大小/格式/便携包结构校验, 校验失败即丢弃。
+const DOWNLOAD_MIRROR_PREFIXES: &[&str] = &["https://ghfast.top/", "https://gh-proxy.com/"];
 
 #[derive(Clone)]
 pub struct UpdateService {
     docs: Arc<JsonDocumentService>,
-    client: reqwest::Client,
+    http: HttpClient,
     current_version: String,
 }
 
@@ -74,19 +79,18 @@ struct UpdateCache {
 }
 
 impl UpdateService {
+    /// 共用爬虫的 HttpClient: 更新请求随「系统/手动代理」设置一起走代理,
+    /// 无代理直连 GitHub 慢或失败时再回退镜像加速。
     pub fn new(
         docs: Arc<JsonDocumentService>,
-        timeout_secs: u64,
+        http: HttpClient,
         current_version: impl Into<String>,
-    ) -> Result<Self, AppError> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .build()?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             docs,
-            client,
+            http,
             current_version: current_version.into(),
-        })
+        }
     }
 
     pub async fn check(&self, force: bool) -> Result<VersionUpdateInfo, AppError> {
@@ -136,8 +140,24 @@ impl UpdateService {
     }
 
     async fn fetch_latest_release(&self) -> Result<GithubRelease, String> {
-        let response = self
-            .client
+        let error = match self.fetch_release_with(self.http.client()).await {
+            Ok(release) => return Ok(release),
+            Err(error) => error,
+        };
+        // 代理出口 IP 是共享的, 很容易被 GitHub 未认证限额(每 IP 60 次/小时)
+        // 限流; 失败时再直连尝试一次, 两边网络环境互补。
+        if self.http.active_proxy().is_some() {
+            if let Ok(direct) = self.http.client_direct() {
+                if let Ok(release) = self.fetch_release_with(direct).await {
+                    return Ok(release);
+                }
+            }
+        }
+        Err(error)
+    }
+
+    async fn fetch_release_with(&self, client: reqwest::Client) -> Result<GithubRelease, String> {
+        let response = client
             .get(LATEST_RELEASE_URL)
             .header(ACCEPT, "application/vnd.github+json")
             .header(
@@ -149,7 +169,7 @@ impl UpdateService {
             .map_err(|err| err.to_string())?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("GitHub 返回 {}", status));
+            return Err(format_github_api_error(status, response).await);
         }
         response
             .json::<GithubRelease>()
@@ -166,7 +186,7 @@ impl UpdateService {
     where
         F: FnMut(u64, u64),
     {
-        if asset.size > 512 * 1024 * 1024 {
+        if asset.size > MAX_ASSET_BYTES {
             return Err(AppError::BadRequest("更新文件过大，已停止下载".to_string()));
         }
         let url = url::Url::parse(&asset.browser_download_url)
@@ -174,8 +194,44 @@ impl UpdateService {
         if url.scheme() != "https" || url.host_str() != Some("github.com") {
             return Err(AppError::BadRequest("更新地址不是受信任的 GitHub 地址".to_string()));
         }
+
+        // 直连优先; 无代理环境下直连失败时依次尝试镜像加速。
+        let mut candidates: Vec<String> = vec![asset.browser_download_url.clone()];
+        candidates.extend(
+            DOWNLOAD_MIRROR_PREFIXES
+                .iter()
+                .map(|prefix| format!("{prefix}{}", asset.browser_download_url)),
+        );
+
+        let mut last_error: Option<AppError> = None;
+        for candidate in &candidates {
+            match self
+                .download_from_url(candidate, asset.size, path, &mut on_progress)
+                .await
+            {
+                Ok(downloaded) => return Ok(downloaded),
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(path).await;
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| AppError::BadRequest("下载更新失败".to_string())))
+    }
+
+    async fn download_from_url<F>(
+        &self,
+        url: &str,
+        asset_size: u64,
+        path: &Path,
+        on_progress: &mut F,
+    ) -> Result<u64, AppError>
+    where
+        F: FnMut(u64, u64),
+    {
         let response = self
-            .client
+            .http
+            .client()
             .get(url)
             .timeout(Duration::from_secs(15 * 60))
             .header(ACCEPT, "application/octet-stream")
@@ -188,71 +244,63 @@ impl UpdateService {
             .map_err(|error| AppError::BadRequest(format!("下载更新失败: {error}")))?;
         if !response.status().is_success() {
             return Err(AppError::BadRequest(format!(
-                "下载更新失败: GitHub 返回 {}",
+                "下载更新失败: 服务器返回 {}",
                 response.status()
             )));
         }
-        if response.content_length().unwrap_or_default() > 512 * 1024 * 1024 {
+        if response.content_length().unwrap_or_default() > MAX_ASSET_BYTES {
             return Err(AppError::BadRequest("更新文件过大，已停止下载".to_string()));
         }
 
         let response_size = response.content_length().unwrap_or_default();
-        if asset.size > 0 && response_size > 0 && response_size != asset.size {
+        if asset_size > 0 && response_size > 0 && response_size != asset_size {
             return Err(AppError::BadRequest(format!(
                 "更新文件大小与发行版记录不一致（应为 {} 字节，实际为 {} 字节）",
-                asset.size, response_size
+                asset_size, response_size
             )));
         }
-        let expected_size = if asset.size > 0 {
-            asset.size
+        let expected_size = if asset_size > 0 {
+            asset_size
         } else {
             response_size
         };
-        let download_result = async {
-            let mut response = response;
-            let mut file = tokio::fs::File::create(path)
+        let mut response = response;
+        let mut file = tokio::fs::File::create(path)
+            .await
+            .map_err(|error| AppError::BadRequest(format!("创建更新临时文件失败: {error}")))?;
+        let mut downloaded = 0_u64;
+        on_progress(downloaded, expected_size);
+
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| AppError::BadRequest(format!("读取更新文件失败: {error}")))?
+        {
+            downloaded = downloaded.saturating_add(chunk.len() as u64);
+            if downloaded > MAX_ASSET_BYTES {
+                return Err(AppError::BadRequest("更新文件过大，已停止下载".to_string()));
+            }
+            if expected_size > 0 && downloaded > expected_size {
+                return Err(AppError::BadRequest("更新文件超过发行版记录大小，已停止下载".to_string()));
+            }
+            file.write_all(&chunk)
                 .await
-                .map_err(|error| AppError::BadRequest(format!("创建更新临时文件失败: {error}")))?;
-            let mut downloaded = 0_u64;
+                .map_err(|error| AppError::BadRequest(format!("写入更新文件失败: {error}")))?;
             on_progress(downloaded, expected_size);
-
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|error| AppError::BadRequest(format!("读取更新文件失败: {error}")))?
-            {
-                downloaded = downloaded.saturating_add(chunk.len() as u64);
-                if downloaded > 512 * 1024 * 1024 {
-                    return Err(AppError::BadRequest("更新文件过大，已停止下载".to_string()));
-                }
-                if expected_size > 0 && downloaded > expected_size {
-                    return Err(AppError::BadRequest("更新文件超过发行版记录大小，已停止下载".to_string()));
-                }
-                file.write_all(&chunk)
-                    .await
-                    .map_err(|error| AppError::BadRequest(format!("写入更新文件失败: {error}")))?;
-                on_progress(downloaded, expected_size);
-            }
-            file.flush()
-                .await
-                .map_err(|error| AppError::BadRequest(format!("保存更新文件失败: {error}")))?;
-            file.sync_all()
-                .await
-                .map_err(|error| AppError::BadRequest(format!("同步更新文件失败: {error}")))?;
-            if expected_size > 0 && downloaded != expected_size {
-                return Err(AppError::BadRequest(format!(
-                    "更新文件下载不完整（应为 {} 字节，实际为 {} 字节）",
-                    expected_size, downloaded
-                )));
-            }
-            Ok(downloaded)
         }
-        .await;
-
-        if download_result.is_err() {
-            let _ = tokio::fs::remove_file(path).await;
+        file.flush()
+            .await
+            .map_err(|error| AppError::BadRequest(format!("保存更新文件失败: {error}")))?;
+        file.sync_all()
+            .await
+            .map_err(|error| AppError::BadRequest(format!("同步更新文件失败: {error}")))?;
+        if expected_size > 0 && downloaded != expected_size {
+            return Err(AppError::BadRequest(format!(
+                "更新文件下载不完整（应为 {} 字节，实际为 {} 字节）",
+                expected_size, downloaded
+            )));
         }
-        download_result
+        Ok(downloaded)
     }
 
     async fn load_preferences(&self) -> Result<UpdatePreferences, AppError> {
@@ -278,6 +326,63 @@ impl UpdateService {
             serde_json::from_value(value).map_err(|err| AppError::BadRequest(err.to_string()))?;
         Ok(Some(cache))
     }
+}
+
+/// 把 GitHub API 的失败响应转成带原因的错误信息:
+/// 403 最常见的是未认证接口限流(每 IP 60 次/小时, 共享出口 IP 很容易触发),
+/// 其次是网络劫持或代理拦截。响应体里的 message 会原样透出。
+async fn format_github_api_error(
+    status: reqwest::StatusCode,
+    response: reqwest::Response,
+) -> String {
+    let remaining = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let reset_at = response
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|ts| *ts > 0);
+    let body_message = response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(|message| message.as_str())
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .map(str::to_string)
+        });
+
+    let mut text = format!("GitHub 返回 {status}");
+    if let Some(message) = body_message {
+        let message = message.chars().take(160).collect::<String>();
+        text.push_str(&format!("：{message}"));
+    }
+
+    let rate_limited = remaining.as_deref() == Some("0")
+        || text.to_ascii_lowercase().contains("rate limit");
+    if rate_limited {
+        text.push_str("（未认证接口限额为每 IP 60 次/小时，共享网络容易触发）");
+        if let Some(ts) = reset_at {
+            if let Some(time) = chrono::DateTime::from_timestamp(ts, 0) {
+                let local = time.with_timezone(&chrono::Local);
+                text.push_str(&format!("，额度将于 {} 重置", local.format("%H:%M")));
+            }
+        }
+        return text;
+    }
+    if status.as_u16() == 403 {
+        text.push_str("（可能是网络劫持或代理拦截，可配置代理后重试）");
+    }
+    text
 }
 
 pub fn build_update_info(

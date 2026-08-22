@@ -1,6 +1,6 @@
 [package]
 name = "reader-desktop"
-version = "1.4.3"
+version = "1.4.4"
 edition = "2021"
 description = "阅读 — 阅读3.0（Legado）的跨平台桌面移植版"
 publish = false

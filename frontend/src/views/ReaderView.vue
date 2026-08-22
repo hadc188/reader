@@ -342,6 +342,7 @@ import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets, TOC_END_CHECK_INTERVAL_MS } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { getBookInfo, getBookshelfWithCacheInfo } from '../api/bookshelf'
+import { readerOrigin } from '../api/scheme'
 import { applySystemTheme } from '../utils/systemUi'
 import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
@@ -617,11 +618,11 @@ function rewriteLocalEpubAssetSrcs(root: HTMLElement) {
   images.forEach((image) => {
     const src = image.getAttribute('src') || ''
     // Legacy relative asset URLs are mapped to the custom scheme endpoint
-    // (`http://reader.localhost/epub?bookUrl=...&path=...`); already-absolute
+    // (`${readerOrigin}/epub?bookUrl=...&path=...`); already-absolute
     // URLs pass through unchanged. No auth params are needed anymore.
     if (src.startsWith('/reader3/localEpubAsset')) {
       const query = src.includes('?') ? src.slice(src.indexOf('?')) : ''
-      image.setAttribute('src', `http://reader.localhost/epub${query}`)
+      image.setAttribute('src', `${readerOrigin}/epub${query}`)
     }
   })
 }

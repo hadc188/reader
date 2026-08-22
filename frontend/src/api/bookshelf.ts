@@ -1,4 +1,5 @@
 import { get, post, invokeEnvelope } from './invoke'
+import { readerOrigin } from './scheme'
 import type { Book, BookChapter, BookGroup } from '../types'
 
 export function getBookshelf() {
@@ -128,10 +129,10 @@ export function getCoverUrl(coverUrl?: string) {
     const params = new URLSearchParams(rawQuery)
     const bookUrl = params.get('bookUrl') ?? ''
     const path = params.get('path') ?? ''
-    return `http://reader.localhost/epub?bookUrl=${encodeURIComponent(bookUrl)}&path=${encodeURIComponent(path)}`
+    return `${readerOrigin}/epub?bookUrl=${encodeURIComponent(bookUrl)}&path=${encodeURIComponent(path)}`
   }
   if (coverUrl.startsWith('http') || coverUrl.startsWith('/')) {
-    return `http://reader.localhost/cover?path=${encodeURIComponent(coverUrl)}`
+    return `${readerOrigin}/cover?path=${encodeURIComponent(coverUrl)}`
   }
   return coverUrl
 }

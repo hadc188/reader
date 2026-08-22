@@ -132,6 +132,13 @@ fn start(app: &mut App) -> anyhow::Result<()> {
                 // Exporting book sources and downloading backup files navigate
                 // to blob: URLs created by the page itself.
                 "blob" | "about" => true,
+                // The app itself and the reader scheme. On Linux/macOS the
+                // webview serves them as tauri://localhost and reader://localhost,
+                // while Windows (WebView2) maps them to http://tauri.localhost /
+                // http://reader.localhost (covered by the http arms below).
+                // Denying these cancels even the initial page load — the window
+                // then stays permanently white.
+                "tauri" | "reader" => true,
                 // Keep the application origins and login/OAuth hosts inside the
                 // webview. Ordinary links go to the system browser.
                 "http" | "https" if host_allowed_in_app(url.host_str()) => true,

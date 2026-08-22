@@ -109,7 +109,10 @@ pub async fn list_custom_fonts(
         fonts.push(CustomFontEntry {
             id,
             name,
-            url: format!("http://reader.localhost/files?path=default/fonts/{file_name}"),
+            url: format!(
+                "{}/files?path=default/fonts/{file_name}",
+                crate::api::protocol::reader_scheme_origin()
+            ),
         });
     }
     fonts.sort_by(|left, right| left.name.cmp(&right.name));
@@ -154,7 +157,10 @@ pub async fn upload_custom_font(
     Ok(ApiResponse::ok(CustomFontEntry {
         id,
         name: display_name.to_string(),
-        url: format!("http://reader.localhost/files?path=default/fonts/{stored_name}"),
+        url: format!(
+            "{}/files?path=default/fonts/{stored_name}",
+            crate::api::protocol::reader_scheme_origin()
+        ),
     }))
 }
 

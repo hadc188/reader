@@ -162,6 +162,7 @@ import {
   pinBookSource,
   unpinBookSource,
 } from '../api/source'
+import { readerOrigin } from '../api/scheme'
 import { useAppStore } from '../stores/app'
 import { useSourceStore } from '../stores/source'
 import type { BookSource } from '../types'
@@ -643,7 +644,7 @@ async function importManualCookie() {
 
 function buildLoginProxyUrl(loginSession: string, targetUrl: string) {
   // 登录域直接直连: 起点登录页 JS 依赖 document.domain=qidian.com,
-  // 经 reader.localhost 代理会抛 SecurityError 导致登录功能失效。
+  // 经 reader 代理 origin 会抛 SecurityError 导致登录功能失效。
   // 直连真实域名(www/passport/login.qidian.com、*.yuewen.com)时页面功能完整;
   // 登录 Cookie 通过「登录调试页」的「导入 Cookie」粘贴抓包值写入。
   if (/^https?:\/\/([\w-]+\.)?(qidian|yuewen)\.com/i.test(targetUrl)) {
@@ -652,7 +653,7 @@ function buildLoginProxyUrl(loginSession: string, targetUrl: string) {
   const params = new URLSearchParams()
   params.set('loginSession', loginSession)
   params.set('url', targetUrl)
-  return `http://reader.localhost/bookSourceProxy?${params.toString()}`
+  return `${readerOrigin}/bookSourceProxy?${params.toString()}`
 }
 
 function triggerFileImport() {

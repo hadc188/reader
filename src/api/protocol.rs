@@ -1,10 +1,12 @@
 //! Custom `reader` URI-scheme handler.
 //!
 //! Serves cover images, EPUB assets, uploaded files and the bookSourceProxy
-//! login iframe over `http://reader.localhost/...` so `<img>`/`<iframe>` in the
-//! frontend keep loading synchronously without async blob-URL plumbing.
+//! login iframe over the reader scheme so `<img>`/`<iframe>` in the frontend
+//! keep loading synchronously without async blob-URL plumbing.
 //!
-//! On Windows the scheme origin is `http://reader.localhost`.
+//! The scheme origin is platform-dependent: WebView2 (Windows) serves custom
+//! schemes as `http://reader.localhost`, WebKitGTK (Linux) and WKWebView
+//! (macOS) as `reader://localhost`. See [`reader_scheme_origin`].
 
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
@@ -16,6 +18,19 @@ use std::collections::HashMap;
 use tauri::http;
 use tauri::Manager;
 use url::Url;
+
+/// Origin of the custom `reader` URI scheme, which differs per webview
+/// backend: WebView2 (Windows/Android) serves custom schemes as
+/// `http://<scheme>.localhost`, WebKitGTK/WKWebView (Linux/macOS) as
+/// `<scheme>://localhost`. Mirrors the mapping in Tauri's injected
+/// `convertFileSrc` used by the frontend (`frontend/src/api/scheme.ts`).
+pub fn reader_scheme_origin() -> &'static str {
+    if cfg!(any(target_os = "windows", target_os = "android")) {
+        "http://reader.localhost"
+    } else {
+        "reader://localhost"
+    }
+}
 
 /// Entry point registered via `register_asynchronous_uri_scheme_protocol("reader", ...)`.
 pub fn handle_reader_scheme(
@@ -754,6 +769,16 @@ fn registrable_domain_from_host(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reader_scheme_origin_matches_platform() {
+        let origin = reader_scheme_origin();
+        if cfg!(any(target_os = "windows", target_os = "android")) {
+            assert_eq!(origin, "http://reader.localhost");
+        } else {
+            assert_eq!(origin, "reader://localhost");
+        }
+    }
 
     #[test]
     fn extract_registrable_domain_strips_subdomains() {

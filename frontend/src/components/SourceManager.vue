@@ -296,7 +296,7 @@ async function loadSources() {
     loading.value = false
     // Keep the shared source store in sync so the search page's group/source
     // dropdowns reflect add/delete/edit done here.
-    sourceStore.fetchSources().catch(() => undefined)
+    sourceStore.fetchSources(true).catch(() => undefined)
   }
 }
 

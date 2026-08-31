@@ -43,14 +43,13 @@
             </svg>
             <span class="shelf-btn-label">{{ localBookUploading ? '导入中' : '导入本地书' }}</span>
           </button>
-          <button class="shelf-btn" type="button" title="刷新书架" aria-label="刷新书架" @click="handleRefreshBooks" :disabled="shelfStore.refreshing">
-            <svg :class="{ spinning: shelfStore.refreshing }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
-              <path d="M3 3v5h5" />
-              <path d="M3 12a9 9 0 0 0 15.55 6.2L21 16" />
-              <path d="M21 21v-5h-5" />
+          <button class="shelf-btn" type="button" title="导出书籍" aria-label="导出书籍" @click="showExportModal = true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <path d="M7 10l5 5 5-5" />
+              <path d="M12 15V3" />
             </svg>
-            <span class="shelf-btn-label">{{ shelfStore.refreshing ? '刷新中' : '刷新书架' }}</span>
+            <span class="shelf-btn-label">导出书籍</span>
           </button>
           <button class="shelf-btn" type="button" title="分组管理" aria-label="分组管理" @click="showGroupManager = true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -162,6 +161,7 @@
     <GroupManagerModal v-model="showGroupManager" />
 
     <CacheLibraryModal v-model="showCacheManager" />
+    <ExportBookModal v-model="showExportModal" />
   </div>
 </template>
 
@@ -178,6 +178,7 @@ import GroupSelectModal from '../components/bookshelf/GroupSelectModal.vue'
 import GroupManagerModal from '../components/bookshelf/GroupManagerModal.vue'
 import SearchResults from '../components/SearchResults.vue'
 import CacheLibraryModal from '../components/CacheLibraryModal.vue'
+import ExportBookModal from '../components/ExportBookModal.vue'
 import { showContextMenu } from '../composables/useContextMenu'
 import type { Book, SearchBook } from '../types'
 
@@ -190,6 +191,7 @@ const showDetail = ref(false)
 const showGroupSelect = ref(false)
 const showGroupManager = ref(false)
 const showCacheManager = ref(false)
+const showExportModal = ref(false)
 const selectedBook = ref<Book | SearchBook | null>(null)
 const openingBookUrl = ref('')
 const localBookFileInputRef = ref<HTMLInputElement | null>(null)
@@ -260,7 +262,6 @@ async function handleBookClick(book: Book | SearchBook) {
     const loadBookTask = readerStore.loadBook(b)
     await router.push('/reader')
     await loadBookTask
-    await readerStore.loadChapter(readerStore.currentIndex)
   } finally {
     openingBookUrl.value = ''
   }
@@ -338,13 +339,6 @@ async function handleReorderBooks(payload: { draggedUrl: string; targetUrl: stri
   }
 }
 
-async function handleRefreshBooks() {
-  try {
-    await shelfStore.refreshBooks()
-  } catch (e: any) {
-    appStore.showToast(e.message || '刷新书架失败', 'error')
-  }
-}
 </script>
 
 <style scoped>

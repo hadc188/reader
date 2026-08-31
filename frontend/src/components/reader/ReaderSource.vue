@@ -32,13 +32,16 @@
         </div>
       </div>
 
+      <div v-if="isLocal" class="empty">本地书籍不支持换源</div>
+
+      <template v-else>
       <div class="section-label">其他可用源</div>
-      
+
       <div v-if="searching && !preparedResults.length" class="loading">
         <div class="spinner"></div>
         正在全网搜索同名书籍...
       </div>
-      
+
       <div v-else-if="!preparedResults.length" class="empty">未找到其他书源</div>
       
       <div
@@ -76,6 +79,7 @@
         <div class="spinner small"></div>
         继续搜索其他书源...
       </div>
+      </template>
 
       <div v-if="selectedCandidate" class="compare-panel">
         <div class="compare-header">
@@ -127,6 +131,8 @@ import { useSourceStore } from '../../stores/source'
 import { getAvailableBookSourceSSE } from '../../api/search'
 import type { SseLike } from '../../api/sse'
 import { getBookInfo } from '../../api/bookshelf'
+import { isLocalBook } from '../../utils/localBook'
+import { matchesSourceSwitchAuthor, normalizeSourceSwitchAuthor } from '../../utils/searchRank'
 import type { Book, SearchBook } from '../../types'
 
 type CandidateItem = {
@@ -142,6 +148,7 @@ const store = useReaderStore()
 const appStore = useAppStore()
 const sourceStore = useSourceStore()
 const theme = computed(() => store.chromeTheme)
+const isLocal = computed(() => isLocalBook(store.book))
 const searching = ref(false)
 const loadingMore = ref(false)
 const results = ref<SearchBook[]>([])
@@ -173,7 +180,7 @@ function normalizeText(value?: string) {
 }
 
 function normalizeAuthorText(value?: string) {
-  return normalizeText(value).replace(/^作者/, '')
+  return normalizeSourceSwitchAuthor(value)
 }
 
 const preparedResults = computed<CandidateItem[]>(() => {
@@ -208,7 +215,7 @@ onUnmounted(() => {
 })
 
 function startSearch() {
-  if (!store.book) return
+  if (!store.book || isLocal.value) return
   closeAvailableSourceSSE()
   searching.value = true
   loadingMore.value = false
@@ -224,10 +231,9 @@ function startSearch() {
 function mergeCandidates(candidates: SearchBook[]) {
   if (!store.book || !candidates.length) return
   const currentBook = store.book
-  const currentAuthor = normalizeAuthorText(currentBook.author)
   candidates.forEach((item) => {
     if (item.origin === currentBook.origin) return
-    if (currentAuthor && item.author && normalizeAuthorText(item.author) !== currentAuthor) return
+    if (!matchesSourceSwitchAuthor(currentBook.author, item.author)) return
     const existed = results.value.some((candidate) =>
       candidate.origin === item.origin || (candidate.bookUrl === item.bookUrl && candidate.origin === item.origin),
     )

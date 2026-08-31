@@ -1,6 +1,6 @@
 ﻿import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { deleteRssSource, deleteRssSources, getRssArticles, getRssContent, getRssSources, saveRssSource, saveRssSources } from '../api/rss'
+import { deleteRssSource, deleteRssSources, getRssArticles, getRssContent, getRssSources, saveRssSources } from '../api/rss'
 import type { RssArticle, RssSource } from '../types'
 import { saveRecentReadBook } from '../utils/recentBooks'
 import { toRssSourceDeletePayload } from '../utils/sourceSelection'
@@ -96,11 +96,6 @@ export const useRssStore = defineStore('rss', () => {
     if (!activeSourceUrl.value && enabledSources.value.length) {
       activeSourceUrl.value = enabledSources.value[0]!.sourceUrl
     }
-  }
-
-  async function addSource(source: RssSource) {
-    await saveRssSource(source)
-    await fetchSources()
   }
 
   async function addSources(list: RssSource[]) {
@@ -269,7 +264,6 @@ export const useRssStore = defineStore('rss', () => {
     activeArticle,
     activeContent,
     fetchSources,
-    addSource,
     addSources,
     removeSource,
     removeSources,

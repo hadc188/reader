@@ -125,7 +125,13 @@ export function useContinuousReading(
 
     await nextTick()
     if (generation !== continuousGeneration || !isContinuousMode.value) return
-    scrollToContinuousChapter(targetIndex, smooth)
+    // 远端进度恢复期间不能把连续阅读视口重新定位到章节开头。
+    // 先按已保存的章节进度定位，随后 ReaderView 再按字符位置校正。
+    const legadoProgress = store.legadoPositionRestore?.ready
+      && store.legadoPositionRestore.index === targetIndex
+      ? store.legadoPositionRestore.progress
+      : (includePrevious ? 0 : store.chapterScrollProgress)
+    scrollToContinuousChapter(targetIndex, smooth, legadoProgress)
 
     // 向后追加紧邻的下一章, 不按已读状态跳章: 「隐藏已读」只隐藏身后翻过的
     // 章节(pruneReadChapters), 回看后再往下读应逐章推进而不是直接跳到未读章。
@@ -261,13 +267,27 @@ export function useContinuousReading(
     return Array.from(container.querySelectorAll('.continuous-chapter')) as HTMLElement[]
   }
 
-  function scrollToContinuousChapter(index: number, smooth = true) {
+  function scrollToContinuousChapter(index: number, smooth = true, progress?: number) {
     const container = scrollContainerRef.value
     if (!container) return
     const section = container.querySelector(`.continuous-chapter[data-chapter-index="${index}"]`) as HTMLElement | null
     if (!section) return
+    const targetTop = progress == null
+      ? section.offsetTop
+      : (() => {
+          const nextSection = section.nextElementSibling as HTMLElement | null
+          const sectionHeight = Math.max(
+            1,
+            (nextSection ? nextSection.offsetTop : container.scrollHeight) - section.offsetTop,
+          )
+          const anchorOffset = container.clientHeight * 0.12
+          return Math.max(
+            section.offsetTop,
+            section.offsetTop + sectionHeight * Math.max(0, Math.min(1, progress)) - anchorOffset,
+          )
+        })()
     container.scrollTo({
-      top: Math.max(0, section.offsetTop),
+      top: Math.max(0, targetTop),
       // 'auto' would follow the container's CSS scroll-behavior: smooth and
       // animate the jump across the prepended chapter.
       behavior: smooth ? 'smooth' : 'instant',

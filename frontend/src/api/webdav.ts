@@ -60,14 +60,24 @@ export function syncLegadoBookProgress(
   config: LegadoWebdavConfig,
   progress: LegadoBookProgress,
   allowUpload = true,
-  forceUpload = false,
 ) {
   return invokeEnvelope<LegadoProgressResponse>('sync_legado_book_progress', {
     req: {
       config,
       progress,
       allowUpload,
-      forceUpload,
+    },
+  })
+}
+
+export function uploadLegadoBookProgress(
+  config: LegadoWebdavConfig,
+  progress: LegadoBookProgress,
+) {
+  return invokeEnvelope<LegadoProgressResponse>('upload_legado_book_progress', {
+    req: {
+      config,
+      progress,
     },
   })
 }
@@ -120,12 +130,6 @@ export function getWebdavFileText(path: string) {
   return get<WebdavBinaryResponse>('/getWebdavFile', {
     params: { path },
   }).then((r) => decodeWebdavFileText(r.data))
-}
-
-export function getWebdavFileBlob(path: string) {
-  return get<WebdavBinaryResponse>('/getWebdavFile', {
-    params: { path },
-  }).then((r) => createWebdavFileBlob(r.data))
 }
 
 export function saveWebdavFileAs(path: string) {

@@ -1997,7 +1997,7 @@ pub async fn get_available_book_source(
     // Try to find book by URL first, then by name+author
     let book_url = req.url.clone();
     let sources = state.book_source_service.list_enabled(&user_ns).await?;
-    let enabled_source_urls = enabled_source_urls(&sources);
+    let enabled_source_url_set = enabled_source_urls(&sources);
 
     if !paged_request {
         if let Some(ref url) = book_url {
@@ -2006,12 +2006,10 @@ pub async fn get_available_book_source(
                 .load_book_sources_cache(&user_ns, url)
                 .await?
             {
-                let list = retain_enabled_source_books(list, &enabled_source_urls);
-                if !list.is_empty() {
-                    return Ok(ApiResponse::ok(
-                        serde_json::to_value(list).unwrap_or_default(),
-                    ));
-                }
+                let list = retain_enabled_source_books(list, &enabled_source_url_set);
+                return Ok(ApiResponse::ok(
+                    serde_json::to_value(list).unwrap_or_default(),
+                ));
             }
         }
     }
@@ -2123,10 +2121,25 @@ pub async fn get_available_book_source(
             .filter(|candidate| candidate.origin != book.origin)
             .cloned()
             .collect();
-        let _ = state
-            .book_service
-            .save_book_sources_cache(&user_ns, &book.book_url, &cache_list)
-            .await;
+        match state.book_source_service.list_enabled(&user_ns).await {
+            Ok(current_sources) if enabled_source_urls(&current_sources) == enabled_source_url_set => {
+                let _ = state
+                    .book_service
+                    .save_book_sources_cache(&user_ns, &book.book_url, &cache_list)
+                    .await;
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    "getAvailableBookSource skipped stale cache write after source changes"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "getAvailableBookSource skipped cache write because source list could not be verified: {:?}",
+                    err
+                );
+            }
+        }
     }
 
     if paged_request {
@@ -2154,7 +2167,7 @@ pub async fn get_available_book_source_sse(
     let concurrent_count = effective_available_concurrent_count(req.concurrent_count);
     let book_url = req.url.clone();
     let sources = state.book_source_service.list_enabled(&user_ns).await?;
-    let enabled_source_urls = enabled_source_urls(&sources);
+    let enabled_source_url_set = enabled_source_urls(&sources);
 
     let book = if let Some(ref url) = book_url {
         state.book_service.get_shelf_book(&user_ns, url).await?
@@ -2182,37 +2195,33 @@ pub async fn get_available_book_source_sse(
                 .load_book_sources_cache(&user_ns, url)
                 .await?
             {
-                let cached = retain_enabled_source_books(cached, &enabled_source_urls);
+                let cached = retain_enabled_source_books(cached, &enabled_source_url_set);
                 let cached = take_available_source_cached_matches(
                     cached,
-                    AVAILABLE_SOURCE_SSE_RESULT_LIMIT,
+                    usize::MAX,
                 );
-                if cached.is_empty() {
-                    // Ignore stale caches that only contain the current source.
-                } else {
-                    let on_event_clone = on_event.clone();
-                    tokio::spawn(async move {
-                        let mut last_index = -1;
-                        for book in cached {
-                            last_index += 1;
-                            let payload = serde_json::json!({
-                                "event": "data",
-                                "lastIndex": last_index,
-                                "hasMore": false,
-                                "data": [book]
-                            });
-                            if on_event_clone.send(payload).is_err() {
-                                return;
-                            }
-                        }
-                        let _ = on_event_clone.send(serde_json::json!({
-                            "event": "end",
+                let on_event_clone = on_event.clone();
+                tokio::spawn(async move {
+                    let mut last_index = -1;
+                    for book in cached {
+                        last_index += 1;
+                        let payload = serde_json::json!({
+                            "event": "data",
                             "lastIndex": last_index,
-                            "hasMore": false
-                        }));
-                    });
-                    return Ok(());
-                }
+                            "hasMore": false,
+                            "data": [book]
+                        });
+                        if on_event_clone.send(payload).is_err() {
+                            return;
+                        }
+                    }
+                    let _ = on_event_clone.send(serde_json::json!({
+                        "event": "end",
+                        "lastIndex": last_index,
+                        "hasMore": false
+                    }));
+                });
+                return Ok(());
             }
         }
     }
@@ -2231,6 +2240,10 @@ pub async fn get_available_book_source_sse(
         let mut next_index = (last_index_start + 1).max(0) as usize;
         let mut last_idx = last_index_start;
         let mut emitted = 0usize;
+        let emit_limit = req
+            .result_limit
+            .map(|limit| effective_available_result_limit(Some(limit)))
+            .unwrap_or(AVAILABLE_SOURCE_SSE_RESULT_LIMIT);
         let mut all_results: Vec<SearchBook> = Vec::new();
         let mut seen = std::collections::HashSet::<String>::new();
         let mut tasks = JoinSet::new();
@@ -2287,8 +2300,8 @@ pub async fn get_available_book_source_sse(
                             // 导致最终缓存只剩未推送部分(少于 20 个结果时缓存几乎为空)。
                             let push_start = all_results.len();
                             all_results.extend(matches);
-                            if emitted < AVAILABLE_SOURCE_SSE_RESULT_LIMIT {
-                                let budget = AVAILABLE_SOURCE_SSE_RESULT_LIMIT - emitted;
+                            if emitted < emit_limit {
+                                let budget = emit_limit - emitted;
                                 let end = (push_start + budget).min(all_results.len());
                                 for book in all_results[push_start..end].iter().cloned() {
                                     emitted += 1;
@@ -2329,16 +2342,31 @@ pub async fn get_available_book_source_sse(
         // 全扫描(或达到软上限)完成后才写缓存, 缓存里是「能搜到这本书的源」而非
         // 被前端结果上限截断的前 20 个。保存前剔除「恰好是当前书源」的条目, 避免
         // 缓存被「只有当前源」的假阴性结果固化, 导致换源面板查不到其他源。
-        if last_index_start < 0 {
+        if last_index_start < 0 && !has_more {
             let cache_list: Vec<SearchBook> = all_results
                 .iter()
                 .filter(|candidate| candidate.origin != book.origin)
                 .cloned()
                 .collect();
-            let _ = state_clone
-                .book_service
-                .save_book_sources_cache(&user_ns, &book.book_url, &cache_list)
-                .await;
+            match state_clone.book_source_service.list_enabled(&user_ns).await {
+                Ok(current_sources) if enabled_source_urls(&current_sources) == enabled_source_url_set => {
+                    let _ = state_clone
+                        .book_service
+                        .save_book_sources_cache(&user_ns, &book.book_url, &cache_list)
+                        .await;
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        "getAvailableBookSourceSSE skipped stale cache write after source changes"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "getAvailableBookSourceSSE skipped cache write because source list could not be verified: {:?}",
+                        err
+                    );
+                }
+            }
         }
 
         let _ = on_event.send(serde_json::json!({
@@ -2739,14 +2767,23 @@ fn is_local_book(book: &Book) -> bool {
 }
 
 fn available_source_sse_result_key(book: &SearchBook) -> String {
-    format!("{}::{}", book.origin, book.book_url)
+    format!("{}::{}", source_identity_url(&book.origin), book.book_url)
 }
 
 fn enabled_source_urls(sources: &[BookSource]) -> std::collections::HashSet<String> {
     sources
         .iter()
-        .map(|source| normalize_source_url(&source.book_source_url))
+        .map(|source| source_identity_url(&source.book_source_url))
         .collect()
+}
+
+fn source_identity_url(value: &str) -> String {
+    let normalized = normalize_source_url(value);
+    if normalized.starts_with("http://") || normalized.starts_with("https://") {
+        normalized.trim_end_matches('/').to_string()
+    } else {
+        normalized
+    }
 }
 
 fn retain_enabled_source_books(
@@ -2755,7 +2792,7 @@ fn retain_enabled_source_books(
 ) -> Vec<SearchBook> {
     books
         .into_iter()
-        .filter(|book| enabled_urls.contains(&normalize_source_url(&book.origin)))
+        .filter(|book| enabled_urls.contains(&source_identity_url(&book.origin)))
         .collect()
 }
 
@@ -2963,6 +3000,28 @@ mod tests {
     }
 
     #[test]
+    fn available_book_source_cache_returns_all_cached_matches() {
+        let cached: Vec<SearchBook> = (0..25)
+            .map(|index| SearchBook {
+                origin: format!("source-{index}"),
+                book_url: format!("book-{index}"),
+                ..SearchBook::default()
+            })
+            .collect();
+
+        let matches = take_available_source_cached_matches(cached, usize::MAX);
+
+        assert_eq!(matches.len(), 25);
+    }
+
+    #[test]
+    fn available_book_source_empty_cache_stays_empty() {
+        let matches = take_available_source_cached_matches(Vec::new(), 5);
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
     fn available_book_source_cache_removes_disabled_and_deleted_sources() {
         let cached = vec![
             SearchBook {
@@ -2982,6 +3041,20 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].origin, "enabled-source");
+    }
+
+    #[test]
+    fn available_book_source_matches_source_urls_with_trailing_slashes() {
+        let cached = vec![SearchBook {
+            origin: "https://enabled.example/".to_string(),
+            book_url: "book-1".to_string(),
+            ..SearchBook::default()
+        }];
+        let enabled = HashSet::from(["https://enabled.example".to_string()]);
+
+        let matches = retain_enabled_source_books(cached, &enabled);
+
+        assert_eq!(matches.len(), 1);
     }
 
     #[test]

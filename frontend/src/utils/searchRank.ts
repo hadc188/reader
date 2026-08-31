@@ -106,6 +106,21 @@ function normalizeSearchAuthor(value: string): string {
     .replace(/^[:：]/, '')
 }
 
+/** Normalize source-switch authors with the same punctuation rules as comparison badges. */
+export function normalizeSourceSwitchAuthor(value?: string): string {
+  return normalizeSearchAuthor((value || '').replace(/\s+/g, ''))
+}
+
+/** Keep a candidate when its author is missing or matches the current book. */
+export function matchesSourceSwitchAuthor(
+  currentAuthor: string | undefined,
+  candidateAuthor: string | undefined,
+): boolean {
+  const current = normalizeSourceSwitchAuthor(currentAuthor)
+  const candidate = normalizeSourceSwitchAuthor(candidateAuthor)
+  return !current || !candidate || current === candidate
+}
+
 function normalizeSearchText(value: string): string {
   return value.trim().toLocaleLowerCase().replace(/\s+/g, '')
 }

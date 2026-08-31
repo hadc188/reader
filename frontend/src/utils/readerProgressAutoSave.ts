@@ -12,6 +12,7 @@ export interface ReaderProgressExitSaverOptions {
   savePosition: () => void
   flushToServer: () => Promise<void> | void
   flushToServerKeepalive: () => void
+  flushToLegado?: () => Promise<void> | void
 }
 
 export function createReaderProgressAutoSaveScheduler({
@@ -67,6 +68,7 @@ export function createReaderProgressExitSaver({
   savePosition,
   flushToServer,
   flushToServerKeepalive,
+  flushToLegado,
 }: ReaderProgressExitSaverOptions) {
   let persisted = false
   let routeFlushPromise: Promise<void> | null = null
@@ -83,13 +85,16 @@ export function createReaderProgressExitSaver({
     async flushBeforeRouteLeave() {
       if (routeFlushPromise) return routeFlushPromise
       if (!beginPersist()) return
-      routeFlushPromise = Promise.resolve(flushToServer()).catch(() => undefined)
+      routeFlushPromise = Promise.resolve(flushToServer())
+        .then(() => flushToLegado?.())
+        .catch(() => undefined)
       await routeFlushPromise
     },
 
     flushKeepalive() {
       if (!beginPersist()) return
       flushToServerKeepalive()
+      void flushToLegado?.()
     },
 
     flushTemporaryKeepalive() {

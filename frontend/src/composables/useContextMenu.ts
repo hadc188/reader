@@ -1,4 +1,4 @@
-import { reactive, readonly, onBeforeUnmount } from 'vue'
+import { reactive, readonly } from 'vue'
 
 export interface MenuItem {
   /** 菜单项文字（divider 项可省略）。 */
@@ -215,9 +215,4 @@ export function useContextMenu() {
     hide: hideContextMenu,
     dispose: disposeContextMenu,
   }
-}
-
-/** 组件卸载时清理全局监听（供使用方在 onBeforeUnmount 中调用）。 */
-export function useContextMenuCleanup() {
-  onBeforeUnmount(disposeContextMenu)
 }

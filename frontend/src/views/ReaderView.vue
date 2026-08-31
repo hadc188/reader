@@ -323,7 +323,7 @@
         <button :disabled="store.currentIndex <= 0 || store.loading" @click="prevChapterFromContextMenu">上一章</button>
         <button :disabled="!store.hasNext || store.loading" @click="nextChapterFromContextMenu">下一章</button>
         <button @click="openCatalogFromContextMenu">目录</button>
-        <button @click="openSourceFromContextMenu">换源</button>
+        <button v-if="!isLocalBook(store.book)" @click="openSourceFromContextMenu">换源</button>
         <button @click="toggleAutoReadingFromContextMenu">{{ store.isAutoScrolling ? '停止自动翻页' : '开始自动翻页' }}</button>
         <button @click="refreshFromContextMenu">刷新</button>
       </div>
@@ -346,6 +346,8 @@ import { readerOrigin } from '../api/scheme'
 import { applySystemTheme } from '../utils/systemUi'
 import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
+import { shouldPreferServerReadingPosition, type ReadingPositionSnapshot } from '../utils/readingPosition'
+import { isLocalBook } from '../utils/localBook'
 import { handleReaderFontSizeWheel } from '../utils/readerFontSize'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
 import type { Book } from '../types'
@@ -375,13 +377,7 @@ const appStore = useAppStore()
 const READER_POSITION_PREFIX = 'reader-position:'
 const SERVER_PROGRESS_AUTOSAVE_MS = 10000
 
-interface SavedReadingPosition {
-  chapterIndex: number
-  progress: number
-  paragraphIndex?: number
-  paragraphProgress?: number
-  updatedAt: number
-}
+type SavedReadingPosition = ReadingPositionSnapshot
 
 const CONTINUOUS_POSITION_ANCHOR_RATIO = 0.12
 
@@ -402,13 +398,23 @@ const isMobile = ref(false)
 const leftToolbarRevealed = ref(false)
 const rightToolbarRevealed = ref(false)
 let speechTimerTicker: number | null = null
-let legadoSyncTicker: number | null = null
 let readerViewUnmounted = false
 let suppressNextTapUntil = 0
 const readerContextMenu = ref({ visible: false, top: 0, left: 0, text: '' })
 let restorePositionTimer: number | null = null
 let persistPositionTimer: number | null = null
+let legadoPositionRestoreTimer: number | null = null
+let legadoPositionRestoreAttempts = 0
+let legadoPositionRestoreSettling = false
+let legadoPositionRestoreTargetTop = 0
+let legadoPositionRestoreTargetMaxScroll = 0
 const pendingRestorePosition = ref<SavedReadingPosition | null>(null)
+const pendingLegadoPageRestore = ref<{
+  index: number
+  position: number
+  progress: number
+  token: number
+} | null>(null)
 let pendingRestoreAttempts = 0
 let skipPositionRestoreIndex: number | null = null
 let skipPositionRestoreUntil = 0
@@ -439,13 +445,10 @@ const serverProgressAutoSaveScheduler = createReaderProgressAutoSaveScheduler({
 const readerProgressExitSaver = createReaderProgressExitSaver({
   disposeAutoSave: () => serverProgressAutoSaveScheduler.dispose(),
   savePosition: () => saveReadingPosition({ force: true }),
-  flushToServer: () => {
-    store.flushProgressToServerKeepalive(true)
-    void store.uploadCurrentBookProgressToLegado().catch(() => undefined)
-  },
-  flushToServerKeepalive: () => {
-    store.flushProgressToServerKeepalive(true)
-    void store.uploadCurrentBookProgressToLegado().catch(() => undefined)
+  flushToServer: () => store.flushProgressToServerKeepalive(true),
+  flushToServerKeepalive: () => store.flushProgressToServerKeepalive(true),
+  flushToLegado: async () => {
+    await store.syncCurrentBookProgressFromLegadoOnExit()
   },
 })
 const isContinuousMode = computed(() =>
@@ -845,11 +848,19 @@ function handleVisibilityChange() {
 }
 
 function persistReadingProgressKeepalive() {
+  captureProgressForSync()
   readerProgressExitSaver.flushKeepalive()
 }
 
 function persistReadingProgressTemporaryKeepalive() {
+  captureProgressForSync()
   readerProgressExitSaver.flushTemporaryKeepalive()
+}
+
+/** 页面隐藏或离开前，先把实际视口位置写回阅读状态。 */
+function captureProgressForSync() {
+  if (!scrollContainerRef.value || !store.book || store.loading) return
+  handleScroll()
 }
 
 async function jumpToRenderedContinuousChapter(targetIndex: number) {
@@ -980,11 +991,6 @@ function getPositionStorageKey() {
   return store.book?.bookUrl ? `${READER_POSITION_PREFIX}${store.book.bookUrl}` : ''
 }
 
-function normalizePositionTimestamp(value?: number | null) {
-  if (typeof value !== 'number' || Number.isNaN(value) || value <= 0) return 0
-  return value < 1_000_000_000_000 ? value * 1000 : value
-}
-
 /** 从打开书时的入口快照构造位置来源(书架/会话记录的进度)。
  *  不读活状态(durChapterPos/durChapterTime): 初始化滚动到章节顶部等过程
  *  会把它们清零, 用清零后的假数据会压过 localStorage 里的真实位置。 */
@@ -995,11 +1001,37 @@ function buildServerSavedPosition(): SavedReadingPosition | null {
   return {
     chapterIndex: snapshot.index,
     progress: Math.max(0, Math.min(1, progress || 0)),
-    updatedAt: normalizePositionTimestamp(snapshot.time),
+    updatedAt: snapshot.time,
   }
 }
 
 function loadSavedReadingPosition() {
+  // 远端位置已经完成精确恢复时，不能再用本地旧快照覆盖它；否则
+  // 章节虽然正确，视口会又被恢复到章节开头。
+  if (store.legadoPositionRestoreCompleted?.index === store.currentIndex) {
+    pendingRestorePosition.value = null
+    pendingRestoreAttempts = 0
+    clearRestoreStabilizers()
+    debugPositionLog('skip saved position after Legado restore', {
+      currentIndex: store.currentIndex,
+    })
+    return
+  }
+  if (store.legadoPositionRestore?.index === store.currentIndex) {
+    pendingRestorePosition.value = null
+    pendingRestoreAttempts = 0
+    clearRestoreStabilizers()
+    debugPositionLog('skip saved position while restoring Legado position', {
+      currentIndex: store.currentIndex,
+    })
+    return
+  }
+  if (pendingLegadoPageRestore.value?.index === store.currentIndex) {
+    pendingRestorePosition.value = null
+    pendingRestoreAttempts = 0
+    clearRestoreStabilizers()
+    return
+  }
   if (shouldSkipPositionRestore(store.currentIndex)) {
     skipPositionRestoreIndex = null
     pendingRestorePosition.value = null
@@ -1032,13 +1064,9 @@ function loadSavedReadingPosition() {
 
     if (serverSaved && serverSaved.chapterIndex === store.currentIndex) {
       // 两个来源进度一致时保留本地(带段落级精度 paragraphIndex);
-      // 服务器位置只在实际更新(跨设备同步)时采用。
-      const agreeWithLocal = !!selected
-        && Math.abs((serverSaved.progress || 0) - (selected.progress || 0)) < 0.02
-      if (
-        !agreeWithLocal
-        && (!selected || normalizePositionTimestamp(serverSaved.updatedAt) > normalizePositionTimestamp(selected.updatedAt))
-      ) {
+      // 远端进度已按章节和字符位置确认更靠后，这里不再比较时间。
+      // 电脑初始化过程可能刚把本地位置写成章节开头，但时间戳更新。
+      if (shouldPreferServerReadingPosition(selected, serverSaved)) {
         selected = serverSaved
         source = 'server'
       }
@@ -1152,6 +1180,203 @@ function scheduleSaveReadingPosition() {
 
 function restoreReadingPosition() {
   return restoreReadingPositionInternal(pendingRestorePosition.value, true)
+}
+
+async function restoreLegadoReadingPosition() {
+  const saved = pendingLegadoPageRestore.value
+  const container = scrollContainerRef.value
+  if (!saved || saved.index !== store.currentIndex || !store.legadoPositionRestore
+    || !store.legadoPositionRestore.ready || store.loading || !container) return false
+
+  const root = isContinuousMode.value
+    ? container.querySelector(`.continuous-chapter[data-chapter-index="${saved.index}"] .chapter-text`)
+    : chapterTextRef.value
+  if (!root) return false
+  const contentLength = root.textContent?.length || 0
+  if (!contentLength) return false
+
+  // 手机端的位置按清洗后的章节文本计算，网页端 DOM 会去掉标签和部分
+  // 换行，两个长度不能直接等同。先映射到当前实际显示的文本长度。
+  const sourceContentLength = Math.max(
+    1,
+    (store.content || '').replace(/<[^>]+>/g, '').length,
+  )
+  const domPosition = Math.max(0, Math.min(
+    contentLength,
+    Math.round(Math.max(0, saved.position) * contentLength / sourceContentLength),
+  ))
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let remaining = domPosition
+  let node: Text | null = null
+  let offset = 0
+  while (walker.nextNode()) {
+    const candidate = walker.currentNode as Text
+    const length = candidate.textContent?.length || 0
+    if (length === 0) continue
+    if (remaining <= length) {
+      node = candidate
+      offset = remaining
+      break
+    }
+    remaining -= length
+  }
+  if (!node) {
+    const fallbackWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    while (fallbackWalker.nextNode()) {
+      const candidate = fallbackWalker.currentNode as Text
+      if ((candidate.textContent?.length || 0) > 0) node = candidate
+    }
+    if (!node) return false
+    offset = node.textContent?.length || 0
+  }
+
+  const range = document.createRange()
+  const nodeLength = node.textContent?.length || 0
+  const safeOffset = Math.max(0, Math.min(offset, nodeLength))
+  // 折叠 Range 在部分 WebView 中没有尺寸，用一个字符范围可以稳定取得
+  // 当前位置的行坐标；章节末尾则取最后一个字符。
+  if (nodeLength > 0 && safeOffset >= nodeLength) {
+    range.setStart(node, nodeLength - 1)
+    range.setEnd(node, nodeLength)
+  } else {
+    range.setStart(node, safeOffset)
+    range.setEnd(node, Math.min(nodeLength, safeOffset + 1))
+  }
+  const rect = range.getClientRects()[0] || range.getBoundingClientRect()
+  const containerRect = container.getBoundingClientRect()
+  const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight)
+  const rootRect = root.getBoundingClientRect()
+  if (rootRect.height <= 0 || container.clientHeight <= 0) return false
+
+  if (isHorizontalPageMode.value) {
+    await rebuildHorizontalPages()
+    const page = node.parentElement?.closest('.horizontal-page') as HTMLElement | null
+    const pages = Array.from(container.querySelectorAll('.horizontal-page')) as HTMLElement[]
+    const pageIndex = page ? pages.indexOf(page) : -1
+    if (pageIndex < 0 || !pages.length) return false
+    horizontalPageIndex.value = Math.max(0, Math.min(pages.length - 1, pageIndex))
+    updateHorizontalEndState()
+    pendingLegadoPageRestore.value = null
+    legadoPositionRestoreAttempts = 0
+    legadoPositionRestoreSettling = false
+    if (legadoPositionRestoreTimer) {
+      clearTimeout(legadoPositionRestoreTimer)
+      legadoPositionRestoreTimer = null
+    }
+    pendingRestorePosition.value = null
+    pendingRestoreAttempts = 0
+    clearRestoreStabilizers()
+    suppressPositionSaveUntil = Date.now() + 700
+    store.setChapterScrollProgress(saved.progress)
+    store.clearLegadoPositionRestore(saved.token)
+    debugPositionLog('restored Legado horizontal position', { saved, pageIndex })
+    return true
+  }
+
+  // 手机端保存的是章节内字符偏移。网页端排版可能不同，因此字符范围
+  // 用于精确定位，范围坐标不可用时按当前正文长度换算比例。
+  // store 在目标章节正文加载完成时已经用同一份正文计算过一次进度。
+  // 优先使用这个结果，避免 DOM 清洗差异让字符偏移重新映射到错误位置。
+  const renderedProgress = Math.max(0, Math.min(1,
+    saved.progress > 0 ? saved.progress : domPosition / contentLength,
+  ))
+  const ratioTargetTop = maxScroll * renderedProgress
+  const hasRangeRect = Boolean(rect.height || rect.width)
+  const rangeTargetTop = hasRangeRect
+    ? container.scrollTop + rect.top - containerRect.top - container.clientHeight * 0.12
+    : ratioTargetTop
+  // 比例位置是稳定结果，字符范围只在与比例位置接近时做精细校正。
+  // 某些 WebView 的 Range 坐标会错误地返回章节顶部，不能直接采用。
+  const rangeTolerance = Math.max(container.clientHeight * 1.5, maxScroll * 0.12)
+  let targetTop = Math.abs(rangeTargetTop - ratioTargetTop) <= rangeTolerance
+    ? rangeTargetTop
+    : ratioTargetTop
+  if (isContinuousMode.value) {
+    const section = root.closest('.continuous-chapter') as HTMLElement | null
+    if (!section) return false
+    const nextSection = section.nextElementSibling as HTMLElement | null
+    const sectionHeight = Math.max(
+      1,
+      (nextSection ? nextSection.offsetTop : container.scrollHeight) - section.offsetTop,
+    )
+    const sectionRatioTarget = Math.max(
+      section.offsetTop,
+      section.offsetTop + sectionHeight * renderedProgress - container.clientHeight * 0.12,
+    )
+    const sectionRangeTolerance = Math.max(container.clientHeight * 1.5, sectionHeight * 0.12)
+    if (!hasRangeRect || Math.abs(rangeTargetTop - sectionRatioTarget) > sectionRangeTolerance) {
+      targetTop = sectionRatioTarget
+    }
+  } else if (!hasRangeRect || (renderedProgress > 0.02 && rangeTargetTop < maxScroll * 0.05)) {
+    targetTop = ratioTargetTop
+  }
+  if (renderedProgress > 0.02 && maxScroll > 4 && targetTop < maxScroll * 0.05) {
+    targetTop = ratioTargetTop
+  }
+  targetTop = Math.max(0, Math.min(maxScroll, targetTop))
+  // 远端位置不在章节开头时，长章节必须已经产生可滚动高度。
+  // 页面尚未完成布局时先等待，不能把 scrollTop=0 当成恢复成功。
+  if (renderedProgress > 0.02 && maxScroll <= 4 && contentLength > container.clientHeight / 2) {
+    return false
+  }
+  suppressContinuousScrollSyncUntil = Date.now() + 700
+  suppressPositionSaveUntil = Date.now() + 700
+  const previousScrollBehavior = container.style.scrollBehavior
+  container.style.scrollBehavior = 'auto'
+  container.scrollTop = targetTop
+  if (Math.abs(container.scrollTop - targetTop) > 2) {
+    container.scrollTo({ top: targetTop, behavior: 'auto' })
+  }
+  container.style.scrollBehavior = previousScrollBehavior
+  legadoPositionRestoreTargetTop = targetTop
+  legadoPositionRestoreTargetMaxScroll = maxScroll
+  legadoPositionRestoreSettling = true
+  store.setChapterScrollProgress(renderedProgress)
+  // 正文转换、高亮和排版可能在滚动后再次改变 DOM 高度。延迟确认，
+  // 避免位置刚恢复就被后续更新弹回章节开头。
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        legadoPositionRestoreSettling = false
+        if (store.legadoPositionRestore?.token !== saved.token) return
+        const currentMaxScroll = Math.max(0, container.scrollHeight - container.clientHeight)
+        const layoutStillChanging = Math.abs(currentMaxScroll - legadoPositionRestoreTargetMaxScroll) > 24
+        if (Math.abs(container.scrollTop - legadoPositionRestoreTargetTop) > 12 || layoutStillChanging) {
+          legadoPositionRestoreSettling = false
+          scheduleLegadoPositionRestore()
+          return
+        }
+        pendingLegadoPageRestore.value = null
+        legadoPositionRestoreAttempts = 0
+        if (legadoPositionRestoreTimer) {
+          clearTimeout(legadoPositionRestoreTimer)
+          legadoPositionRestoreTimer = null
+        }
+        pendingRestorePosition.value = null
+        pendingRestoreAttempts = 0
+        clearRestoreStabilizers()
+        store.clearLegadoPositionRestore(saved.token)
+        saveReadingPosition({ force: true })
+      }, 80)
+    })
+  })
+  debugPositionLog('restored Legado character position', { saved, targetTop })
+  return true
+}
+
+function scheduleLegadoPositionRestore() {
+  if (legadoPositionRestoreSettling) return
+  if (legadoPositionRestoreTimer) return
+  void nextTick().then(async () => {
+    if (await restoreLegadoReadingPosition()) return
+    if (!pendingLegadoPageRestore.value || legadoPositionRestoreAttempts >= 100) return
+    legadoPositionRestoreAttempts += 1
+    legadoPositionRestoreTimer = window.setTimeout(() => {
+      legadoPositionRestoreTimer = null
+      scheduleLegadoPositionRestore()
+    }, 80)
+  })
 }
 
 function clearRestoreStabilizers() {
@@ -1314,7 +1539,18 @@ function restoreReadingPositionInternal(saved: SavedReadingPosition | null, fina
 }
 
 function scheduleRestoreReadingPosition() {
+  if (pendingLegadoPageRestore.value) {
+    scheduleLegadoPositionRestore()
+    return
+  }
+  if (store.restoringLegadoProgress) {
+    debugPositionLog('defer restore: Legado progress is restoring', {
+      currentIndex: store.currentIndex,
+    })
+    return
+  }
   if (restorePositionTimer) clearTimeout(restorePositionTimer)
+  if (legadoPositionRestoreTimer) clearTimeout(legadoPositionRestoreTimer)
   debugPositionLog('schedule restore', {
     attempts: pendingRestoreAttempts,
     hasPending: !!pendingRestorePosition.value,
@@ -2019,12 +2255,6 @@ onMounted(async () => {
   void store.fetchCustomFonts().catch(() => undefined)
   await waitForChapterListReady()
   if (readerViewUnmounted) return
-  if (store.book && store.chapters.length) {
-    await store.restoreCurrentBookProgressFromLegado(store.content || undefined).catch((error) => {
-      appStore.showToast((error as Error).message || '读取网盘阅读进度失败', 'warning')
-    })
-  }
-  if (readerViewUnmounted) return
   loadSavedReadingPosition()
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('wheel', handleReaderWheel, { passive: false })
@@ -2046,9 +2276,6 @@ onMounted(async () => {
   speechTimerTicker = window.setInterval(() => {
     speechTimerNow.value = Date.now()
   }, 15000)
-  legadoSyncTicker = window.setInterval(() => {
-    void store.uploadCurrentBookProgressToLegado().catch(() => undefined)
-  }, 300000)
   await Promise.all([
     store.fetchBookmarks(),
     store.fetchReplaceRules(),
@@ -2080,9 +2307,9 @@ onUnmounted(() => {
     window.removeEventListener('beforeunload', handleBeforeUnload)
     document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (speechTimerTicker) clearInterval(speechTimerTicker)
-  if (legadoSyncTicker) clearInterval(legadoSyncTicker)
   if (restorePositionTimer) clearTimeout(restorePositionTimer)
   if (persistPositionTimer) clearTimeout(persistPositionTimer)
+  if (legadoPositionRestoreTimer) clearTimeout(legadoPositionRestoreTimer)
   if (refreshOfflineCacheStateTimer) clearTimeout(refreshOfflineCacheStateTimer)
   clearRestoreStabilizers()
   disposeSelection()
@@ -2126,7 +2353,7 @@ watch(
   [() => store.content, () => config.value.fontSize, () => config.value.fontWeight, () => config.value.lineHeight, () => config.value.paragraphSpacing, () => config.value.firstLineIndent, showSearch, searchQuery],
   () => {
     if (isHorizontalPageMode.value) {
-      horizontalPageIndex.value = 0
+      if (!pendingLegadoPageRestore.value) horizontalPageIndex.value = 0
       rebuildHorizontalPages()
     }
   },
@@ -2179,7 +2406,7 @@ watch(() => store.content, () => {
 })
 
 watch(() => store.loading, (loading) => {
-  if (!loading && pendingRestorePosition.value) {
+  if (!loading && !store.restoringLegadoProgress && pendingRestorePosition.value) {
     scheduleRestoreReadingPosition()
   }
 })
@@ -2188,6 +2415,40 @@ watch(() => store.book?.bookUrl, () => {
   loadSavedReadingPosition()
   scheduleRefreshOfflineCacheState()
 })
+
+watch(() => store.restoringLegadoProgress, (restoring) => {
+  if (!restoring) {
+    if (pendingLegadoPageRestore.value) {
+      scheduleRestoreReadingPosition()
+    } else if (pendingRestorePosition.value) {
+      scheduleRestoreReadingPosition()
+    }
+  }
+})
+
+watch(() => store.legadoPositionRestore, (restore) => {
+  if (!restore) {
+    pendingLegadoPageRestore.value = null
+    legadoPositionRestoreAttempts = 0
+    if (legadoPositionRestoreTimer) {
+      clearTimeout(legadoPositionRestoreTimer)
+      legadoPositionRestoreTimer = null
+    }
+    return
+  }
+  pendingLegadoPageRestore.value = {
+    index: restore.index,
+    position: restore.position,
+    progress: restore.progress,
+    token: restore.token,
+  }
+  pendingRestorePosition.value = null
+  pendingRestoreAttempts = 0
+  legadoPositionRestoreAttempts = 0
+  legadoPositionRestoreSettling = false
+  clearRestoreStabilizers()
+  scheduleLegadoPositionRestore()
+}, { immediate: true })
 
 watch([showSearch, searchQuery, () => config.value.paragraphSpacing, () => config.value.firstLineIndent, () => config.value.chineseMode, () => store.replaceRules], () => {
   if (isContinuousMode.value) {

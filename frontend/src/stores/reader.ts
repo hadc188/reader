@@ -32,7 +32,11 @@ import {
   type SpeechApiFormat,
   type SpeechAudioFormat,
 } from '../utils/openaiSpeech'
-import { syncLegadoBookProgress, type LegadoBookProgress } from '../api/webdav'
+import {
+  syncLegadoBookProgress,
+  uploadLegadoBookProgress,
+  type LegadoBookProgress,
+} from '../api/webdav'
 import { deleteCustomFont, listCustomFonts, uploadCustomFont, type CustomFontEntry } from '../api/fonts'
 
 const READER_SESSION_KEY = 'reader-last-session'
@@ -278,7 +282,19 @@ export const useReaderStore = defineStore('reader', () => {
   const progressDirty = ref(false)
   const lastServerProgressKey = ref('')
   const pendingLegadoProgress = ref<{ index: number; position: number } | null>(null)
+  const legadoPositionRestore = ref<{
+    index: number
+    position: number
+    progress: number
+    token: number
+    ready: boolean
+  } | null>(null)
+  const legadoPositionRestoreCompleted = ref<{ index: number; token: number } | null>(null)
+  const restoringLegadoProgress = ref(false)
   const customFonts = ref<CustomFontEntry[]>([])
+  let chapterLoadRequestId = 0
+  let bookLoadRequestId = 0
+  let legadoPositionRestoreToken = 0
 
   const currentChapter = computed(() => chapters.value[currentIndex.value] || null)
   const hasNext = computed(() => currentIndex.value < chapters.value.length - 1)
@@ -607,12 +623,13 @@ export const useReaderStore = defineStore('reader', () => {
       if (chapterContent == null) return false
       cachePreloadedContent(nextIndex, chapterContent)
       if (config.enablePreload) void preloadAroundChapter(nextIndex)
-      const persistedProgressTime = session.book.durChapterTime || 0
-      setActiveChapterState(nextIndex, chapterContent, session.chapterScrollProgress || 0)
+      currentIndex.value = nextIndex
+      const savedProgress = Math.max(0, Math.min(1, session.chapterScrollProgress || 0))
+      setActiveChapterState(nextIndex, chapterContent, savedProgress)
       if (book.value) {
-        book.value.durChapterTime = persistedProgressTime
+        book.value.durChapterTime = session.book.durChapterTime || book.value.durChapterTime
         const shelfBook = shelfStore.books.find((item) => item.bookUrl === book.value?.bookUrl)
-        if (shelfBook) shelfBook.durChapterTime = persistedProgressTime
+        if (shelfBook) shelfBook.durChapterTime = book.value.durChapterTime
       }
       markChapterAsRead(nextIndex)
       await restoreCurrentBookProgressFromLegado(chapterContent).catch((error) => {
@@ -749,17 +766,17 @@ export const useReaderStore = defineStore('reader', () => {
     localStorage.setItem('reader-speechConfig', JSON.stringify(speechConfig))
   }
 
-  function normalizeLegadoProgressTime(value?: number | null) {
-    if (typeof value !== 'number' || Number.isNaN(value) || value <= 0) return 0
-    return value < 1_000_000_000_000 ? value * 1000 : value
-  }
-
   async function syncCurrentBookProgressToLegado(
     allowUpload = true,
     contentOverride?: string,
-    forceUpload = false,
+    expectedBookUrl?: string,
+    expectedBookLoadRequestId?: number,
+    applyRemoteProgress = true,
   ) {
     if (!book.value) return null
+    if (loading.value && !restoringLegadoProgress.value) return null
+    if (expectedBookUrl && book.value.bookUrl !== expectedBookUrl) return null
+    if (expectedBookLoadRequestId != null && expectedBookLoadRequestId !== bookLoadRequestId) return null
     if (!appStore.legadoSyncEnabled) return null
     const webdav = appStore.legadoWebdavConfig
     if (!webdav.url || !webdav.account || !webdav.password) return null
@@ -771,28 +788,40 @@ export const useReaderStore = defineStore('reader', () => {
       author: book.value.author,
       durChapterIndex: currentIndex.value,
       durChapterPos: progressPosition,
-      durChapterTime: forceUpload ? Date.now() : (book.value.durChapterTime || 0),
+      durChapterTime: Date.now(),
       durChapterTitle: currentChapter.value?.title || book.value.durChapterTitle,
     }
-    const result = await syncLegadoBookProgress(webdav, progress, allowUpload, forceUpload)
-    if (!result.remote) return result
+    const result = await syncLegadoBookProgress(webdav, progress, allowUpload)
+    if (expectedBookUrl && book.value?.bookUrl !== expectedBookUrl) return result
+    if (expectedBookLoadRequestId != null && expectedBookLoadRequestId !== bookLoadRequestId) return result
+    if (!result?.remote) return result
 
     const remote = result.remote
-    const remoteTime = normalizeLegadoProgressTime(remote.durChapterTime)
-    const localTime = normalizeLegadoProgressTime(progress.durChapterTime)
-    const remotePositionIsAhead = remote.durChapterIndex > currentIndex.value
-      || (remote.durChapterIndex === currentIndex.value && remote.durChapterPos > progress.durChapterPos)
-    const remoteIsNewer = remoteTime > localTime
-      || (remoteTime === localTime && remotePositionIsAhead)
+    // 与手机端保持一致：只按章节索引和章节内字符位置比较，
+    // 不用电脑打开章节时自动更新的 durChapterTime 覆盖真实阅读进度。
+    const remoteIsNewer = remote.durChapterIndex > progress.durChapterIndex
+      || (remote.durChapterIndex === progress.durChapterIndex
+        && remote.durChapterPos > progress.durChapterPos)
     if (!remoteIsNewer) return result
+    if (!applyRemoteProgress) return result
 
-    const targetIndex = Math.max(0, Math.min(chapters.value.length - 1, remote.durChapterIndex))
+    // 手机端直接使用 durChapterIndex。标题只用于显示，不能参与定位，
+    // 否则章节标题重复或书源标题变化时会跳到错误章节。
+    const targetIndex = remote.durChapterIndex
+    if (targetIndex < 0 || targetIndex >= chapters.value.length) return result
     const title = chapters.value[targetIndex]?.title || remote.durChapterTitle || book.value.durChapterTitle
     const remoteProgress = targetIndex === currentIndex.value
       ? Math.max(0, Math.min(1, remote.durChapterPos / plainContentLength))
       : 0
     const encodedRemoteProgress = encodeServerProgress(remoteProgress)
     pendingLegadoProgress.value = { index: targetIndex, position: remote.durChapterPos }
+    legadoPositionRestore.value = {
+      index: targetIndex,
+      position: Math.max(0, remote.durChapterPos),
+      progress: remoteProgress,
+      token: ++legadoPositionRestoreToken,
+      ready: false,
+    }
     currentIndex.value = targetIndex
     Object.assign(book.value, {
       durChapterIndex: targetIndex,
@@ -808,28 +837,83 @@ export const useReaderStore = defineStore('reader', () => {
       durChapterTitle: title,
       durChapterTime: remote.durChapterTime,
     })
-    // 云端进度是更权威的入口位置: 同步更新快照, 保证随后 loadSavedReadingPosition
-    // 把远端位置作为"服务器来源"参与比较(否则快照停留书架旧值, 云端进度被丢弃)。
-    // 跨章时 remoteProgress 编码为 0, 快照须用云端原始字数位置(pendingLegadoProgress)。
+    // 跨章时正文还没有加载，先保存章节索引；目标章节正文加载后再按字符位置恢复。
     snapshotOpenPosition({
       ...book.value,
-      durChapterPos: pendingLegadoProgress.value?.position ?? encodedRemoteProgress,
+      durChapterPos: encodedRemoteProgress,
     })
     saveReaderSession()
     appStore.showToast('已读取手机端阅读进度', 'success')
     return result
   }
 
-  function uploadCurrentBookProgressToLegado() {
-    return syncCurrentBookProgressToLegado(true, undefined, true)
+  async function uploadCurrentBookProgressToLegado() {
+    if (!book.value || loading.value) return null
+    if (!appStore.legadoSyncEnabled) return null
+    const webdav = appStore.legadoWebdavConfig
+    if (!webdav.url || !webdav.account || !webdav.password) return null
+    const plainContentLength = Math.max(1, content.value.replace(/<[^>]+>/g, '').length)
+    const progressPosition = Math.max(0, Math.min(plainContentLength,
+      Math.round(chapterScrollProgress.value * plainContentLength)))
+    const progress: LegadoBookProgress = {
+      name: book.value.name,
+      author: book.value.author,
+      durChapterIndex: currentIndex.value,
+      durChapterPos: progressPosition,
+      durChapterTime: Date.now(),
+      durChapterTitle: currentChapter.value?.title || book.value.durChapterTitle,
+    }
+    return uploadLegadoBookProgress(webdav, progress)
   }
 
-  async function restoreCurrentBookProgressFromLegado(contentOverride?: string) {
-    const result = await syncCurrentBookProgressToLegado(false, contentOverride)
-    if (pendingLegadoProgress.value) {
-      await loadChapter(currentIndex.value)
+  async function restoreCurrentBookProgressFromLegado(
+    contentOverride?: string,
+    expectedBookUrl?: string,
+    expectedBookLoadRequestId?: number,
+  ) {
+    restoringLegadoProgress.value = true
+    try {
+      const result = await syncCurrentBookProgressToLegado(
+        true,
+        contentOverride,
+        expectedBookUrl,
+        expectedBookLoadRequestId,
+      )
+      const isExpectedBook = (!expectedBookUrl || book.value?.bookUrl === expectedBookUrl)
+        && (expectedBookLoadRequestId == null || expectedBookLoadRequestId === bookLoadRequestId)
+      if (isExpectedBook && pendingLegadoProgress.value) {
+        await loadChapter(currentIndex.value)
+      }
+      return result
+    } finally {
+      restoringLegadoProgress.value = false
     }
-    return result
+  }
+
+  /**
+   * 离开阅读页时按手机端 uploadBookProgress 的规则执行：
+   * 直接上传当前进度，不读取、不比较远端进度。
+   */
+  async function syncCurrentBookProgressFromLegadoOnExit() {
+    if (!book.value || restoringLegadoProgress.value || loading.value) return null
+    return uploadCurrentBookProgressToLegado()
+  }
+
+  function clearLegadoPositionRestore(token?: number) {
+    if (token != null && legadoPositionRestore.value?.token !== token) return
+    if (legadoPositionRestore.value) {
+      legadoPositionRestoreCompleted.value = {
+        index: legadoPositionRestore.value.index,
+        token: legadoPositionRestore.value.token,
+      }
+    }
+    legadoPositionRestore.value = null
+  }
+
+  function consumeLegadoPositionRestoreCompleted(index: number) {
+    if (legadoPositionRestoreCompleted.value?.index !== index) return false
+    legadoPositionRestoreCompleted.value = null
+    return true
   }
 
   const systemSpeechSupported = computed(() => (
@@ -1536,8 +1620,13 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   /* ─── Book / chapter ops ─── */
-  async function loadBook(b: Book) {
+  async function loadBook(b: Book, syncProgress = true) {
     loading.value = true
+    const requestId = ++bookLoadRequestId
+    chapterLoadRequestId += 1
+    pendingLegadoProgress.value = null
+    legadoPositionRestore.value = null
+    legadoPositionRestoreCompleted.value = null
     preloadedContent.value.clear()
     preloadingContent.clear()
     chapterPreloadGeneration += 1
@@ -1554,26 +1643,30 @@ export const useReaderStore = defineStore('reader', () => {
     lastServerProgressKey.value = ''
     chaptersLoading.value = true
     try {
-      // 目录必须先拿到才能决定章节, 但正文请求不与目录串行等待:
-      // 目录到达后立即发正文请求, 二者在网络上并行; 网盘进度读取也不阻塞渲染。
+      // 先取初始章正文并恢复手机端进度，再设置当前章节，
+      // 避免 setActiveChapterState 更新阅读时间后遮蔽手机端进度。
       const chapterListPromise = getChapterList({
         bookUrl: b.bookUrl,
         bookSourceUrl: b.origin,
         tocUrl: b.tocUrl,
       })
       chapters.value = await chapterListPromise
+      if (requestId !== bookLoadRequestId || book.value?.bookUrl !== b.bookUrl) return
 
-      const contentLoad = fetchChapterContent(currentIndex.value).catch(() => null)
-      const initialChapterContent = await contentLoad
-      if (initialChapterContent) {
-        cachePreloadedContent(currentIndex.value, initialChapterContent)
-        if (config.enablePreload) void preloadAroundChapter(currentIndex.value)
+      const initialIndex = chapters.value.length
+        ? Math.max(0, Math.min(chapters.value.length - 1, currentIndex.value))
+        : 0
+      currentIndex.value = initialIndex
+      if (!chapters.value.length) throw new Error('目录为空，无法加载正文')
+      await loadChapter(initialIndex)
+      if (requestId !== bookLoadRequestId || book.value?.bookUrl !== b.bookUrl) return
+      if (syncProgress) {
+        await restoreCurrentBookProgressFromLegado(undefined, b.bookUrl, requestId)
+          .catch((error) => {
+            appStore.showToast((error as Error).message || '读取网盘阅读进度失败', 'warning')
+          })
       }
-      // 网盘进度同步放后台, 不拖慢正文首屏
-      void restoreCurrentBookProgressFromLegado(initialChapterContent || undefined)
-        .catch((error) => {
-          appStore.showToast((error as Error).message || '读取网盘阅读进度失败', 'warning')
-        })
+      if (requestId !== bookLoadRequestId || book.value?.bookUrl !== b.bookUrl) return
       saveReaderSession()
       // 打开书后台静默检查目录更新(按书 30 分钟节流), 不阻塞首屏渲染
       void refreshTocFromSource()
@@ -1581,7 +1674,9 @@ export const useReaderStore = defineStore('reader', () => {
       loading.value = false
       throw error
     } finally {
-      chaptersLoading.value = false
+      if (requestId === bookLoadRequestId) {
+        chaptersLoading.value = false
+      }
     }
   }
 
@@ -1661,12 +1756,19 @@ export const useReaderStore = defineStore('reader', () => {
     const chapter = chapters.value[index]
 
     try {
-      return await getBookContent({
+      const chapterContent = await getBookContent({
         bookUrl: book.value.bookUrl,
         chapterUrl: chapter.url,
         bookSourceUrl: book.value.origin,
         refresh: forceRefresh ? 1 : 0,
       })
+      if (typeof chapterContent !== 'string') {
+        throw new Error('书源返回的正文格式无效')
+      }
+      if (!chapterContent.trim()) {
+        throw new Error('书源正文解析为空，请检查正文规则')
+      }
+      return chapterContent
     } catch (error) {
       if (!appStore.isOnline) {
         throw new Error('当前处于离线状态，未缓存章节无法打开')
@@ -1678,6 +1780,13 @@ export const useReaderStore = defineStore('reader', () => {
   async function loadChapter(index: number, forceRefresh = false) {
     if (!book.value || !chapters.value[index]) return
 
+    if (legadoPositionRestoreCompleted.value?.index !== index) {
+      legadoPositionRestoreCompleted.value = null
+    }
+
+    const requestId = ++chapterLoadRequestId
+    const bookUrl = book.value.bookUrl
+
     const cachedContent = !forceRefresh ? preloadedContent.value.get(index) : undefined
     loading.value = cachedContent === undefined
     try {
@@ -1685,19 +1794,44 @@ export const useReaderStore = defineStore('reader', () => {
         ? cachedContent
         : await fetchChapterContent(index, forceRefresh)
       if (chapterContent == null) return
+      if (requestId !== chapterLoadRequestId || book.value?.bookUrl !== bookUrl) return
 
       const previousSavedIndex = book.value.durChapterIndex ?? 0
       const previousSavedProgress = decodeServerProgress(book.value.durChapterPos)
       const isOpeningSavedChapter = !forceRefresh && index === previousSavedIndex
-      const cloudProgress = pendingLegadoProgress.value?.index === index
-        ? Math.max(0, Math.min(1, pendingLegadoProgress.value.position
+      const pendingRemoteProgress = pendingLegadoProgress.value?.index === index
+        ? pendingLegadoProgress.value
+        : null
+      const cloudProgress = pendingRemoteProgress
+        ? Math.max(0, Math.min(1, pendingRemoteProgress.position
           / Math.max(1, chapterContent.replace(/<[^>]+>/g, '').length)))
         : null
       const initialProgress = cloudProgress ?? (isOpeningSavedChapter ? previousSavedProgress : 0)
-      if (cloudProgress != null) pendingLegadoProgress.value = null
 
       cachePreloadedContent(index, chapterContent)
+      if (cloudProgress != null && book.value) {
+        snapshotOpenPosition({
+          ...book.value,
+          durChapterIndex: index,
+          durChapterPos: encodeServerProgress(cloudProgress),
+          durChapterTitle: chapters.value[index]?.title || book.value.durChapterTitle,
+        })
+      }
       setActiveChapterState(index, chapterContent, initialProgress)
+      if (pendingRemoteProgress && cloudProgress != null) {
+        const existingRestore = legadoPositionRestore.value
+        legadoPositionRestore.value = {
+          index,
+          position: Math.max(0, pendingRemoteProgress.position),
+          progress: cloudProgress,
+          token: existingRestore?.index === index
+            && existingRestore.position === pendingRemoteProgress.position
+            ? existingRestore.token
+            : ++legadoPositionRestoreToken,
+          ready: true,
+        }
+        pendingLegadoProgress.value = null
+      }
       markChapterAsRead(index)
       appStore.markChapterRead(book.value.bookUrl, index, chapters.value.length)
       loading.value = false
@@ -1710,7 +1844,7 @@ export const useReaderStore = defineStore('reader', () => {
         void preloadAroundChapter(index)
       }
     } finally {
-      loading.value = false
+      if (requestId === chapterLoadRequestId) loading.value = false
     }
   }
 
@@ -1799,7 +1933,7 @@ export const useReaderStore = defineStore('reader', () => {
       })
       if (!updatedBook) return null
 
-      await loadBook(updatedBook)
+      await loadBook(updatedBook, false)
       const targetIndex = resolveChapterIndexByTitle(
         chapters.value,
         previousChapterTitle,
@@ -1997,6 +2131,11 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function clear() {
+    bookLoadRequestId += 1
+    chapterLoadRequestId += 1
+    restoringLegadoProgress.value = false
+    legadoPositionRestore.value = null
+    legadoPositionRestoreCompleted.value = null
     book.value = null
     openPosition.value = null
     chapters.value = []
@@ -2042,13 +2181,17 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   return {
-    book, chapters, currentIndex, content, loading, chaptersLoading, openPosition,
+    book, chapters, currentIndex, content, loading, chaptersLoading, openPosition, restoringLegadoProgress,
+    legadoPositionRestore,
+    legadoPositionRestoreCompleted,
     currentChapter, hasNext, hasPrev, readingProgress,
       loadBook, loadChapter, fetchChapterContent, setActiveChapterState, refreshContent, nextChapter, prevChapter, clear,
       chapterScrollProgress, setChapterScrollProgress,
       getPersistedReaderSession, restorePersistedSession, syncCurrentBookProgressToLegado,
-      restoreCurrentBookProgressFromLegado,
-      uploadCurrentBookProgressToLegado,
+      restoreCurrentBookProgressFromLegado, uploadCurrentBookProgressToLegado,
+      syncCurrentBookProgressFromLegadoOnExit,
+      clearLegadoPositionRestore,
+      consumeLegadoPositionRestoreCompleted,
       persistProgress, flushProgressToServer, flushProgressToServerKeepalive,
       config, updateConfig, resetConfig, saveConfig, setBackgroundImage, clearBackgroundImage,
       customFonts, fetchCustomFonts, importCustomFont, removeCustomFont, customFontFamily,

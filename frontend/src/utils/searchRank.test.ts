@@ -5,6 +5,7 @@ import {
   mergeSearchResult,
   rankSearchResults,
   searchMergeKey,
+  matchesSourceSwitchAuthor,
 } from './searchRank'
 import type { SearchBook } from '../types'
 
@@ -65,6 +66,15 @@ describe('searchMergeKey', () => {
     expect(searchMergeKey({ name: '遮天', author: '作者：辰东' })).toBe('遮天|辰东')
     expect(searchMergeKey({ name: '遮天', author: '作者: 辰 东' })).toBe('遮天|辰东')
     expect(searchMergeKey({ name: '遮 天', author: '辰东' })).toBe('遮天|辰东')
+  })
+})
+
+describe('source switch author matching', () => {
+  it('keeps missing authors and rejects different authors', () => {
+    expect(matchesSourceSwitchAuthor('作者：天蚕土豆', '天蚕土豆')).toBe(true)
+    expect(matchesSourceSwitchAuthor('天蚕土豆', undefined)).toBe(true)
+    expect(matchesSourceSwitchAuthor(undefined, '未知')).toBe(true)
+    expect(matchesSourceSwitchAuthor('天蚕土豆', '辰东')).toBe(false)
   })
 })
 

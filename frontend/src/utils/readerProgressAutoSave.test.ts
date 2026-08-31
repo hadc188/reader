@@ -63,11 +63,13 @@ describe('readerProgressAutoSave', () => {
     const savePosition = vi.fn()
     const flushToServer = vi.fn()
     const flushToServerKeepalive = vi.fn()
+    const flushToLegado = vi.fn().mockResolvedValue(undefined)
     const saver = createReaderProgressExitSaver({
       disposeAutoSave,
       savePosition,
       flushToServer,
       flushToServerKeepalive,
+      flushToLegado,
     })
 
     await saver.flushBeforeRouteLeave()
@@ -78,6 +80,7 @@ describe('readerProgressAutoSave', () => {
     expect(savePosition).toHaveBeenCalledTimes(1)
     expect(flushToServer).toHaveBeenCalledTimes(1)
     expect(flushToServerKeepalive).not.toHaveBeenCalled()
+    expect(flushToLegado).toHaveBeenCalledTimes(1)
   })
 
   it('sends only one keepalive when pagehide, beforeunload, and unmount overlap', () => {

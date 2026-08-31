@@ -4,7 +4,7 @@
       <div v-if="modelValue" class="modal-overlay" @click="close"></div>
     </Transition>
     <Transition name="scale">
-      <div v-if="modelValue && book" class="modal-container" @click.self="close">
+      <div v-if="modelValue && book" :key="detailKey" class="modal-container" @click.self="close">
         <div class="detail-modal">
           <button class="modal-close" @click="close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -61,7 +61,7 @@
                 :key="`${cand.origin}::${cand.bookUrl}`"
                 class="source-item"
                 :class="{ selected: selectedSource?.origin === cand.origin && selectedSource?.bookUrl === cand.bookUrl }"
-                @click="selectedSource = cand"
+                @click="selectSource(cand)"
               >
                 <span class="source-radio" :class="{ checked: selectedSource?.origin === cand.origin && selectedSource?.bookUrl === cand.bookUrl }" />
                 <span class="source-name">{{ sourceNameByOrigin(cand.origin) }}</span>
@@ -139,7 +139,10 @@ import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import type { Book, SearchBook, BookChapter } from '../types'
 import { isLocalBook } from '../utils/localBook'
-import { searchMergeKey } from '../utils/searchRank'
+import { matchesSourceSwitchAuthor, searchMergeKey } from '../utils/searchRank'
+
+const SOURCE_CANDIDATES_CACHE_LIMIT = 20
+const sourceCandidatesCache = new Map<string, SearchBook[]>()
 
 const props = defineProps<{
   modelValue: boolean
@@ -163,10 +166,19 @@ const showAllChapters = ref(false)
 const sourceCandidates = ref<SearchBook[]>([])
 const sourcesLoading = ref(false)
 const selectedSource = ref<SearchBook | null>(null)
+const sourceCatalog = ref(new Map<string, string>())
 const removingFromShelf = ref(false)
+let detailLoadId = 0
+let chapterLoadId = 0
 let sourceSSE: SseLike | null = null
 
 const isLocal = computed(() => isLocalBook(props.book))
+
+const detailKey = computed(() => {
+  const book = props.book
+  if (!book) return ''
+  return `${book.name}::${book.author}::${book.bookUrl}::${book.origin}`
+})
 
 const coverSrc = computed(() => {
   if (coverFailed.value || !props.book) return ''
@@ -179,153 +191,275 @@ const displayChapters = computed(() => {
   return chapters.value.slice(0, 50)
 })
 
-const enabledSourcesByUrl = computed(() => new Map(
-  sourceStore.sources
-    .filter((source) => source.enabled !== false)
-    .map((source) => [source.bookSourceUrl, source]),
-))
-
 const displayOriginName = computed(() => {
   if (!props.book) return ''
-  return enabledSourcesByUrl.value.get(props.book.origin)?.bookSourceName || ''
-})
-
-const enabledSourceSignature = computed(() => {
-  return Array.from(enabledSourcesByUrl.value.keys()).join('\n')
+  return sourceCatalog.value.get(sourceKey(props.book.origin))
+    || (props.book as Book).originName
+    || props.book.origin
 })
 
 function sourceNameByOrigin(origin: string): string {
-  const found = sourceStore.sources.find((s) => s.bookSourceUrl === origin)
-  return found?.bookSourceName || origin
+  return sourceCatalog.value.get(sourceKey(origin))
+    || sourceStore.sources.find((source) => sourceKey(source.bookSourceUrl) === sourceKey(origin))?.bookSourceName
+    || origin
+}
+
+function isCurrentDetail(loadId: number, bookKey: string): boolean {
+  return loadId === detailLoadId
+    && props.modelValue
+    && detailKey.value === bookKey
+}
+
+function sourceKey(origin: string): string {
+  const normalized = origin.trim()
+  if (!normalized) return ''
+  return normalized.replace(/\/+$/, '')
+}
+
+function candidateKey(candidate: SearchBook): string {
+  return `${sourceKey(candidate.origin)}::${candidate.bookUrl}`
+}
+
+function sourceCatalogSignature(): string {
+  return sourceStore.sources
+    .filter((source) => source.enabled !== false)
+    .map((source) => sourceKey(source.bookSourceUrl))
+    .sort()
+    .join('\n')
+}
+
+function sourceCandidatesCacheKey(bookKey: string): string {
+  return `${bookKey}::${sourceCatalogSignature()}`
+}
+
+function storeSourceCandidatesCache(key: string, candidates: SearchBook[]) {
+  sourceCandidatesCache.delete(key)
+  sourceCandidatesCache.set(key, candidates)
+  while (sourceCandidatesCache.size > SOURCE_CANDIDATES_CACHE_LIMIT) {
+    const oldestKey = sourceCandidatesCache.keys().next().value
+    if (oldestKey === undefined) break
+    sourceCandidatesCache.delete(oldestKey)
+  }
+}
+
+function canonicalSourceOrigin(origin: string): string {
+  const found = sourceStore.sources.find((source) => (
+    sourceKey(source.bookSourceUrl) === sourceKey(origin)
+  ))
+  return found?.bookSourceUrl || origin
+}
+
+function resetDetailState() {
+  closeSourceSSE()
+  coverFailed.value = false
+  showAllChapters.value = false
+  chapters.value = []
+  sourceCandidates.value = []
+  selectedSource.value = null
+  sourceCatalog.value = new Map()
+  sourcesLoading.value = false
 }
 
 function closeSourceSSE() {
-  if (sourceSSE) {
-    sourceSSE.close()
-    sourceSSE = null
-  }
+  sourceSSE?.close()
+  sourceSSE = null
 }
 
-function loadSourceCandidates() {
-  closeSourceSSE()
+function loadSourceCandidates(loadId: number, bookKey: string) {
   const b = props.book
   if (!b || !b.name) {
-    sourceCandidates.value = []
-    selectedSource.value = null
     return
   }
+  closeSourceSSE()
   sourcesLoading.value = true
-  sourceCandidates.value = []
-  selectedSource.value = null
-  const base = b as Book
-  const mergedSearchCandidates = (b as SearchBook).sourceCandidates || []
-  const initialCandidates: SearchBook[] = [
-    {
-      name: base.name,
-      author: base.author,
-      bookUrl: base.bookUrl,
-      origin: base.origin,
-      coverUrl: base.coverUrl,
-      intro: base.intro,
-      kind: base.kind,
-      lastChapter: base.latestChapterTitle,
-    },
-    ...mergedSearchCandidates,
-  ]
-  const seenSources = new Set<string>()
-  for (const candidate of initialCandidates) {
-    if (!candidate.origin || !candidate.bookUrl) continue
-    if (!enabledSourcesByUrl.value.has(candidate.origin) || seenSources.has(candidate.origin)) continue
-    seenSources.add(candidate.origin)
-    sourceCandidates.value.push(candidate)
+  const current = toSearchBook(b as Book)
+  const storedCandidates = (b as Book).sourceCandidates || []
+  const initialCandidates = [current, ...storedCandidates]
+  const cachedCandidates = sourceCandidatesCache.get(sourceCandidatesCacheKey(bookKey))
+  if (cachedCandidates) {
+    if (!isCurrentDetail(loadId, bookKey)) return
+    setSourceCandidates([...initialCandidates, ...cachedCandidates])
+    sourcesLoading.value = false
+    return
   }
-  if (sourceCandidates.value.length) {
-    selectedSource.value = sourceCandidates.value[0]
-  }
+  // 先显示当前书源和已经保存的候选，其他书源搜索完成后逐个追加。
+  setSourceCandidates(initialCandidates)
+
   const stream = getAvailableBookSourceSSE({
     url: b.bookUrl,
     name: b.name,
     author: b.author,
     origin: b.origin,
     lastIndex: -1,
+    resultLimit: 100,
     concurrentCount: 12,
   })
   sourceSSE = stream
-  stream.onmessage = (event) => {
-    const data = event.data as { data?: SearchBook[] }
-    if (data.data && Array.isArray(data.data)) {
-      const seen = new Set(sourceCandidates.value.map((candidate) => candidate.origin))
-      for (const cand of data.data) {
-        if (!enabledSourcesByUrl.value.has(cand.origin)) continue
-        if (!seen.has(cand.origin)) {
-          seen.add(cand.origin)
-          sourceCandidates.value.push(cand)
-        }
-      }
-      if (!selectedSource.value && sourceCandidates.value.length > 0) {
-        selectedSource.value = sourceCandidates.value[0]
-      }
+  let completed = false
+
+  const finish = (cacheResult: boolean) => {
+    if (completed) return
+    completed = true
+    if (sourceSSE === stream) sourceSSE = null
+    if (!isCurrentDetail(loadId, bookKey)) return
+    sourcesLoading.value = false
+    if (cacheResult) {
+      storeSourceCandidatesCache(
+        sourceCandidatesCacheKey(bookKey),
+        sourceCandidates.value.slice(),
+      )
     }
   }
-  stream.addEventListener('end', () => {
-    sourcesLoading.value = false
-    closeSourceSSE()
+
+  stream.onmessage = (event) => {
+    if (sourceSSE !== stream || !isCurrentDetail(loadId, bookKey)) {
+      stream.close()
+      return
+    }
+    const data = event.data as { data?: SearchBook[] }
+    if (Array.isArray(data.data) && data.data.length > 0) {
+      setSourceCandidates([...sourceCandidates.value, ...data.data])
+    }
+  }
+
+  stream.addEventListener('end', (event) => {
+    const payload = event.data as { hasMore?: boolean }
+    finish(payload.hasMore !== true)
   })
-  stream.onerror = () => {
-    sourcesLoading.value = false
-    closeSourceSSE()
+  stream.onerror = () => finish(false)
+}
+
+function toSearchBook(book: Book): SearchBook {
+  return {
+    name: book.name,
+    author: book.author,
+    bookUrl: book.bookUrl,
+    origin: book.origin,
+    coverUrl: book.coverUrl,
+    intro: book.intro,
+    kind: book.kind,
+    lastChapter: book.latestChapterTitle,
   }
 }
 
-async function loadChaptersFor(bookUrl: string, origin: string) {
+function setSourceCandidates(candidates: SearchBook[]) {
+  const previousSelection = selectedSource.value ? candidateKey(selectedSource.value) : ''
+  const currentOrigin = sourceKey(props.book?.origin || '')
+  const currentAuthor = props.book?.author
+  const seenSources = new Set<string>()
+  sourceCandidates.value = candidates.map((candidate) => ({
+    ...candidate,
+    origin: canonicalSourceOrigin(candidate.origin),
+  })).filter((candidate) => {
+    if (!candidate.origin || !candidate.bookUrl) return false
+    if (!matchesSourceSwitchAuthor(currentAuthor, candidate.author)) return false
+    const originKey = sourceKey(candidate.origin)
+    if (!sourceCatalog.value.has(originKey) || seenSources.has(originKey)) {
+      return false
+    }
+    seenSources.add(originKey)
+    return true
+  })
+  selectedSource.value = sourceCandidates.value.find((candidate) => (
+    candidateKey(candidate) === previousSelection
+  )) || sourceCandidates.value.find((candidate) => (
+    sourceKey(candidate.origin) === currentOrigin
+  )) || sourceCandidates.value[0] || null
+}
+
+function selectSource(candidate: SearchBook) {
+  if (!props.modelValue || !props.book) return
+  if (
+    sourceKey(selectedSource.value?.origin || '') === sourceKey(candidate.origin)
+    && selectedSource.value?.bookUrl === candidate.bookUrl
+  ) return
+  selectedSource.value = candidate
+  void loadChaptersFor(candidate.bookUrl, candidate.origin, detailLoadId, detailKey.value)
+}
+
+async function loadChaptersFor(
+  bookUrl: string,
+  origin: string,
+  loadId = detailLoadId,
+  bookKey = detailKey.value,
+) {
+  const requestId = ++chapterLoadId
   chaptersLoading.value = true
   try {
-    chapters.value = await getChapterList({ bookUrl, bookSourceUrl: origin })
+    const nextChapters = await getChapterList({ bookUrl, bookSourceUrl: origin })
+    if (!isCurrentDetail(loadId, bookKey) || requestId !== chapterLoadId) return
+    chapters.value = nextChapters
   } catch {
+    if (!isCurrentDetail(loadId, bookKey) || requestId !== chapterLoadId) return
     chapters.value = []
   } finally {
-    chaptersLoading.value = false
+    if (requestId === chapterLoadId) chaptersLoading.value = false
   }
 }
 
-watch(() => props.modelValue, async (visible) => {
-  if (visible && props.book) {
-    coverFailed.value = false
-    showAllChapters.value = false
-    chapters.value = []
-    if (isLocal.value) {
-      sourceCandidates.value = []
-      selectedSource.value = null
-      sourcesLoading.value = false
-    } else {
-      await sourceStore.fetchSources(true).catch(() => undefined)
-      if (!props.modelValue || !props.book) return
-      loadSourceCandidates()
-    }
-    // Load the current source's chapters; switching source below reloads them.
-    const b = props.book as Book
-    if (isLocal.value || enabledSourcesByUrl.value.has(b.origin)) {
-      await loadChaptersFor(b.bookUrl, b.origin)
-    }
-  } else {
-    closeSourceSSE()
-  }
-})
+watch([() => props.modelValue, detailKey], async ([visible, bookKey]) => {
+  const loadId = ++detailLoadId
+  chapterLoadId += 1
 
-// Reload the chapter list when the user switches source in the detail modal.
-watch(selectedSource, async (sel) => {
-  if (!sel) return
-  await loadChaptersFor(sel.bookUrl, sel.origin)
-})
-
-watch(enabledSourceSignature, () => {
-  sourceCandidates.value = sourceCandidates.value.filter((candidate) => (
-    enabledSourcesByUrl.value.has(candidate.origin)
-  ))
-  if (selectedSource.value && !enabledSourcesByUrl.value.has(selectedSource.value.origin)) {
-    selectedSource.value = sourceCandidates.value[0] || null
+  if (!visible || !props.book) {
+    resetDetailState()
+    return
   }
-})
+
+  resetDetailState()
+  const b = props.book as Book
+  if (isLocal.value) {
+    await loadChaptersFor(b.bookUrl, b.origin, loadId, bookKey)
+    return
+  }
+
+  sourcesLoading.value = true
+  // The source manager force-refreshes this shared store after source changes.
+  // A detail view only needs to initialize it when no source list exists yet.
+  if (sourceStore.sources.length === 0) {
+    await sourceStore.fetchSources().catch(() => undefined)
+  }
+  if (!isCurrentDetail(loadId, bookKey)) return
+
+  sourceCatalog.value = new Map(
+    sourceStore.sources
+      .filter((source) => source.enabled !== false)
+      .map((source) => [sourceKey(source.bookSourceUrl), source.bookSourceName]),
+  )
+  if (!sourceCatalog.value.has(sourceKey(b.origin))) {
+    // 保留当前书籍自身的源，避免书源列表加载失败时详情页完全没有可选项。
+    sourceCatalog.value.set(sourceKey(b.origin), (b as Book).originName || b.origin)
+  }
+  const sourceTask = loadSourceCandidates(loadId, bookKey)
+  await Promise.all([
+    sourceTask,
+    loadChaptersFor(b.bookUrl, b.origin, loadId, bookKey),
+  ])
+}, { immediate: true })
+
+watch(() => sourceStore.availabilityVersion, async () => {
+  if (!props.modelValue || !props.book || isLocal.value) return
+  sourceCandidatesCache.clear()
+  const loadId = ++detailLoadId
+  chapterLoadId += 1
+  const bookKey = detailKey.value
+  resetDetailState()
+  sourcesLoading.value = true
+  if (!isCurrentDetail(loadId, bookKey)) return
+  sourceCatalog.value = new Map(
+    sourceStore.sources
+      .filter((source) => source.enabled !== false)
+      .map((source) => [sourceKey(source.bookSourceUrl), source.bookSourceName]),
+  )
+  const b = props.book as Book
+  if (!sourceCatalog.value.has(sourceKey(b.origin))) {
+    sourceCatalog.value.set(sourceKey(b.origin), b.originName || b.origin)
+  }
+  await Promise.all([
+    loadSourceCandidates(loadId, bookKey),
+    loadChaptersFor(b.bookUrl, b.origin, loadId, bookKey),
+  ])
+}, { flush: 'post' })
 
 function close() {
   emit('update:modelValue', false)
@@ -405,7 +539,6 @@ async function startReading() {
   const b = activeBook()
   await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
   await readerStore.loadBook(b)
-  await readerStore.loadChapter(readerStore.currentIndex)
   close()
   router.push('/reader')
 }

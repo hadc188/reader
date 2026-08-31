@@ -51,8 +51,8 @@ pub struct LegadoBookProgress {
 pub struct LegadoProgressRequest {
     pub config: LegadoWebdavConfig,
     pub progress: LegadoBookProgress,
+    #[serde(default)]
     pub allow_upload: Option<bool>,
-    pub force_upload: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -451,19 +451,10 @@ pub async fn sync_legado_book_progress(
         progress_dir,
         legado_progress_file_name(&req.progress.name, &req.progress.author)
     );
-    if req.force_upload.unwrap_or(false) {
-        upload_legado_progress(&client, &file_url, &req.config, &req.progress).await?;
-        return Ok(ApiResponse::ok(LegadoProgressResponse {
-            configured: true,
-            remote: None,
-            uploaded: true,
-        }));
-    }
-
     let remote = download_legado_progress(&client, &file_url, &req.config).await?;
     let remote_is_newer = remote
         .as_ref()
-        .is_some_and(|value| compare_sync_progress(value, &req.progress).is_gt());
+        .is_some_and(|value| compare_progress(value, &req.progress).is_gt());
 
     if remote_is_newer {
         return Ok(ApiResponse::ok(LegadoProgressResponse {
@@ -476,7 +467,7 @@ pub async fn sync_legado_book_progress(
     let should_upload = req.allow_upload.unwrap_or(true)
         && remote
             .as_ref()
-            .is_none_or(|value| compare_sync_progress(&req.progress, value).is_gt());
+            .is_none_or(|value| compare_progress(&req.progress, value).is_gt());
     if should_upload {
         upload_legado_progress(&client, &file_url, &req.config, &req.progress).await?;
     }
@@ -485,6 +476,27 @@ pub async fn sync_legado_book_progress(
         configured: true,
         remote: None,
         uploaded: should_upload,
+    }))
+}
+
+#[tauri::command]
+pub async fn upload_legado_book_progress(
+    req: LegadoProgressRequest,
+) -> Result<ApiResponse<LegadoProgressResponse>, AppError> {
+    validate_progress(&req.progress)?;
+    let client = webdav_client()?;
+    let (_, progress_dir) = ensure_legado_progress_dir(&client, &req.config).await?;
+    let file_url = format!(
+        "{}{}",
+        progress_dir,
+        legado_progress_file_name(&req.progress.name, &req.progress.author)
+    );
+    upload_legado_progress(&client, &file_url, &req.config, &req.progress).await?;
+
+    Ok(ApiResponse::ok(LegadoProgressResponse {
+        configured: true,
+        remote: None,
+        uploaded: true,
     }))
 }
 
@@ -867,22 +879,6 @@ fn compare_progress(left: &LegadoBookProgress, right: &LegadoBookProgress) -> st
         .then(left.dur_chapter_pos.cmp(&right.dur_chapter_pos))
 }
 
-fn compare_sync_progress(left: &LegadoBookProgress, right: &LegadoBookProgress) -> std::cmp::Ordering {
-    let left_time = normalize_progress_time(left.dur_chapter_time);
-    let right_time = normalize_progress_time(right.dur_chapter_time);
-    left_time
-        .cmp(&right_time)
-        .then_with(|| compare_progress(left, right))
-}
-
-fn normalize_progress_time(value: i64) -> i64 {
-    if value > 0 && value < 1_000_000_000_000 {
-        value.saturating_mul(1000)
-    } else {
-        value
-    }
-}
-
 fn legado_progress_file_name(name: &str, author: &str) -> String {
     let normalized = format!("{}_{}", name, author)
         .chars()
@@ -1122,23 +1118,23 @@ mod tests {
     }
 
     #[test]
-    fn sync_comparison_prefers_newer_reading_time_even_on_an_earlier_chapter() {
+    fn progress_comparison_ignores_reading_time() {
         let local = LegadoBookProgress {
             name: "书".to_string(),
             author: "作者".to_string(),
-            dur_chapter_index: 105,
-            dur_chapter_pos: 200,
-            dur_chapter_time: 1_700_000_000_000,
+            dur_chapter_index: 46,
+            dur_chapter_pos: 0,
+            dur_chapter_time: 1_700_000_100_000,
             dur_chapter_title: None,
         };
         let remote = LegadoBookProgress {
-            dur_chapter_index: 103,
-            dur_chapter_pos: 50,
-            dur_chapter_time: 1_700_000_100_000,
+            dur_chapter_index: 47,
+            dur_chapter_pos: 2_641,
+            dur_chapter_time: 1_700_000_000_000,
             ..local.clone()
         };
 
-        assert!(compare_sync_progress(&remote, &local).is_gt());
-        assert!(compare_sync_progress(&local, &remote).is_lt());
+        assert!(compare_progress(&remote, &local).is_gt());
+        assert!(compare_progress(&local, &remote).is_lt());
     }
 }

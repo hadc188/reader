@@ -104,7 +104,15 @@ pub async fn save_book_source(
     let user_ns = "default";
     let source =
         book_source_from_value(req).map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let existing_source = state
+        .book_source_service
+        .get(&user_ns, &source.book_source_url)
+        .await?;
+    let source_became_available = source_became_available(existing_source.as_ref(), &source);
     state.book_source_service.save(&user_ns, source).await?;
+    if source_became_available {
+        invalidate_shelf_book_source_caches(&state, &user_ns).await?;
+    }
     Ok(ApiResponse::ok(serde_json::json!({"saved": true})))
 }
 
@@ -118,11 +126,24 @@ pub async fn save_book_sources(
     if sources.is_empty() {
         return Err(AppError::BadRequest("empty book sources".to_string()));
     }
+    let existing_sources = state
+        .book_source_service
+        .list(&user_ns)
+        .await?
+        .into_iter()
+        .map(|source| (source.book_source_url.clone(), source))
+        .collect::<HashMap<_, _>>();
+    let has_new_available_source = sources
+        .iter()
+        .any(|source| source_became_available(existing_sources.get(&source.book_source_url), source));
     let count = sources.len();
     state
         .book_source_service
         .save_many(&user_ns, sources)
         .await?;
+    if has_new_available_source {
+        invalidate_shelf_book_source_caches(&state, &user_ns).await?;
+    }
     Ok(ApiResponse::ok(
         serde_json::json!({"saved": true, "count": count}),
     ))
@@ -683,6 +704,27 @@ fn extract_sources(payload: serde_json::Value) -> Result<Vec<BookSource>, AppErr
     ))
 }
 
+async fn invalidate_shelf_book_source_caches(
+    state: &AppState,
+    user_ns: &str,
+) -> Result<(), AppError> {
+    let books = state.book_service.get_bookshelf(user_ns).await?;
+    for book in books {
+        state
+            .book_service
+            .delete_book_sources_cache(user_ns, &book.book_url)
+            .await?;
+    }
+    Ok(())
+}
+
+fn source_became_available(existing: Option<&BookSource>, incoming: &BookSource) -> bool {
+    incoming.is_enabled() && match existing {
+        Some(source) => !source.is_enabled(),
+        None => true,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RemoteSourceParam {
     url: String,
@@ -838,5 +880,23 @@ mod tests {
         assert!(matches!(err, AppError::BadRequest(_)));
         let err = extract_sources(json!(42)).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn source_became_available_only_for_new_or_reenabled_sources() {
+        let enabled = BookSource {
+            book_source_url: "https://source.example".to_string(),
+            enabled: Some(true),
+            ..BookSource::default()
+        };
+        let disabled = BookSource {
+            enabled: Some(false),
+            ..enabled.clone()
+        };
+
+        assert!(source_became_available(None, &enabled));
+        assert!(!source_became_available(None, &disabled));
+        assert!(source_became_available(Some(&disabled), &enabled));
+        assert!(!source_became_available(Some(&enabled), &enabled));
     }
 }

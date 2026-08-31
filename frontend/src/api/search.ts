@@ -31,14 +31,6 @@ export function searchBookMultiSSE(params: {
   })
 }
 
-export function exploreBook(params: {
-  ruleFindUrl: string
-  bookSourceUrl: string
-  page?: number
-}) {
-  return post<SearchBook[]>('/exploreBook', params).then((r) => r.data)
-}
-
 export function getAvailableBookSource(params: {
   url?: string
   name?: string
@@ -61,6 +53,7 @@ export function getAvailableBookSourceSSE(params: {
   origin?: string
   refresh?: number
   lastIndex?: number
+  resultLimit?: number
   concurrentCount?: number
 }) {
   return openSse('get_available_book_source_sse', {
@@ -70,6 +63,7 @@ export function getAvailableBookSourceSSE(params: {
     ...(params.origin ? { origin: params.origin } : {}),
     ...(typeof params.refresh !== 'undefined' ? { refresh: params.refresh } : {}),
     lastIndex: params.lastIndex ?? -1,
+    ...(typeof params.resultLimit !== 'undefined' ? { resultLimit: params.resultLimit } : {}),
     concurrentCount: params.concurrentCount ?? 8,
   })
 }

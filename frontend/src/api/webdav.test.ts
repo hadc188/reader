@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createWebdavFileBlob, decodeWebdavFileText, syncLegadoBookProgress } from './webdav'
+import {
+  createWebdavFileBlob,
+  decodeWebdavFileText,
+  syncLegadoBookProgress,
+  uploadLegadoBookProgress,
+} from './webdav'
 import { invokeEnvelope } from './invoke'
 
 vi.mock('./invoke', () => ({
@@ -43,10 +48,34 @@ describe('webdav binary file conversion', () => {
       durChapterTitle: '第四章',
     }
 
-    await syncLegadoBookProgress(config, progress, true, true)
+    await syncLegadoBookProgress(config, progress, true)
 
     expect(invokeEnvelope).toHaveBeenCalledWith('sync_legado_book_progress', {
-      req: { config, progress, allowUpload: true, forceUpload: true },
+      req: { config, progress, allowUpload: true },
+    })
+  })
+
+  it('wraps direct Legado progress upload without comparison options', async () => {
+    vi.mocked(invokeEnvelope).mockResolvedValue({ configured: true, uploaded: true })
+    const config = {
+      url: 'https://dav.example.test/',
+      account: 'reader',
+      password: 'secret',
+      directory: 'legado',
+    }
+    const progress = {
+      name: '测试书籍',
+      author: '测试作者',
+      durChapterIndex: 3,
+      durChapterPos: 120,
+      durChapterTime: 123456,
+      durChapterTitle: '第四章',
+    }
+
+    await uploadLegadoBookProgress(config, progress)
+
+    expect(invokeEnvelope).toHaveBeenCalledWith('upload_legado_book_progress', {
+      req: { config, progress },
     })
   })
 })

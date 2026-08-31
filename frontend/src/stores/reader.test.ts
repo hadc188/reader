@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { useAppStore } from './app'
 import { nightThemeIndex, useReaderStore } from './reader'
 import { getBookContent, getChapterList, saveBookProgress } from '../api/bookshelf'
-import { syncLegadoBookProgress } from '../api/webdav'
+import { syncLegadoBookProgress, uploadLegadoBookProgress } from '../api/webdav'
 import { requestOpenAISpeechAudio } from '../utils/openaiSpeech'
 
 vi.mock('../api/bookshelf', () => ({
@@ -26,6 +26,7 @@ vi.mock('../api/replaceRule', () => ({
 
 vi.mock('../api/webdav', () => ({
   syncLegadoBookProgress: vi.fn(),
+  uploadLegadoBookProgress: vi.fn(),
 }))
 
 vi.mock('../utils/recentBooks', () => ({
@@ -58,6 +59,7 @@ describe('reader local txt chapters', () => {
     vi.mocked(saveBookProgress).mockReset()
     vi.mocked(saveBookProgress).mockResolvedValue('ok')
     vi.mocked(syncLegadoBookProgress).mockReset()
+    vi.mocked(uploadLegadoBookProgress).mockReset()
   })
 
   it('fetches uploaded local txt content from backend when offline', async () => {
@@ -267,7 +269,114 @@ describe('reader local txt chapters', () => {
     await readerStore.restoreCurrentBookProgressFromLegado()
 
     // 快照必须跟着云端进度走(用云端原始字数位置), 否则 loadSavedReadingPosition 会丢弃远端位置
-    expect(readerStore.openPosition).toEqual({ index: 1, position: 4, time: 123456 })
+    expect(readerStore.openPosition).toEqual({ index: 1, position: 5000, time: 123456 })
+  })
+
+  it('prefers a later remote chapter even when its timestamp is older', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    appStore.setLegadoWebdavConfig({
+      url: 'https://dav.example.test/',
+      account: 'reader',
+      password: 'secret',
+      directory: 'legado',
+    })
+    const initialTime = 1_700_000_000_000
+    const book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTime: initialTime,
+    }
+    vi.mocked(getChapterList).mockResolvedValue([
+      { title: '第一章', url: 'chapter-0', index: 0 },
+      { title: '第二章', url: 'chapter-1', index: 1 },
+    ])
+    vi.mocked(getBookContent).mockResolvedValue('12345678')
+    vi.mocked(syncLegadoBookProgress).mockResolvedValue({
+      configured: true,
+      uploaded: false,
+      remote: {
+        name: '测试书籍',
+        author: '测试作者',
+        durChapterIndex: 1,
+        durChapterPos: 4,
+        durChapterTime: initialTime - 1000,
+        durChapterTitle: '第二章',
+      },
+    })
+
+    await readerStore.loadBook(book)
+
+    expect(syncLegadoBookProgress).toHaveBeenCalledWith(
+      appStore.legadoWebdavConfig,
+      expect.objectContaining({ durChapterIndex: 0 }),
+      true,
+    )
+    expect(readerStore.currentIndex).toBe(1)
+    expect(readerStore.chapterScrollProgress).toBe(0.5)
+    expect(readerStore.book?.durChapterPos).toBe(5000)
+  })
+
+  it('still loads the local chapter when Legado sync is disabled', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setLegadoSyncEnabled(false)
+    const book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTime: 1_700_000_000_000,
+    }
+    vi.mocked(getChapterList).mockResolvedValue([
+      { title: '第一章', url: 'chapter-0', index: 0 },
+    ])
+    vi.mocked(getBookContent).mockResolvedValue('本地章节正文')
+
+    await readerStore.loadBook(book)
+
+    expect(readerStore.content).toBe('本地章节正文')
+    expect(syncLegadoBookProgress).not.toHaveBeenCalled()
+  })
+
+  it('uses the saved chapter when restoring an offline reader session', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(false)
+    const savedBook = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+      durChapterIndex: 1,
+      durChapterPos: 5000,
+      durChapterTime: 123456,
+    }
+    localStorage.setItem('reader-last-session', JSON.stringify({
+      book: savedBook,
+      chapters: [
+        { title: '第一章', url: 'chapter-0', index: 0 },
+        { title: '第二章', url: 'chapter-1', index: 1 },
+      ],
+      currentIndex: 1,
+      chapterScrollProgress: 0.5,
+      updatedAt: 123456,
+    }))
+    vi.mocked(getBookContent).mockResolvedValue('离线正文')
+
+    await expect(readerStore.restorePersistedSession()).resolves.toBe(true)
+
+    expect(readerStore.currentIndex).toBe(1)
+    expect(readerStore.content).toBe('离线正文')
+    expect(readerStore.chapterScrollProgress).toBe(0.5)
+    expect(syncLegadoBookProgress).not.toHaveBeenCalled()
   })
 
   it('restores the newer Legado chapter and position before reading', async () => {
@@ -314,12 +423,67 @@ describe('reader local txt chapters', () => {
     expect(syncLegadoBookProgress).toHaveBeenCalledWith(
       appStore.legadoWebdavConfig,
       expect.objectContaining({ durChapterIndex: 0 }),
-      false,
-      false,
+      true,
     )
   })
 
-  it('restores a newer phone progress even when it points to an earlier chapter', async () => {
+  it('converts remote character position before exposing the target chapter', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    appStore.setLegadoWebdavConfig({
+      url: 'https://dav.example.test/',
+      account: 'reader',
+      password: 'secret',
+      directory: 'legado',
+    })
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+      durChapterIndex: 0,
+      durChapterPos: 0,
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'chapter-0', index: 0 },
+      { title: '第二章', url: 'chapter-1', index: 1 },
+    ]
+    vi.mocked(syncLegadoBookProgress).mockResolvedValue({
+      configured: true,
+      uploaded: false,
+      remote: {
+        name: '测试书籍',
+        author: '测试作者',
+        durChapterIndex: 1,
+        durChapterPos: 4,
+        durChapterTime: 123456,
+        durChapterTitle: '第二章',
+      },
+    })
+    let resolveContent: (() => void) | undefined
+    const contentGate = new Promise<void>((resolve) => {
+      resolveContent = resolve
+    })
+    vi.mocked(getBookContent).mockImplementation(async () => {
+      await contentGate
+      return '12345678'
+    })
+
+    const restoreTask = readerStore.restoreCurrentBookProgressFromLegado()
+    await Promise.resolve()
+    await Promise.resolve()
+    const stateWhileContentLoads = readerStore.restoringLegadoProgress
+    if (!resolveContent) throw new Error('content gate was not created')
+    resolveContent()
+    await restoreTask
+
+    expect(stateWhileContentLoads).toBe(true)
+    expect(readerStore.restoringLegadoProgress).toBe(false)
+    expect(readerStore.openPosition).toEqual({ index: 1, position: 5000, time: 123456 })
+  })
+
+  it('keeps the local progress when the phone points to an earlier chapter', async () => {
     const appStore = useAppStore()
     const readerStore = useReaderStore()
     appStore.setOnlineStatus(true)
@@ -362,11 +526,11 @@ describe('reader local txt chapters', () => {
 
     await readerStore.restoreCurrentBookProgressFromLegado()
 
-    expect(readerStore.currentIndex).toBe(0)
-    expect(readerStore.chapterScrollProgress).toBe(0.25)
+    expect(readerStore.currentIndex).toBe(2)
+    expect(readerStore.chapterScrollProgress).toBe(0.5)
   })
 
-  it('force uploads the current progress when leaving the reader', async () => {
+  it('uploads directly on exit without comparing remote progress', async () => {
     const appStore = useAppStore()
     const readerStore = useReaderStore()
     appStore.setLegadoWebdavConfig({
@@ -386,16 +550,59 @@ describe('reader local txt chapters', () => {
     ]
     readerStore.content = '12345678'
     readerStore.setChapterScrollProgress(0.5)
-    vi.mocked(syncLegadoBookProgress).mockResolvedValue({ configured: true, uploaded: true })
+    vi.mocked(uploadLegadoBookProgress).mockResolvedValue({
+      configured: true,
+      uploaded: true,
+      remote: null,
+    })
 
-    await readerStore.uploadCurrentBookProgressToLegado()
+    await readerStore.syncCurrentBookProgressFromLegadoOnExit()
 
-    expect(syncLegadoBookProgress).toHaveBeenCalledWith(
+    expect(syncLegadoBookProgress).not.toHaveBeenCalled()
+    expect(uploadLegadoBookProgress).toHaveBeenCalledWith(
       appStore.legadoWebdavConfig,
       expect.objectContaining({ durChapterIndex: 0, durChapterPos: 4 }),
-      true,
-      true,
     )
+  })
+
+  it('skips direct upload when Legado sync is unavailable on exit', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setLegadoSyncEnabled(false)
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+    }
+
+    await readerStore.syncCurrentBookProgressFromLegadoOnExit()
+
+    expect(syncLegadoBookProgress).not.toHaveBeenCalled()
+    expect(uploadLegadoBookProgress).not.toHaveBeenCalled()
+  })
+
+  it('skips Legado sync while the chapter is still loading', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setLegadoWebdavConfig({
+      url: 'https://dav.example.test/',
+      account: 'reader',
+      password: 'secret',
+      directory: 'legado',
+    })
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+    }
+    readerStore.loading = true
+
+    await readerStore.syncCurrentBookProgressFromLegadoOnExit()
+
+    expect(syncLegadoBookProgress).not.toHaveBeenCalled()
+    expect(uploadLegadoBookProgress).not.toHaveBeenCalled()
   })
 
   it('keeps API audio active and resumes from the paused position', async () => {

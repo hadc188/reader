@@ -18,7 +18,6 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   const books = ref<Book[]>([])
   const recentBooks = ref<Book[]>([])
   const loading = ref(false)
-  const refreshing = ref(false)
   const sorting = ref(false)
 
   async function refreshRecentBooks() {
@@ -53,15 +52,6 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
       await loadBooks()
     } finally {
       loading.value = false
-    }
-  }
-
-  async function refreshBooks() {
-    refreshing.value = true
-    try {
-      await loadBooks()
-    } finally {
-      refreshing.value = false
     }
   }
 
@@ -261,8 +251,8 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   return {
-    books, recentBooks, loading, refreshing, sorting,
-    fetchBooks, refreshBooks, removeBook,
+    books, recentBooks, loading, sorting,
+    fetchBooks, removeBook,
     refreshRecentBooks, removeRecentBook, clearAllRecentBooks,
     groups, activeGroupId, displayGroups, filteredBooks,
     fetchGroups, saveGroup, removeGroup,

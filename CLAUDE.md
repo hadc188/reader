@@ -64,4 +64,10 @@ reader-rust 是「阅读3.0」的 Rust 实现，当前形态为 **Tauri v2 桌�
 
 - **杀软并发编译竞态**：Windows 杀软实时扫描与 cargo 并行写 `.rlib` 冲突（随机 `invalid metadata files` / `link.exe 0xC000012D`）。**构建和测试务必用 `-j 4` 或更低并发**。建议给 `target/` 加 Defender 排除。
 - **`toml` 版本钉在 0.8.2**：共享 lockfile 因 `tauri -> gtk -> proc-macro-crate` 约束无法升级。无害（`config` 只用 Environment source，运行时从不解析 TOML）。不要尝试修复。
+- **`pdf-extract` 是 vendor 副本**（`vendor/pdf-extract`，经 `[patch.crates-io]` 接线），三处改动，都别退回上游行为：
+  - **中文 CMap**：上游遇到无 ToUnicode 的 `GBK-EUC-H` 等 Type0 编码会 panic、嵌入式 GB CMap 的分段 `begincidrange` 解析失败。副本加了「恒等字节映射 + `encoding_rs` 逐码位解码伪 ToUnicode 表」的降级路径。
+  - **字体缓存键**：上游按资源名（`F1`）缓存字体，而资源名只在单页内唯一 —— 一个 `Processor` 跨页复用时会串字体，表现为大段文字凭空消失。副本改为按字体对象 id 缓存。
+  - **`extract_text_for_page_ids`**：按显式页对象 id 提取并**共享一个 `Processor`**。上游的逐页接口每页重建解析器，1318 页中文书要 70s+；共享后同样内容 1.4s（字节级一致，已逐页比对验证）。
+- **本地 PDF 管线**（`src/service/local_pdf_book.rs`）：导入时一次性提取全文并按章落盘 `chapters/{index:05}.txt`（零填充五位，如 `00012.txt`），之后翻页是纯缓存直读（亚毫秒）。目录优先用 PDF 书签（`/Root/Outlines`），无书签时从正文认「第X回/章」标题（`detect_headings`），都没有才按 20 页/章分段。`collect_page_ids` 是页序的唯一来源，章节页号/正文提取/书签页映射都走它。提取出的每视觉行由 `merge_wrapped_lines` 重组回段落（栏宽 P85 估算 + 行尾句读双信号，标题/页码/缩进/空行独立成段；`EXTRACTOR_VERSION` 4，旧缓存读取时按新规则重提取）。
+
 - **桌面 origin 迁移**：`http://127.0.0.1:*` → `http://tauri.localhost` 后 localStorage 偏好重置一次；书库数据（SQLite/文件）不受影响。

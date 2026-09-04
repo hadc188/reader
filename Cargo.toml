@@ -1,6 +1,6 @@
 [package]
 name = "reader-rust"
-version = "1.4.5"
+version = "1.4.6"
 edition = "2021"
 
 # The desktop app is a workspace member so it shares this target/ directory, but
@@ -56,8 +56,10 @@ sxd-xpath = "0.4"
 sxd-document = "0.3"
 quick-xml = "0.31"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
-lopdf = "0.34"
 tauri-plugin-dialog = "2"
+# PDF 解析/提取。lopdf 不单独依赖: 用 pdf-extract 重导出的那份, 避免
+# 两个 lopdf 版本各自算一套页序。
+pdf-extract = "0.12.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
@@ -67,3 +69,9 @@ winreg = "0.55"
 # is pure IPC — no HTTP server.
 axum = { version = "0.7", features = ["json", "multipart"] }
 tokio = { version = "1", features = ["full"] }
+
+# pdf-extract 上游 0.12.0 遇到无 ToUnicode 的 GBK-EUC-H 等 Type0 编码会直接
+# panic (LaTeX CJK 产物常见)。vendor 副本加了 GBK/Big5 系 CMap 的近似解码:
+# 恒等字节映射 + encoding_rs 逐码位解码当伪 ToUnicode 表。
+[patch.crates-io]
+pdf-extract = { path = "vendor/pdf-extract" }

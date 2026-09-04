@@ -100,6 +100,11 @@ async fn cover_route(state: &AppState, query: &str) -> tauri::http::Response<Vec
         return bytes_response(bytes, &content_type, Some("86400"));
     }
 
+    // 本地 PDF 封面: /local-pdf/<hash>/cover.jpg → storage 下的书目录
+    if let Some(rest) = url.strip_prefix("/local-pdf/") {
+        return local_pdf_cover_route(state, rest).await;
+    }
+
     // "public" namespace matches the original unauthenticated cover endpoint.
     match state.book_service.get_cover("public", url).await {
         Ok((bytes, content_type)) => {
@@ -110,6 +115,39 @@ async fn cover_route(state: &AppState, query: &str) -> tauri::http::Response<Vec
                 cache.insert(cache_key, (bytes.clone(), content_type.clone()));
             }
             bytes_response(bytes, &content_type, Some("86400"))
+        }
+        Err(_) => http::Response::builder()
+            .status(404)
+            .body(Vec::new())
+            .unwrap_or_default(),
+    }
+}
+
+/// 本地 PDF 封面: rest = "<hash>/cover.<ext>"。hash 在 service 侧校验
+/// (32 位 hex), 文件名只接受三个固定值, 无路径穿越面。
+async fn local_pdf_cover_route(
+    state: &AppState,
+    rest: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    let Some((hash, file_name)) = rest.split_once('/') else {
+        return http::Response::builder()
+            .status(404)
+            .body(Vec::new())
+            .unwrap_or_default();
+    };
+    if !matches!(file_name, "cover.jpg" | "cover.png" | "cover.jp2") {
+        return http::Response::builder()
+            .status(404)
+            .body(Vec::new())
+            .unwrap_or_default();
+    }
+    match state
+        .local_pdf_book_service
+        .read_cover_file("default", hash, file_name)
+        .await
+    {
+        Ok((bytes, content_type)) => {
+            bytes_response(bytes, &content_type, Some("private, max-age=86400"))
         }
         Err(_) => http::Response::builder()
             .status(404)

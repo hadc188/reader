@@ -1311,7 +1311,7 @@ getContentAwait(source, book, chapter, nextChapterUrl=null, needSave=true):
 /search?q={{key}}&page=<1,2,3>,{"headers":{"Referer":"https://a.test"}}
 ```
 
-上下文：`baseUrl=https://a.test`，`key=斗破`，`page=2`。
+上下文：`baseUrl=https://a.test`，`key=测试`，`page=2`。
 
 期望：
 

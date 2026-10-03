@@ -561,7 +561,7 @@ pub fn extract_text(el: &ElementRef, extractor: &str) -> Option<String> {
                 Some(text)
             }
         }
-        "html" | "@html" => Some(el.html()),
+        "html" | "@html" => Some(element_outer_html_without_scripts(el)),
         "all" | "@all" => Some(el.html()),
         _ => {
             if let Some(attr_name) = parse_attr_extractor(extractor) {
@@ -577,8 +577,40 @@ pub fn extract_text(el: &ElementRef, extractor: &str) -> Option<String> {
     }
 }
 
-fn parse_attr_extractor(extractor: &str) -> Option<&str> {
-    let extractor = extractor.trim();
+/// legado `AnalyzeByJSoup.kt` 的 `@html` 语义: 先移除 `script` / `style` 再取 outerHtml。
+/// 正文 HTML 会直通前端渲染, 不移除会让 `<style>` 污染阅读器样式、`<script>` 干扰插件替换。
+fn element_outer_html_without_scripts(el: &ElementRef) -> String {
+    let original = el.html();
+    // 绝大多数正文没有 script/style, 直接返回, 不必重建树
+    if !original.contains("<script") && !original.contains("<style") {
+        return original;
+    }
+    let Ok(selector) = Selector::parse("script, style") else {
+        return original;
+    };
+    let fragment = Html::parse_fragment(&original);
+    let ids: Vec<_> = fragment
+        .select(&selector)
+        .map(|matched| matched.id())
+        .collect();
+    if ids.is_empty() {
+        return original;
+    }
+    let mut tree = fragment.tree;
+    for id in ids {
+        if let Some(mut node) = tree.get_mut(id) {
+            node.detach();
+        }
+    }
+    // parse_fragment 会额外包一层根元素, 取其 inner_html 即为原始 outerHtml 去掉 script/style
+    tree.root()
+        .first_child()
+        .and_then(ElementRef::wrap)
+        .map(|wrapper| wrapper.inner_html())
+        .unwrap_or(original)
+}
+
+fn parse_attr_extractor(extractor: &str) -> Option<&str> {    let extractor = extractor.trim();
     let extractor = extractor.strip_prefix('@').unwrap_or(extractor);
     extractor
         .strip_prefix("attr[")
@@ -1232,5 +1264,22 @@ mod tests {
         let result = select_xpath(html, "//div::outerHtml");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "<div><p>hello</p></div>");
+    }
+
+    /// legado `@html`: 取 outerHtml 但先移除 script/style(AnalyzeByJSoup.kt:260-267)。
+    #[test]
+    fn html_extractor_removes_script_and_style() {
+        let doc = Html::parse_document(
+            r#"<div class="con"><style>.x{color:red}</style><script>var a='</p>';</script><p>正文</p></div>"#,
+        );
+        let el = doc.select(&Selector::parse("div.con").unwrap()).next().unwrap();
+
+        let html = extract_text(&el, "html").unwrap();
+        assert_eq!(html, r#"<div class="con"><p>正文</p></div>"#);
+
+        // `@all` 保持 legado 语义: 不移除任何内容
+        let all = extract_text(&el, "all").unwrap();
+        assert!(all.contains("<script>"));
+        assert!(all.contains("<style>"));
     }
 }

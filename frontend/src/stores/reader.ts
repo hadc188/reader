@@ -1,4 +1,4 @@
-﻿import { defineStore } from 'pinia'
+import { defineStore } from 'pinia'
 import { ref, computed, reactive, watch } from 'vue'
 import { isTauri } from '@tauri-apps/api/core'
 import { useAppStore } from './app'
@@ -8,6 +8,7 @@ import {
   getBookContent,
   saveBookProgress,
   setBookSource as apiSetBookSource,
+  type ContentLoadStage,
 } from '../api/bookshelf'
 import { invokeRaw } from '../api/invoke'
 import {
@@ -258,6 +259,16 @@ export const useReaderStore = defineStore('reader', () => {
   const currentIndex = ref(0)
   const content = ref('')
   const loading = ref(false)
+  /** 当前章节加载到哪一步（空串表示未在加载）；用于显示「正在解析段评」这类长耗时 */
+  const loadStage = ref<ContentLoadStage | ''>('')
+  // 阶段提示的持有者：并发加载（预加载 / 连续模式）时只有最后设置提示的那次调用
+  // 能清掉它，避免旧请求提前清掉新章节的提示、或提示永久卡住。
+  let chapterStageSeq = 0
+  let chapterStageOwner = 0
+  /** 原地刷新当前章(非切章加载)。连续阅读模式据此保留已渲染的章节 DOM。 */
+  const refreshing = ref(false)
+  /** 原地刷新替换正文后自增。阅读页据此在重排后把视口锚回当前章原进度。 */
+  const contentRefreshToken = ref(0)
   /** 打开书时的入口位置快照(书架记录的章节/进度/时间)。
    *  位置恢复只能用稳定来源(localStorage + 本快照); 活状态(durChapterPos 等)
    *  会被初始化滚动等 UI 过程改写, 读它做恢复会拿到清零后的假数据。 */
@@ -619,7 +630,7 @@ export const useReaderStore = defineStore('reader', () => {
 
     const nextIndex = Math.max(0, Math.min(session.currentIndex || 0, session.chapters.length - 1))
     try {
-      const chapterContent = await fetchChapterContent(nextIndex)
+      const chapterContent = await fetchChapterContent(nextIndex, false, true)
       if (chapterContent == null) return false
       cachePreloadedContent(nextIndex, chapterContent)
       if (config.enablePreload) void preloadAroundChapter(nextIndex)
@@ -1741,9 +1752,12 @@ export const useReaderStore = defineStore('reader', () => {
     }
   }
 
-  async function fetchChapterContent(index: number, forceRefresh = false) {
+  async function fetchChapterContent(index: number, forceRefresh = false, reportStage = false) {
     if (!book.value || !chapters.value[index]) return null
 
+    // 命中已预加载内容 / 在途的预加载请求时都不会发请求，也就没有阶段可言。
+    // 这两个提前返回必须发生在设置 stage **之前**：否则设了提示却走不到 finally，
+    // 提示会永久卡在「正在获取章节…」。
     if (!forceRefresh && preloadedContent.value.has(index)) {
       return preloadedContent.value.get(index) || null
     }
@@ -1755,12 +1769,29 @@ export const useReaderStore = defineStore('reader', () => {
 
     const chapter = chapters.value[index]
 
+    // 立即给出可见反馈，不等后端的阶段事件到达（否则跳章后会有一段"无响应"观感，
+    // 用户会以为点了没反应）。后端事件随后把阶段细化成 parsing / caching。
+    // 用「所有者令牌」登记：并发加载时只有最后登记的那次能清掉提示。
+    let ownsStage = false
+    if (reportStage) {
+      loadStage.value = 'fetching'
+      chapterStageOwner = ++chapterStageSeq
+      ownsStage = true
+    }
+    const stageOwner = chapterStageOwner
+
     try {
       const chapterContent = await getBookContent({
         bookUrl: book.value.bookUrl,
         chapterUrl: chapter.url,
         bookSourceUrl: book.value.origin,
         refresh: forceRefresh ? 1 : 0,
+        // 只有仍持有提示的那次加载才能更新阶段（并发加载时避免互相覆盖）
+        onStage: reportStage
+          ? (stage) => {
+              if (chapterStageOwner === stageOwner) loadStage.value = stage
+            }
+          : undefined,
       })
       if (typeof chapterContent !== 'string') {
         throw new Error('书源返回的正文格式无效')
@@ -1774,6 +1805,11 @@ export const useReaderStore = defineStore('reader', () => {
         throw new Error('当前处于离线状态，未缓存章节无法打开')
       }
       throw error
+    } finally {
+      // 只清自己登记的提示：并发加载时旧请求不能清掉新章节的提示，
+      // 也不能用 requestId 判断（连续阅读/跳章不走 loadChapter，requestId 不变，
+      // 会让提示永久卡住）。
+      if (ownsStage && chapterStageOwner === stageOwner) loadStage.value = ''
     }
   }
 
@@ -1792,7 +1828,7 @@ export const useReaderStore = defineStore('reader', () => {
     try {
       const chapterContent = cachedContent !== undefined
         ? cachedContent
-        : await fetchChapterContent(index, forceRefresh)
+        : await fetchChapterContent(index, forceRefresh, true)
       if (chapterContent == null) return
       if (requestId !== chapterLoadRequestId || book.value?.bookUrl !== bookUrl) return
 
@@ -1844,6 +1880,8 @@ export const useReaderStore = defineStore('reader', () => {
         void preloadAroundChapter(index)
       }
     } finally {
+      // 只收尾 loading：阶段提示由 fetchChapterContent 的持有者机制管理，
+      // 这里再清一次会误清连续模式下并发加载刚设置的提示。
       if (requestId === chapterLoadRequestId) loading.value = false
     }
   }
@@ -1948,16 +1986,24 @@ export const useReaderStore = defineStore('reader', () => {
     }
   }
 
+  /**
+   * 重新抓取当前章正文。索引与章节内进度一律保持不变。
+   * refreshing 供阅读页区分「切章加载」与「原地刷新」: 连续阅读模式下后者
+   * 必须保留已渲染的章节列表, 否则容器内容塌缩会让 handleScroll 误判当前章。
+   */
   async function refreshContent() {
     if (!book.value || !chapters.value[currentIndex.value]) return
     loading.value = true
+    refreshing.value = true
     try {
-      const chapterContent = await fetchChapterContent(currentIndex.value, true)
+      const chapterContent = await fetchChapterContent(currentIndex.value, true, true)
       if (chapterContent == null) return
       setActiveChapterState(currentIndex.value, chapterContent, chapterScrollProgress.value)
+      contentRefreshToken.value += 1
       void preloadAroundChapter(currentIndex.value)
     } finally {
       loading.value = false
+      refreshing.value = false
     }
   }
 
@@ -2138,6 +2184,12 @@ export const useReaderStore = defineStore('reader', () => {
     legadoPositionRestoreCompleted.value = null
     book.value = null
     openPosition.value = null
+    refreshing.value = false
+    // 作废在飞请求的阶段提示持有者: 只清空 loadStage 的话, 旧请求后续的
+    // onStage 回调仍持有所有权, 会把浮层重新点亮。
+    chapterStageOwner = ++chapterStageSeq
+    loadStage.value = ''
+    contentRefreshToken.value = 0
     chapters.value = []
     content.value = ''
     currentIndex.value = 0
@@ -2181,7 +2233,7 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   return {
-    book, chapters, currentIndex, content, loading, chaptersLoading, openPosition, restoringLegadoProgress,
+    book, chapters, currentIndex, content, loading, loadStage, refreshing, contentRefreshToken, chaptersLoading, openPosition, restoringLegadoProgress,
     legadoPositionRestore,
     legadoPositionRestoreCompleted,
     currentChapter, hasNext, hasPrev, readingProgress,

@@ -10,7 +10,10 @@ use crate::model::{
     book_source::{BookSource, ExploreKind},
     search::SearchBook,
 };
-use crate::parser::js::{eval_js, eval_js_with_bindings, with_js_lib};
+use crate::parser::js::{
+    eval_js, eval_js_with_bindings, take_js_logs, with_book_context, with_source, with_source_key,
+    JsBookContext,
+};
 use crate::parser::rule_engine::RuleEngine;
 use crate::storage::cache::file_cache::FileCache;
 use crate::service::local_pdf_book::{is_local_pdf_origin, is_local_pdf_url};
@@ -23,6 +26,217 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
+
+/// 书源 JS 调用 `java.showBrowser(url, html)` 时捕获的请求, 供前端弹出面板。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShowBrowserRequest {
+    pub url: String,
+    pub html: Option<String>,
+    pub preload_js: Option<String>,
+    /// 后端托管的面板 id(前端按 `${readerOrigin}/sourcePanel?panelId=...` 加载)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub panel_id: Option<String>,
+}
+
+thread_local! {
+    /// `showBrowser` 由 JS 同步调用, 结果先落在线程本地, 由调用方取走。
+    static SHOW_BROWSER_REQUEST: std::cell::RefCell<Option<ShowBrowserRequest>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 供 js.rs 的原生 `__show_browser` 原语写入。
+pub fn set_show_browser_request(request: ShowBrowserRequest) {
+    SHOW_BROWSER_REQUEST.with(|cell| *cell.borrow_mut() = Some(request));
+}
+
+/// 取走当前线程捕获的 `showBrowser` 请求(取走即清空, 不跨次调用泄漏)。
+pub fn take_show_browser_request() -> Option<ShowBrowserRequest> {
+    SHOW_BROWSER_REQUEST.with(|cell| cell.borrow_mut().take())
+}
+
+fn clear_show_browser_request() {
+    SHOW_BROWSER_REQUEST.with(|cell| *cell.borrow_mut() = None);
+}
+
+/// 已打开的 `java.showBrowser` 面板: 面板 HTML 由后端托管, 前端只需按 id 加载
+/// `${readerOrigin}/sourcePanel?panelId=...`, 面板内的桥脚本即可同源回调宿主。
+#[derive(Clone, Debug)]
+pub struct SourcePanelEntry {
+    pub url: String,
+    pub html: String,
+    /// 归属书源, 面板内 `window.run` 需要在其 jsLib 作用域执行。
+    pub book_source_url: String,
+    pub book_url: String,
+    pub chapter_url: String,
+    /// `book` / `chapter` 绑定(JSON), 面板脚本 `writeConfig(chapter, ...)` 需要。
+    pub book_json: String,
+    pub chapter_json: String,
+}
+
+static SOURCE_PANELS: std::sync::LazyLock<std::sync::Mutex<Vec<(String, SourcePanelEntry)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// 同时保留的面板数上限(插件通常只有 1~2 层弹层)。
+const MAX_SOURCE_PANELS: usize = 8;
+
+/// 登记一个面板并返回其 id。
+pub fn register_source_panel(entry: SourcePanelEntry) -> String {
+    let id = format!(
+        "p{}_{}",
+        md5_hex(&format!("{}:{}", entry.book_source_url, entry.url)),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let mut panels = SOURCE_PANELS.lock().unwrap_or_else(|e| e.into_inner());
+    // 按插入顺序淘汰最旧的(用 Vec 而非 HashMap: 后者无序, 淘汰会变成随机的,
+    // 可能剔掉正在显示的面板导致其后续交互 404)
+    if panels.len() >= MAX_SOURCE_PANELS {
+        panels.remove(0);
+    }
+    panels.push((id.clone(), entry));
+    id
+}
+
+pub fn get_source_panel(panel_id: &str) -> Option<SourcePanelEntry> {
+    SOURCE_PANELS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(id, _)| id == panel_id)
+        .map(|(_, entry)| entry.clone())
+}
+
+/// 处理面板内 `window.java` / `window.cache` / `window.run` 的同步桥请求。
+///
+/// 与 legado `WebJsExtensions` 对齐: `ajax`/`get`/`post`/`connect` 走书源网络层,
+/// `run` 在书源 jsLib 作用域执行脚本, `cache` 复用书源变量存储。
+pub async fn handle_source_panel_bridge(
+    book_source_service: &crate::service::book_source_service::BookSourceService,
+    entry: &SourcePanelEntry,
+    action: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let text_of = |key: &str| -> String {
+        payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    match action {
+        "log" => {
+            crate::parser::js::push_js_log(format!("[panel] {}", text_of("message")));
+            Ok(serde_json::Value::Null)
+        }
+        "toast" => {
+            let message = text_of("message");
+            crate::parser::js::push_js_log(format!("[panel.toast] {message}"));
+            Ok(serde_json::Value::String(message))
+        }
+        "close" => Ok(serde_json::Value::Null),
+        "cacheGet" => {
+            let key = text_of("key");
+            Ok(crate::parser::js::get_panel_cache(&entry.book_source_url, &key)
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null))
+        }
+        "cachePut" => {
+            let key = text_of("key");
+            let value = text_of("value");
+            crate::parser::js::put_panel_cache(&entry.book_source_url, &key, &value);
+            Ok(serde_json::Value::Null)
+        }
+        "run" => {
+            let script = text_of("script");
+            let source = book_source_service
+                .get("default", &entry.book_source_url)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "bookSource not found".to_string())?;
+            let entry = entry.clone();
+            // 面板脚本形如 `writeConfig(chapter, 'k', v, java)`, 需要 book/chapter 绑定;
+            // 直接用面板登记时的书籍上下文, 否则脚本里的 `chapter` 会是空对象。
+            let book_ctx = crate::parser::js::JsBookContext {
+                book: serde_json::from_str(&entry.book_json).unwrap_or_else(|_| json!({})),
+                chapter: serde_json::from_str(&entry.chapter_json).unwrap_or_else(|_| json!({})),
+            };
+            let output = tokio::task::spawn_blocking(move || {
+                crate::parser::js::with_book_context(Some(book_ctx), || {
+                    crate::parser::js::with_source(&source, || {
+                        crate::parser::js::with_source_key(Some(&entry.book_url), || {
+                            crate::parser::js::eval_js(&script, "", &entry.chapter_url)
+                        })
+                    })
+                })
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            output
+                .map(serde_json::Value::String)
+                .map_err(|e| format!("脚本执行失败: {e}"))
+        }
+        "ajax" | "connect" | "http" => {
+            let source = book_source_service
+                .get("default", &entry.book_source_url)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "bookSource not found".to_string())?;
+            let action = action.to_string();
+            let payload = payload.clone();
+            let entry = entry.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::parser::js::run_panel_request(&source, &entry.chapter_url, &action, &payload)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            result
+                .map(serde_json::Value::String)
+                .map_err(|e| e.to_string())
+        }
+        // 面板内再次调 `java.showBrowser`: 登记为新面板并回传 panelId,
+        // 由桥通过 postMessage 通知宿主换成新面板(嵌套弹层)。
+        "showBrowser" => {
+            let panel_id = register_source_panel(SourcePanelEntry {
+                url: text_of("url"),
+                html: text_of("html"),
+                book_source_url: entry.book_source_url.clone(),
+                book_url: entry.book_url.clone(),
+                chapter_url: entry.chapter_url.clone(),
+                book_json: entry.book_json.clone(),
+                chapter_json: entry.chapter_json.clone(),
+            });
+            Ok(serde_json::Value::String(panel_id))
+        }
+        // 面板签名用的对称加密(与书源规则的 `java.createSymmetricCrypto` 同一实现)。
+        // 部分书源接口靠它签请求, 缺了这个插件只能降级到 CryptoJS 注入, 容易失败。
+        "crypto" => crate::parser::js::panel_symmetric_crypto(&payload)
+            .map(serde_json::Value::String)
+            .map_err(|e| e.to_string()),
+        "digest" => crate::parser::js::panel_digest(&payload)
+            .map(serde_json::Value::String)
+            .map_err(|e| e.to_string()),
+        other => Err(format!("未知的面板桥操作: {other}")),
+    }
+}
+
+/// 章节内容加载阶段: 让前端显示"正在做什么", 避免长时间无反馈看起来像卡死。
+///
+/// 只用于**阅读时的单章加载**。缓存是并发多章的(见 `cache_book_sse`),
+/// 同一时刻不同章节处在不同阶段, 单一阶段对它没有意义。
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContentLoadStage {
+    /// 正在请求书源章节页
+    Fetching,
+    /// 正在执行正文规则(含书源脚本与段评解析), 通常是最耗时的一步
+    Parsing,
+    /// 正在写入本地缓存
+    Caching,
+}
 
 /// State for background chapter fetching
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -551,7 +765,7 @@ impl BookService {
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
             })
-            .unwrap_or("斗破苍穹")
+            .unwrap_or("测试")
             .to_string();
 
         let (search_ok, search_error) = if source
@@ -692,13 +906,15 @@ impl BookService {
                 let res = self
                     .fetch_source_url(user_ns, source, url, &source.book_source_url, "")
                     .await?;
-                let content = self.parser.content(source, &res.body, &res.url, Some(url));
+                let (content, js_logs) =
+                    self.parse_content_blocking(source, &res, url, None).await?;
                 let next = self.parser.next_content_url(source, &res.body, &res.url);
                 Ok(debug_trace_from(
                     &res,
                     serde_json::json!({
                         "content": content,
                         "nextContentUrl": next,
+                        "jsLogs": js_logs,
                     }),
                 ))
             }
@@ -724,7 +940,7 @@ impl BookService {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
         {
-            Some(with_js_lib(source.js_lib.as_deref(), || {
+            Some(with_source(source,|| {
                 eval_js(login_check_js, &res.body, &res.url).unwrap_or_default()
             }))
         } else {
@@ -1104,6 +1320,135 @@ impl BookService {
         Ok((all_chapters, visited_page_urls.into_iter().collect()))
     }
 
+    /// 正文 JS 的 `book` / `chapter` 上下文: 取书架书籍与缓存目录中的对应章节。
+    async fn js_book_context(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        chapter_url: &str,
+    ) -> Option<JsBookContext> {
+        let book = self.get_shelf_book(user_ns, book_url).await.ok().flatten();
+        let toc_url = book
+            .as_ref()
+            .and_then(|b| b.toc_url.clone())
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| book_url.to_string());
+        let chapter = self
+            .load_chapter_list_cache(user_ns, &toc_url)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|list| list.into_iter().find(|ch| ch.url == chapter_url));
+        let book_json = match book {
+            Some(b) => json!({
+                "name": b.name,
+                "author": b.author,
+                "bookUrl": b.book_url,
+                "tocUrl": b.toc_url,
+                "origin": b.origin,
+                "originName": b.origin_name,
+                "coverUrl": b.cover_url,
+                "intro": b.intro,
+                "kind": b.kind,
+                "wordCount": b.word_count,
+                "durChapterIndex": b.dur_chapter_index,
+                "durChapterTitle": b.dur_chapter_title,
+                "totalChapterNum": b.total_chapter_num,
+            }),
+            None => json!({ "bookUrl": book_url }),
+        };
+        let chapter_json = match chapter {
+            Some(ch) => serde_json::to_value(ch).unwrap_or_else(|_| json!({})),
+            None => json!({ "url": chapter_url }),
+        };
+        Some(JsBookContext {
+            book: book_json,
+            chapter: chapter_json,
+        })
+    }
+
+    /// 正文图片 `click` 脚本(legado `ReadBookActivity.clickImg`): 在书源 jsLib 作用域里执行,
+    /// 因此插件定义的 `showCommentPanel(...)` 等函数可用。
+    /// 返回 (脚本返回值, 本次产生的 JS 日志, 面板信息)。
+    pub async fn eval_source_click(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        source: &BookSource,
+        chapter_url: &str,
+        script: &str,
+        result: &str,
+    ) -> Result<(String, Vec<String>, Option<ShowBrowserRequest>), AppError> {
+        let book_ctx = self.js_book_context(user_ns, book_url, chapter_url).await;
+        // 面板登记需要原始 JSON(面板脚本 `writeConfig(chapter, ...)` 依赖这两个绑定)
+        let (book_json, chapter_json) = book_ctx
+            .as_ref()
+            .map(|ctx| (ctx.book.to_string(), ctx.chapter.to_string()))
+            .unwrap_or_else(|| ("{}".to_string(), "{}".to_string()));
+        let source = source.clone();
+        let script = script.to_string();
+        let result_text = result.to_string();
+        let source_key = book_url.to_string();
+        let chapter_url = chapter_url.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            take_js_logs();
+            clear_show_browser_request();
+            let base_url = chapter_url.clone();
+            let output = with_book_context(book_ctx, || {
+                with_source(&source, || {
+                    with_source_key(Some(&source_key), || {
+                        crate::parser::js::eval_js(&script, &result_text, &base_url)
+                    })
+                })
+            });
+            let logs = take_js_logs();
+            // 面板 HTML 由后端托管: 前端按 panelId 加载, 面板内的桥才能同源回调宿主
+            let browser = take_show_browser_request().map(|mut req| {
+                req.panel_id = Some(register_source_panel(SourcePanelEntry {
+                    url: req.url.clone(),
+                    html: req.html.clone().unwrap_or_default(),
+                    book_source_url: source.book_source_url.clone(),
+                    book_url: source_key.clone(),
+                    chapter_url: base_url.clone(),
+                    book_json: book_json.clone(),
+                    chapter_json: chapter_json.clone(),
+                }));
+                req
+            });
+            output
+                .map(|value| (value, logs, browser))
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("执行 click 脚本失败: {e}")))
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("click 脚本任务失败: {e}")))?
+    }
+
+    /// 正文规则可能在 JS 里发起同步网络请求, 放到阻塞线程池执行, 不占用异步 worker。
+    /// 返回 (正文, 本次解析产生的 JS 日志)。
+    async fn parse_content_blocking(
+        &self,
+        source: &BookSource,
+        res: &FetchResponse,
+        source_key: &str,
+        book_ctx: Option<JsBookContext>,
+    ) -> Result<(String, Vec<String>), AppError> {
+        let parser = self.parser.clone();
+        let source = source.clone();
+        let body = res.body.clone();
+        let url = res.url.clone();
+        let source_key = source_key.to_string();
+        tokio::task::spawn_blocking(move || {
+            take_js_logs();
+            let content = with_book_context(book_ctx, || {
+                parser.content(&source, &body, &url, Some(&source_key))
+            });
+            (content, take_js_logs())
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("正文解析任务失败: {e}")))
+    }
+
     pub async fn get_content(
         &self,
         user_ns: &str,
@@ -1111,21 +1456,60 @@ impl BookService {
         source: &BookSource,
         chapter_url: &str,
     ) -> Result<String, AppError> {
+        self.get_content_with_stage(user_ns, book_url, source, chapter_url, None, false)
+            .await
+    }
+
+    /// 与 `get_content` 相同, 但把加载阶段回调出去, 供前端显示"卡在哪一步"。
+    ///
+    /// `skip_js_lib` 为 true 时**不加载书源脚本**(jsLib): 正文规则里的插件调用
+    /// (如 `addComment(result)`) 会因函数不存在而失败, 从而回退到选择器提取结果
+    /// —— 也就是纯正文。离线缓存只需要正文, 没必要为每章付出脚本解析与段评请求
+    /// 的代价。
+    pub async fn get_content_with_stage(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        source: &BookSource,
+        chapter_url: &str,
+        on_stage: Option<&(dyn Fn(ContentLoadStage) + Send + Sync)>,
+        skip_js_lib: bool,
+    ) -> Result<String, AppError> {
+        let notify = |stage: ContentLoadStage| {
+            if let Some(callback) = on_stage {
+                callback(stage);
+            }
+        };
         let book_key = md5_hex(book_url);
         tracing::debug!(
             "get_content called, chapter_url={}, book_key={}",
             chapter_url,
             book_key
         );
-        if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
-            tracing::debug!("get_content returning cached content, len={}", cached.len());
-            return Ok(cached);
+        let cached = self
+            .cache
+            .get(user_ns, &book_key, chapter_url)
+            .await
+            .ok()
+            .flatten();
+        // 离线缓存路径命中即用; 阅读路径则**优先在线解析**(保证段评是最新的),
+        // 缓存只作为请求失败时的兜底 —— 离线缓存里只有纯正文, 直接用它就看不到段评。
+        if skip_js_lib {
+            if let Some(hit) = cached.clone() {
+                tracing::debug!("get_content returning cached content, len={}", hit.len());
+                return Ok(hit);
+            }
         }
         tracing::debug!("get_content cache miss, fetching from network");
 
         let mut all_content = String::new();
         let mut visited_urls = std::collections::HashSet::new();
         let mut current_url = chapter_url.to_string();
+        let book_ctx = self.js_book_context(user_ns, book_url, chapter_url).await;
+        // 只缓存正文时用一份不带 jsLib 的书源副本(见 `skip_js_lib` 的说明)
+        let stripped_source: Option<BookSource> = skip_js_lib
+            .then(|| BookSource { js_lib: None, ..source.clone() });
+        let parse_source = stripped_source.as_ref().unwrap_or(source);
 
         // Follow pagination to get all content pages
         loop {
@@ -1135,12 +1519,28 @@ impl BookService {
             }
             visited_urls.insert(current_url.clone());
 
+            notify(ContentLoadStage::Fetching);
             tracing::debug!("get_content fetching: {}", current_url);
-            let res = self
+            let res = match self
                 .fetch_source_url(user_ns, source, &current_url, &source.book_source_url, "")
-                .await?;
+                .await
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    // 网络失败(离线或书源故障)时回退到已缓存正文, 保证离线仍可阅读
+                    if let Some(hit) = cached.clone() {
+                        tracing::debug!("get_content fetch failed, falling back to cache: {e}");
+                        return Ok(hit);
+                    }
+                    return Err(e);
+                }
+            };
             tracing::debug!("get_content fetch done, body len={}", res.body.len());
-            let content = self.parser.content(source, &res.body, &res.url, Some(book_url));
+            // 正文规则里往往会触发书源脚本与段评请求, 这是最耗时的一步
+            notify(ContentLoadStage::Parsing);
+            let (content, _logs) = self
+                .parse_content_blocking(parse_source, &res, book_url, book_ctx.clone())
+                .await?;
             tracing::debug!("get_content parsed content len={}", content.len());
 
             if !content.is_empty() {
@@ -1167,6 +1567,7 @@ impl BookService {
 
         tracing::debug!("get_content final content len={}", all_content.len());
         if !all_content.is_empty() {
+            notify(ContentLoadStage::Caching);
             let _ = self
                 .cache
                 .put(user_ns, &book_key, chapter_url, &all_content)
@@ -1482,9 +1883,28 @@ impl BookService {
         if refresh {
             let _ = self.cache.remove(user_ns, &book_key, chapter_url).await;
         }
-        let _ = self
-            .get_content(user_ns, book_url, source, chapter_url)
+        let content = self
+            .get_content_with_stage(user_ns, book_url, source, chapter_url, None, true)
             .await?;
+        // 正文规则若是**纯 JS**（没有选择器部分，如 `@js:clean(result)`），跳过书源
+        // 脚本会让整条规则失败并得到空内容。这类书源回退到完整解析（含 jsLib）再试。
+        if content.trim().is_empty() {
+            tracing::debug!("cache_chapter: 跳过书源脚本后正文为空, 回退完整解析");
+            if let Err(e) = self
+                .get_content_with_stage(user_ns, book_url, source, chapter_url, None, false)
+                .await
+            {
+                tracing::warn!("cache_chapter 回退完整解析失败: {e}");
+            }
+        }
+        // 以「缓存是否真的落盘」为准：空正文不会被写入缓存（见 get_content_with_stage
+        // 里的 is_empty 判断）。若仍未落盘就报错计入失败数，否则进度会把没缓存的
+        // 章节算作成功，且下次缓存时这些章又被判为未缓存。
+        if !self.is_chapter_cached(user_ns, book_url, chapter_url).await {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "正文解析为空, 未写入缓存"
+            )));
+        }
         Ok(())
     }
 
@@ -1766,7 +2186,7 @@ fn apply_login_check_js(source: &BookSource, res: FetchResponse) -> FetchRespons
         return res;
     };
 
-    with_js_lib(source.js_lib.as_deref(), || {
+    with_source(source,|| {
         let str_response = StrResponse::from(res.clone());
         let mut bindings = HashMap::new();
         bindings.insert(
@@ -1807,7 +2227,7 @@ fn parse_explore_kinds(source: &BookSource) -> Result<Vec<ExploreKind>, AppError
         return Ok(Vec::new());
     };
 
-    let text = with_js_lib(source.js_lib.as_deref(), || {
+    let text = with_source(source,|| {
         if let Some(script) = raw.strip_prefix("@js:") {
             eval_js(script, "", &source.book_source_url).map_err(AppError::Internal)
         } else if let Some(script) = raw
@@ -2200,9 +2620,19 @@ fn content_type_from_ext(ext: &str) -> String {
 mod tests {
     use super::*;
 
+    /// 阶段枚举的序列化结果就是前端 `loadStage` 收到的字符串,
+    /// 改动这里会直接破坏阅读页的阶段文案, 所以固定住。
+    #[test]
+    fn content_load_stage_serializes_as_expected_strings() {
+        let to_json = |stage: ContentLoadStage| serde_json::to_string(&stage).unwrap();
+        assert_eq!(to_json(ContentLoadStage::Fetching), "\"fetching\"");
+        assert_eq!(to_json(ContentLoadStage::Parsing), "\"parsing\"");
+        assert_eq!(to_json(ContentLoadStage::Caching), "\"caching\"");
+    }
+
     #[test]
     fn detect_anti_crawler_flags_pc_verification_page() {
-        // 起点 PC 站反爬: 202 + var buid
+        // 某小说站 PC 站反爬: 202 + var buid
         let warnings = detect_anti_crawler(202, "var buid = xxx", &[]);
         assert!(
             warnings.iter().any(|w| w.contains("反爬")),
@@ -2277,15 +2707,16 @@ mod tests {
     #[test]
     fn same_remote_book_matches_across_sources() {
         let existing = Book {
-            name: "神 通者".to_string(),
-            author: "作者：天蚕土豆".to_string(),
+            // 书名带空格 + 作者带「作者：」前缀: 双重验证归一化匹配
+            name: "测 试书目".to_string(),
+            author: "作者：测试作者".to_string(),
             book_url: "https://source-a.test/book/1".to_string(),
             origin: "https://source-a.test".to_string(),
             ..Book::default()
         };
         let incoming = Book {
-            name: "神通者".to_string(),
-            author: "天蚕土豆".to_string(),
+            name: "测试书目".to_string(),
+            author: "测试作者".to_string(),
             book_url: "https://source-b.test/book/2".to_string(),
             origin: "https://source-b.test".to_string(),
             ..Book::default()
@@ -2297,15 +2728,15 @@ mod tests {
     #[test]
     fn merging_same_book_retains_each_source_candidate() {
         let existing = Book {
-            name: "神通者".to_string(),
-            author: "天蚕土豆".to_string(),
+            name: "测试书目".to_string(),
+            author: "测试作者".to_string(),
             book_url: "https://source-a.test/book/1".to_string(),
             origin: "https://source-a.test".to_string(),
             ..Book::default()
         };
         let mut incoming = Book {
-            name: "神通者".to_string(),
-            author: "天蚕土豆".to_string(),
+            name: "测试书目".to_string(),
+            author: "测试作者".to_string(),
             book_url: "https://source-b.test/book/2".to_string(),
             origin: "https://source-b.test".to_string(),
             ..Book::default()
@@ -2334,15 +2765,15 @@ mod tests {
         let first_service = service.clone();
         let second_service = service.clone();
         let first = Book {
-            name: "神通者".to_string(),
-            author: "天蚕土豆".to_string(),
+            name: "测试书目".to_string(),
+            author: "测试作者".to_string(),
             book_url: "https://source-a.test/book/1".to_string(),
             origin: "https://source-a.test".to_string(),
             ..Book::default()
         };
         let second = Book {
-            name: "神通者".to_string(),
-            author: "天蚕土豆".to_string(),
+            name: "测试书目".to_string(),
+            author: "测试作者".to_string(),
             book_url: "https://source-b.test/book/2".to_string(),
             origin: "https://source-b.test".to_string(),
             ..Book::default()

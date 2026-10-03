@@ -248,7 +248,7 @@ pub struct SetSourceCookieParam {
     pub cookie: Option<String>,
 }
 
-/// 手动导入书源登录 Cookie(如通过抓包获取的起点会话)。
+/// 手动导入书源登录 Cookie(如通过抓包获取的会话)。
 /// Cookie 按完整书源地址隔离存储，后续仅该书源请求自动携带。
 /// 存储前会用该书源做一次搜索校验,避免过期/无效 Cookie 毒化后续所有请求。
 #[tauri::command]
@@ -281,7 +281,7 @@ pub async fn set_book_source_cookie(
         .and_then(|r| r.check_key_word.as_deref())
         .map(|k| k.trim())
         .filter(|k| !k.is_empty())
-        .unwrap_or("斗破苍穹");
+        .unwrap_or("测试");
     state
         .book_service
         .validate_source_cookie(&user_ns, &source, &cookie, validate_keyword)

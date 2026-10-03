@@ -122,7 +122,7 @@ impl HttpClient {
 
     /// Discard the reqwest cookie jar by rebuilding the underlying Client with
     /// the same proxy. Used when a source cookie is changed/cleared so stale
-    /// session cookies accumulated in the jar (e.g. an expired qidian session
+    /// session cookies accumulated in the jar (e.g. an expired login session
     /// written by an antivirus-degraded page) stop being attached to requests.
     pub fn reset_cookie_jar(&self) -> anyhow::Result<()> {
         let configured_proxy = self

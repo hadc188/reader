@@ -59,7 +59,7 @@ function sourceResult(bookSourceUrl: string, valid: boolean) {
     valid,
     searchOk: valid,
     exploreOk: false,
-    keyword: '斗破苍穹',
+    keyword: '测试书籍',
     markedInvalid: !valid,
   }
 }

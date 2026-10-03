@@ -23,7 +23,9 @@ async fn yckceo_live_non_webview_sources_end_to_end() {
     let pages = env_usize("YCKCEO_INDEX_PAGES", 1);
 
     let http = HttpClient::new(20, None).expect("http client");
-    let ids = fetch_yckceo_ids(http.client(), pages)
+    // `client()` 返回 clone 出来的 owned Client；辅助函数借用以避免在循环里反复 clone。
+    let client = http.client();
+    let ids = fetch_yckceo_ids(&client, pages)
         .await
         .expect("fetch YCKCeo index");
     assert!(!ids.is_empty(), "YCKCeo index returned no source ids");
@@ -44,7 +46,7 @@ async fn yckceo_live_non_webview_sources_end_to_end() {
             break;
         }
 
-        let Some((source, keyword)) = fetch_candidate_source(http.client(), &id)
+        let Some((source, keyword)) = fetch_candidate_source(&client, &id)
             .await
             .unwrap_or_else(|err| {
                 attempted.push(format!("{id}: fetch/import failed: {err}"));
@@ -143,7 +145,7 @@ async fn fetch_candidate_source(
         .and_then(|rule| rule.check_key_word.as_deref())
         .map(str::trim)
         .filter(|key| !key.is_empty())
-        .unwrap_or("斗破苍穹")
+        .unwrap_or("测试书籍")
         .to_string();
 
     Ok(Some((source, keyword)))

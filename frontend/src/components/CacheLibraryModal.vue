@@ -145,7 +145,10 @@ async function refreshData() {
 function progressPercent(bookUrl: string) {
   const progress = cacheProgress.value[bookUrl]
   if (!progress || progress.total <= 0) return 0
-  return Math.min(100, Math.round((progress.cached / progress.total) * 100))
+  // 失败章节也算「已处理」：只按 cached 算的话，一旦有章节失败，
+  // 进度就会永远停在 100% 以下（例如 100 章失败 3 章 → 停在 97%）。
+  const done = progress.cached + progress.failed
+  return Math.min(100, Math.round((done / progress.total) * 100))
 }
 
 function cacheServer(book: Book) {

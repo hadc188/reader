@@ -9,6 +9,7 @@ pub mod network;
 pub mod reading_stats;
 pub mod replace_rule;
 pub mod rss;
+pub mod source_click;
 pub mod speech;
 pub mod update;
 pub mod user;

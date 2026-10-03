@@ -16,7 +16,7 @@ vi.mock('./invoke', () => ({
 
 describe('webdav binary file conversion', () => {
   it('decodes an old JSON backup with UTF-8 text intact', () => {
-    const raw = '{"version":1,"bookName":"神通者"}'
+    const raw = '{"version":1,"bookName":"测试书目"}'
     const bytes = Array.from(new TextEncoder().encode(raw))
 
     expect(decodeWebdavFileText({ bytes })).toBe(raw)

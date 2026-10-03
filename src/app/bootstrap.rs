@@ -28,6 +28,7 @@ pub fn init_tracing(log_level: &str) {
 pub async fn build_state(cfg: &AppConfig) -> anyhow::Result<AppState> {
     let storage_fs = StorageFs::new(&cfg.storage_dir, &cfg.assets_dir);
     storage_fs.ensure().await?;
+    crate::parser::js::set_js_storage_dir(&cfg.storage_dir);
 
     let pool = db::init_pool(&cfg.database_url).await?;
     let repo = db::repo::BookSourceRepo::new(pool.clone());

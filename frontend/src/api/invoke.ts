@@ -41,7 +41,8 @@ const COMMAND_BY_PATH: Record<string, string> = {
   '/reader3/saveBookProgress': 'save_book_progress',
   '/reader3/getBookInfo': 'get_book_info',
   '/reader3/getChapterList': 'get_chapter_list',
-  '/reader3/getBookContent': 'get_book_content',
+  // 注意: getBookContent 需要额外的 Channel 参数(加载阶段), 不能走这里 ——
+  // 见 api/bookshelf.ts 的 getBookContent 直接 invoke 实现。
   '/reader3/deleteBookCache': 'delete_book_cache',
   '/reader3/getCachedChapterUrls': 'get_cached_chapter_urls',
   '/reader3/getAvailableBookSource': 'get_available_book_source',

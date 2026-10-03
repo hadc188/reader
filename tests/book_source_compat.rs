@@ -110,7 +110,7 @@ fn url_analyzer_supports_inline_js_page_choices_headers_and_response_type() {
 
     let spec = analyze_url(
         "/search?q={{key}}&page=<1,2,3>,{\"headers\":{\"Referer\":\"https://a.test\"},\"retry\":3,\"type\":\"hex\"}",
-        "斗破",
+        "测试",
         2,
         &source.book_source_url,
         &source,
@@ -120,7 +120,7 @@ fn url_analyzer_supports_inline_js_page_choices_headers_and_response_type() {
     assert_eq!(spec.method, HttpMethod::GET);
     assert_eq!(
         spec.url,
-        "https://a.test/search?q=%E6%96%97%E7%A0%B4&page=2"
+        "https://a.test/search?q=%E6%B5%8B%E8%AF%95&page=2"
     );
     assert_eq!(spec.retry, 3);
     assert_eq!(spec.response_type.as_deref(), Some("hex"));
@@ -148,7 +148,7 @@ fn url_analyzer_encodes_get_query_with_declared_charset() {
 
     let spec = analyze_url(
         "/l/0/1.html?t=1&k={{key}},{\"charset\":\"gbk\"}",
-        "斗破",
+        "测试",
         1,
         &source.book_source_url,
         &source,
@@ -157,7 +157,7 @@ fn url_analyzer_encodes_get_query_with_declared_charset() {
 
     assert_eq!(spec.charset.as_deref(), Some("gbk"));
     assert!(
-        spec.url.ends_with("/l/0/1.html?t=1&k=%B6%B7%C6%C6"),
+        spec.url.ends_with("/l/0/1.html?t=1&k=%B2%E2%CA%D4"),
         "{}",
         spec.url
     );
@@ -251,6 +251,8 @@ fn chapter_list_strips_css_mode_prefix() {
         &source,
         r#"<ul class="dirList"><li><a href="/c1.html">第一章</a></li></ul>"#,
         "https://toc.example/book/",
+        // 无书籍上下文：`source_key` 供 `source.getKey()` 使用，本用例不需要。
+        None,
     );
 
     assert_eq!(chapters.len(), 1);
@@ -364,7 +366,7 @@ async fn search_pipeline_uses_url_analyzer_final_url_and_login_check_js() {
     };
 
     let books = service
-        .search_book("default", &source, "斗破", 2)
+        .search_book("default", &source, "测试", 2)
         .await
         .unwrap();
 

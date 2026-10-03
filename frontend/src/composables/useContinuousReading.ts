@@ -58,10 +58,10 @@ export function useContinuousReading(
     })
   }
 
-  async function buildContinuousChapter(index: number, forceRefresh = false) {
+  async function buildContinuousChapter(index: number, forceRefresh = false, reportStage = false) {
     const chapter = store.chapters[index]
     if (!chapter) return null
-    const chapterContent = await store.fetchChapterContent(index, forceRefresh)
+    const chapterContent = await store.fetchChapterContent(index, forceRefresh, reportStage)
     if (chapterContent == null) return null
     return {
       index,
@@ -105,7 +105,8 @@ export function useContinuousReading(
     const generation = ++continuousGeneration
     previousAutoLoadArmed.value = false
     const previousIndex = targetIndex - 1
-    const currentPromise = buildContinuousChapter(targetIndex)
+    // 只让「当前章」上报加载阶段：前后章是并行预取，会互相覆盖界面提示
+    const currentPromise = buildContinuousChapter(targetIndex, false, true)
     const previousPromise = includePrevious && !hideReadChaptersMode.value && previousIndex >= 0
       ? Promise.resolve(getContinuousChapter(previousIndex) ?? buildContinuousChapter(previousIndex).catch(() => null))
       : Promise.resolve(null)

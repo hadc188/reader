@@ -1,6 +1,6 @@
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
-use crate::model::{book::Book, book_source::BookSource, search::SearchBook};
+use crate::model::{book::Book, book_chapter::BookChapter, book_source::BookSource, search::SearchBook};
 use crate::service::local_epub_book::{
     is_local_epub_origin, is_local_epub_url, LOCAL_EPUB_ORIGIN, MAX_EPUB_UPLOAD_BYTES,
 };
@@ -685,6 +685,9 @@ pub async fn get_chapter_list(
 pub async fn get_book_content(
     state: tauri::State<'_, AppState>,
     req: BookContentRequest,
+    // 加载阶段通道: 前端总是传(Tauri 的 Channel 不支持 Option),
+    // 不关心进度时忽略消息即可。
+    on_stage: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<ApiResponse<serde_json::Value>, AppError> {
     let user_ns = "default";
 
@@ -867,9 +870,21 @@ pub async fn get_book_content(
             .await;
     }
 
+    // 阶段回调: 缓存命中时后端直接返回, 不会有任何阶段事件
+    let notify_stage = |stage: crate::service::book_service::ContentLoadStage| {
+        let _ = on_stage.send(serde_json::json!({ "stage": stage }));
+    };
     let content = state
         .book_service
-        .get_content(&user_ns, &book_url, &source, &chapter_url)
+        .get_content_with_stage(
+            &user_ns,
+            &book_url,
+            &source,
+            &chapter_url,
+            Some(&notify_stage),
+            // 阅读路径要完整的正文规则(含段评), 不跳过书源脚本
+            false,
+        )
         .await?;
     Ok(ApiResponse::ok(serde_json::Value::String(content)))
 }
@@ -1587,7 +1602,9 @@ pub async fn cache_book_sse(
     }
 
     let state_clone = state.inner().clone();
-    let source_clone = source.clone();
+    // 包成 Arc: 书源里可能带几百 KB 的 jsLib, 逐章 clone 一次在千章书上就是
+    // 数百 MB 的无谓拷贝。调度器每章只需要一份共享引用。
+    let source_clone = Arc::new(source.clone());
     let book_url_clone = book.book_url.clone();
     let user_ns_clone = user_ns;
 
@@ -1602,28 +1619,36 @@ pub async fn cache_book_sse(
     let registry_key = book_url_clone.clone();
     let cleanup_flag = cancel_flag.clone();
     tokio::spawn(async move {
+        // 目录里可能有重复的章节地址（同一章被列多次）：去重后再算总数，
+        // 否则同一章被缓存两次会被计两次，进度会出现 X > Y 或比例虚高。
+        let chapters = dedup_chapters(chapters);
         let total = chapters.len();
+        let all_urls: Vec<String> = chapters.iter().map(|ch| ch.url.clone()).collect();
         let cancelled = || cancel_flag.load(Ordering::Relaxed);
 
         async {
-            let mut cached_count = 0usize;
-            if !refresh {
-                for ch in &chapters {
-                    if cancelled() {
-                        emit_cache_end(&on_event, total, cached_count, 0, 0, true);
-                        return;
-                    }
-                    if state_clone
-                        .book_service
-                        .is_chapter_cached(&user_ns_clone, &book_url_clone, &ch.url)
-                        .await
-                    {
-                        cached_count += 1;
-                    }
-                }
+            // 批量取回「已缓存章节」地址集合：原先逐章 is_chapter_cached().await，
+            // 几千章就要几千次顺序 await，这段时间界面停在 0/… 看起来像卡死。
+            // 同一份集合随后用于过滤待缓存章节，省掉第二次逐章查询。
+            let cached_urls: std::collections::HashSet<String> = if refresh {
+                std::collections::HashSet::new()
+            } else {
+                state_clone
+                    .book_service
+                    .cached_chapter_urls(&user_ns_clone, &book_url_clone, &all_urls)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect()
+            };
+            if cancelled() {
+                emit_cache_end(&on_event, total, 0, 0, 0, true);
+                return;
             }
+            let mut cached_count = cached_urls.len();
             let mut success = 0usize;
             let mut failed = 0usize;
+            let mut aborted = false;
             let _ = on_event.send(serde_json::json!({
                 "event": "data",
                 "totalChapters": total,
@@ -1632,65 +1657,40 @@ pub async fn cache_book_sse(
                 "failedCount": failed
             }));
 
-            let sem = Arc::new(tokio::sync::Semaphore::new(concurrent));
-            let mut tasks: FuturesUnordered<_> = FuturesUnordered::new();
-            let mut aborted = false;
-            for ch in chapters {
-                if cancelled() {
-                    aborted = true;
-                    break;
-                }
-                let already_cached = !refresh
-                    && state_clone
-                        .book_service
-                        .is_chapter_cached(&user_ns_clone, &book_url_clone, &ch.url)
-                        .await;
-                if already_cached {
-                    continue;
-                }
-                let permit = match sem.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        failed += 1;
-                        continue;
-                    }
-                };
-                if cancelled() {
-                    aborted = true;
-                    break;
-                }
-                let svc = state_clone.book_service.clone();
-                let src = source_clone.clone();
-                let url = ch.url.clone();
-                let b_url = book_url_clone.clone();
-                let refresh_flag = refresh;
-                let u_ns = user_ns_clone;
-                tasks.push(tokio::spawn(async move {
-                    let _permit = permit;
-                    svc.cache_chapter(&u_ns, &b_url, &src, &url, refresh_flag)
-                        .await
-                }));
-            }
+            let tasks_pending: Vec<String> = all_urls
+                .into_iter()
+                .filter(|url| !cached_urls.contains(url))
+                .collect();
 
-            // 已在途的请求等待自然结束（受 HTTP 超时约束），不再派发新任务。
-            while let Some(task) = tasks.next().await {
-                match task {
-                    Ok(Ok(_)) => {
-                        success += 1;
-                        cached_count += 1;
-                    }
-                    _ => {
-                        failed += 1;
-                    }
-                }
-                let _ = on_event.send(serde_json::json!({
-                    "event": "data",
-                    "totalChapters": total,
-                    "cachedCount": cached_count,
-                    "successCount": success,
-                    "failedCount": failed
-                }));
-            }
+            // 边派发边收集：并发窗口保持填满，每完成一章立刻上报进度。
+            let svc = state_clone.book_service.clone();
+            let src = source_clone.clone();
+            let b_url = book_url_clone.clone();
+            let (run_success, run_failed, run_aborted) = run_cache_tasks(
+                tasks_pending,
+                concurrent,
+                &cancelled,
+                move |url| {
+                    let svc = svc.clone();
+                    let src = src.clone();
+                    let b_url = b_url.clone();
+                    async move { svc.cache_chapter(&user_ns_clone, &b_url, &src, &url, refresh).await }
+                },                |success, failed| {
+                    // success/failed 为该调度器内的累计值，映射到全局计数
+                    let _ = on_event.send(serde_json::json!({
+                        "event": "data",
+                        "totalChapters": total,
+                        "cachedCount": cached_count + success,
+                        "successCount": success,
+                        "failedCount": failed
+                    }));
+                },
+            )
+            .await;
+            success += run_success;
+            failed += run_failed;
+            cached_count += run_success;
+            aborted = aborted || run_aborted;
 
             emit_cache_end(
                 &on_event,
@@ -1714,6 +1714,67 @@ pub async fn cache_book_sse(
     });
 
     Ok(())
+}
+
+/// 按章节地址去重（保持原有顺序，保留首次出现的那条）。
+///
+/// 目录里同一章可能被列多次（分卷/重复锚点）。不去重的话同一章会被缓存两次并
+/// 各计一次进度，出现 `cachedCount > totalChapters` 或比例虚高。
+fn dedup_chapters(chapters: Vec<BookChapter>) -> Vec<BookChapter> {
+    let mut seen = std::collections::HashSet::new();
+    chapters
+        .into_iter()
+        .filter(|chapter| seen.insert(chapter.url.clone()))
+        .collect()
+}
+
+/// 并发缓存章节的调度器：**边派发边收集**，每完成一章回调一次累计进度。
+///
+/// 抽成独立函数是为了能被测试覆盖：「先派发完全部、再统一收集」的写法会让整个
+/// 缓存过程没有任何进度输出 —— 派发循环被并发窗口卡住时，已完成的任务没人收集，
+/// 用户看到的是进度条长时间不动、最后一步跳满。
+async fn run_cache_tasks<F, Fut>(
+    urls: Vec<String>,
+    concurrent: usize,
+    cancelled: impl Fn() -> bool,
+    load: F,
+    mut on_progress: impl FnMut(usize, usize),
+) -> (usize, usize, bool)
+where
+    F: Fn(String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), AppError>> + Send + 'static,
+{
+    let concurrent = concurrent.max(1);
+    let mut tasks: FuturesUnordered<tokio::task::JoinHandle<Result<(), AppError>>> =
+        FuturesUnordered::new();
+    let mut pending = urls.into_iter();
+    let mut success = 0usize;
+    let mut failed = 0usize;
+    let mut aborted = false;
+
+    loop {
+        // 取消检测放在最前面：即使 `pending` 已空（章节都派发完了），只要还有在途
+        // 请求也要把 aborted 反映出来，否则返回值无法独立表达"是否被取消"。
+        if !aborted && cancelled() {
+            aborted = true;
+        }
+        // 补满并发窗口。取消后不再补派，已在途的请求等它自然结束（受 HTTP 超时约束）。
+        while !aborted && tasks.len() < concurrent {
+            match pending.next() {
+                Some(url) => tasks.push(tokio::spawn(load(url))),
+                None => break,
+            }
+        }
+
+        let Some(task) = tasks.next().await else { break };
+        match task {
+            Ok(Ok(())) => success += 1,
+            _ => failed += 1,
+        }
+        on_progress(success, failed);
+    }
+
+    (success, failed, aborted)
 }
 
 fn emit_cache_end(
@@ -2858,13 +2919,256 @@ fn take_available_source_sse_matches(
 mod tests {
     use super::{
         book_matches_delete_target, build_available_book_source_response,
-        cache_count_for_shelf_display, fallback_available_book,
-        resolve_cache_start_index, retain_enabled_source_books, should_use_available_source_cache,
+        cache_count_for_shelf_display, dedup_chapters, fallback_available_book,
+        resolve_cache_start_index, retain_enabled_source_books, run_cache_tasks,
+        should_use_available_source_cache,
         take_available_source_cached_matches,
         take_available_source_sse_matches, GetAvailableBookSourceRequest,
     };
+    use crate::error::error::AppError;
+    use crate::model::book_chapter::BookChapter;
     use crate::model::{book::Book, search::SearchBook};
+    use futures::StreamExt;
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// 目录里重复的章节地址必须去重：否则同一章被缓存两次、各计一次进度，
+    /// 会出现 `cachedCount > totalChapters`。
+    #[test]
+    fn dedup_chapters_keeps_first_occurrence() {
+        let chapters = vec![
+            BookChapter { title: "第一章".into(), url: "u1".into(), ..Default::default() },
+            BookChapter { title: "第一章(重复)".into(), url: "u1".into(), ..Default::default() },
+            BookChapter { title: "第二章".into(), url: "u2".into(), ..Default::default() },
+            BookChapter { title: "第一章(再次)".into(), url: "u1".into(), ..Default::default() },
+            BookChapter { title: "第三章".into(), url: "u3".into(), ..Default::default() },
+        ];
+
+        let deduped = dedup_chapters(chapters);
+
+        let urls: Vec<&str> = deduped.iter().map(|c| c.url.as_str()).collect();
+        assert_eq!(urls, vec!["u1", "u2", "u3"], "应保留首次出现并维持原顺序");
+        assert_eq!(deduped[0].title, "第一章", "重复项应保留首次出现的那条");
+    }
+
+    #[test]
+    fn dedup_chapters_leaves_unique_list_untouched() {
+        let chapters: Vec<BookChapter> = (0..5)
+            .map(|i| BookChapter {
+                title: format!("第{i}章"),
+                url: format!("u{i}"),
+                ..Default::default()
+            })
+            .collect();
+        let deduped = dedup_chapters(chapters);
+        assert_eq!(deduped.len(), 5);
+    }
+
+    /// `aborted` 必须能独立表达"被取消"：即使章节已全部派发完（`pending` 为空），
+    /// 只要有在途请求且此时已被取消，返回值也要是 true。
+    #[tokio::test]
+    async fn cache_scheduler_reports_aborted_when_cancelled_after_dispatch() {
+        let urls: Vec<String> = (0..4).map(|i| format!("ch{i}")).collect();
+        let cancel_now = Arc::new(AtomicBool::new(false));
+
+        let (_success, _failed, aborted) = run_cache_tasks(
+            urls,
+            4, // 窗口足够大：首批就会把全部章节派发完
+            {
+                let cancel_now = cancel_now.clone();
+                move || cancel_now.load(Ordering::SeqCst)
+            },
+            |_url| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                Ok(())
+            },
+            {
+                // 第一次进度回调时立即取消：此刻 pending 已空，只剩在途请求
+                let cancel_now = cancel_now.clone();
+                move |_success, _failed| cancel_now.store(true, Ordering::SeqCst)
+            },
+        )
+        .await;
+
+        assert!(aborted, "pending 已空但被取消时, 返回值也应表达 aborted");
+    }
+
+
+    ///
+    /// 回归点：早期实现是「先把所有章节派发完、再统一收集结果」。那种写法也会
+    /// emit 每章一次，但首次 emit 发生在**全部派发之后** —— 用户看到的是进度条
+    /// 长时间不动、最后一步跳满。所以判据不是 emit 次数，而是「首次上报时还有
+    /// 章节没被派发出去」。
+    #[tokio::test]
+    async fn cache_scheduler_reports_progress_while_still_dispatching() {
+        let urls: Vec<String> = (0..10).map(|i| format!("https://example.test/ch/{i}")).collect();
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        // 已被派发（进入 load）的章节数
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let first_emit_dispatched = Arc::new(Mutex::new(None));
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let (success, failed, aborted) = run_cache_tasks(
+            urls,
+            3,
+            || false,
+            {
+                let inflight = inflight.clone();
+                let peak = peak.clone();
+                let dispatched = dispatched.clone();
+                move |_url| {
+                    dispatched.fetch_add(1, Ordering::SeqCst);
+                    let inflight = inflight.clone();
+                    let peak = peak.clone();
+                    async move {
+                        let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        inflight.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                }
+            },
+            {
+                let reported = reported.clone();
+                let dispatched = dispatched.clone();
+                let first_emit_dispatched = first_emit_dispatched.clone();
+                move |success, _failed| {
+                    reported.lock().unwrap().push(success);
+                    let mut first = first_emit_dispatched.lock().unwrap();
+                    if first.is_none() {
+                        *first = Some(dispatched.load(Ordering::SeqCst));
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(success, 10);
+        assert_eq!(failed, 0);
+        assert!(!aborted);
+
+        let total_dispatched = dispatched.load(Ordering::SeqCst);
+        let first_emit_dispatched = first_emit_dispatched.lock().unwrap();
+        let first_emit_dispatched = first_emit_dispatched.expect("应至少上报过一次进度");
+        assert!(
+            first_emit_dispatched < total_dispatched,
+            "首次进度上报时只派发了 {first_emit_dispatched}/{total_dispatched} 章, \
+             说明进度是边派发边报的; 若两者相等则退回到了「先派发完再收集」"
+        );
+
+        let reported = reported.lock().unwrap();
+        assert_eq!(
+            reported.len(),
+            10,
+            "每完成一章都应上报一次进度, 实际: {reported:?}"
+        );
+        assert!(
+            reported.windows(2).all(|w| w[1] > w[0]),
+            "进度应逐章递增, 实际: {reported:?}"
+        );
+        assert_eq!(*reported.last().unwrap(), 10);
+        drop(reported);
+        assert!(peak.load(Ordering::SeqCst) <= 3, "并发不应超过窗口上限");
+    }
+
+    /// 判别力自检：把「先派发完全部、再统一收集」的旧写法内联复现一遍，
+    /// 确认上面那条判据确实能识别出它（首次上报时全都已派发完 = 进度会卡住）。
+    /// 没有这个测试，上面那条断言可能只是恰好通过，抓不住回归。
+    #[tokio::test]
+    async fn dispatch_first_implementation_would_freeze_progress() {
+        let urls: Vec<String> = (0..10).map(|i| format!("ch{i}")).collect();
+        let dispatched = Arc::new(AtomicUsize::new(0));
+
+        // —— 旧写法：一次性把全部章节派发出去 ——
+        let mut tasks: futures::stream::FuturesUnordered<_> = futures::stream::FuturesUnordered::new();
+        for _url in urls {
+            dispatched.fetch_add(1, Ordering::SeqCst);
+            tasks.push(tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                Ok::<(), AppError>(())
+            }));
+        }
+        let total_dispatched = dispatched.load(Ordering::SeqCst);
+
+        // 收集阶段才开始上报 —— 此时所有章节早已派发完毕
+        let mut first_emit_dispatched = None;
+        while let Some(_done) = tasks.next().await {
+            if first_emit_dispatched.is_none() {
+                first_emit_dispatched = Some(dispatched.load(Ordering::SeqCst));
+            }
+        }
+
+        assert_eq!(total_dispatched, 10);
+        assert_eq!(
+            first_emit_dispatched,
+            Some(total_dispatched),
+            "旧写法下首次进度上报时所有章节都已派发 —— 这正是进度条长时间不动的原因"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_scheduler_counts_failures_and_keeps_going() {
+        let urls: Vec<String> = (0..6).map(|i| format!("ch{i}")).collect();
+        let seen_failed = Arc::new(Mutex::new(Vec::new()));
+
+        let (success, failed, aborted) = run_cache_tasks(
+            urls,
+            2,
+            || false,
+            |url| async move {
+                if url.ends_with('0') {
+                    Err(AppError::BadRequest("正文解析为空, 未写入缓存".to_string()))
+                } else {
+                    Ok(())
+                }
+            },
+            {
+                let seen_failed = seen_failed.clone();
+                move |_success, failed| seen_failed.lock().unwrap().push(failed)
+            },
+        )
+        .await;
+
+        assert_eq!(failed, 1, "失败章节应计入失败数");
+        assert_eq!(success, 5);
+        assert!(!aborted);
+        let seen_failed = seen_failed.lock().unwrap();
+        assert_eq!(*seen_failed.last().unwrap(), 1, "失败数应出现在进度里");
+    }
+
+    #[tokio::test]
+    async fn cache_scheduler_stops_dispatching_after_cancel() {
+        let urls: Vec<String> = (0..20).map(|i| format!("ch{i}")).collect();
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        let (success, _failed, aborted) = run_cache_tasks(
+            urls,
+            2,
+            {
+                let cancelled = cancelled.clone();
+                move || cancelled.load(Ordering::SeqCst)
+            },
+            |_url| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                Ok(())
+            },
+            {
+                let cancelled = cancelled.clone();
+                move |success, _failed| {
+                    if success >= 2 {
+                        cancelled.store(true, Ordering::SeqCst)
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert!(aborted, "取消后应标记 aborted");
+        assert!(success < 20, "取消后不应继续跑完剩余章节, 实际 {success}");
+    }
 
     #[test]
     fn delete_target_matches_by_book_url() {
@@ -2967,7 +3271,7 @@ mod tests {
         let req = GetAvailableBookSourceRequest {
             url: Some("https://example.test/book/1".to_string()),
             name: Some("深空彼岸".to_string()),
-            author: Some("辰东".to_string()),
+            author: Some("另一作者".to_string()),
             origin: Some("https://source.test".to_string()),
             refresh: None,
             last_index: None,
@@ -2979,7 +3283,7 @@ mod tests {
 
         assert_eq!(book.book_url, "https://example.test/book/1");
         assert_eq!(book.name, "深空彼岸");
-        assert_eq!(book.author, "辰东");
+        assert_eq!(book.author, "另一作者");
         assert_eq!(book.origin, "https://source.test");
     }
 
@@ -2987,7 +3291,7 @@ mod tests {
     fn available_book_source_cache_includes_current_source() {
         let cached = vec![SearchBook {
             name: "深空彼岸".to_string(),
-            author: "作者：辰东".to_string(),
+            author: "作者：另一作者".to_string(),
             origin: "https://m.22biqu.com/".to_string(),
             book_url: "https://m.22biqu.com/biqu2986/".to_string(),
             ..SearchBook::default()

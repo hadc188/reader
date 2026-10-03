@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div
     class="reader-view"
     :class="{ 'disable-system-callout': disableSystemCallout }"
@@ -14,6 +14,20 @@
     @click="handleBackgroundClick"
     @contextmenu.prevent="handleContextMenu"
   >
+    <!-- 章节加载阶段：Teleport 到 body，避免被阅读容器的层叠/定位影响 -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div
+          v-if="loadStageText"
+          class="chapter-loading-stage"
+          :style="{ background: chromeTheme.popup, color: chromeTheme.fontColor }"
+        >
+          <span class="chapter-loading-spinner" aria-hidden="true"></span>
+          <span>{{ loadStageText }}</span>
+        </div>
+      </Transition>
+    </Teleport>
+
     <!-- Left Drawer Panels -->
     <Teleport to="body">
       <Transition name="fade">
@@ -155,7 +169,7 @@
       @touchend="handleTouchEnd"
       @click="handleGlobalClick"
     >
-      <div v-if="store.loading" class="content-loading">
+      <div v-if="showChapterLoading" class="content-loading">
         <div class="loading-spinner"></div>
       </div>
 
@@ -164,7 +178,7 @@
       </div>
 
       <article
-        v-if="!store.loading && !isContinuousMode"
+        v-if="!showChapterLoading && !isContinuousMode"
         class="chapter-content"
         :class="{ 'horizontal-page-article': isHorizontalPageMode }"
         :style="{
@@ -178,6 +192,7 @@
           '--reader-page-step': horizontalPageStepStyle,
         }"
       >
+        <!-- 章节加载阶段：段评解析可能耗时数秒。做成浮层，三种阅读模式都能看到。 -->
         <div v-if="isHorizontalPageMode" class="horizontal-page-layout">
           <section class="horizontal-content-page">
             <div
@@ -230,7 +245,7 @@
       </Transition>
 
       <div
-        v-if="!store.loading && isContinuousMode"
+        v-if="!showChapterLoading && isContinuousMode"
         class="continuous-reading"
         :style="{
           maxWidth: config.pageWidth + 'px',
@@ -333,6 +348,29 @@
       v-model="showBookInfo"
       :book="bookInfoBook"
     />
+
+    <!-- 书源面板: java.showBrowser(url, html) 弹出的底部弹层(legado BottomWebViewDialog) -->
+    <Transition name="fade">
+      <div v-if="sourceBrowser?.visible" class="source-browser-mask" @click.self="closeSourceBrowserPanel">
+        <div class="source-browser-panel" :style="{ background: chromeTheme.popup, color: chromeTheme.fontColor }">
+          <div class="source-browser-head">
+            <span class="source-browser-title">{{ sourceBrowser.url || '书源面板' }}</span>
+            <button class="source-browser-close" @click="closeSourceBrowserPanel">关闭</button>
+          </div>
+          <!--
+            面板托管在 reader.localhost, 与应用(tauri.localhost)跨源 —— 面板脚本
+            因此碰不到本应用的 DOM 与 Tauri IPC。
+            保留 allow-same-origin 是必需的: 插件用 localStorage 缓存书籍信息,
+            opaque origin 下会抛 SecurityError。桥请求靠 CORS 而非同源放行。
+          -->
+          <iframe
+            class="source-browser-frame"
+            :src="sourceBrowser.src"
+            sandbox="allow-scripts allow-forms allow-popups allow-modals allow-same-origin"
+          ></iframe>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -342,12 +380,14 @@ import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets, TOC_END_CHECK_INTERVAL_MS } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { getBookInfo, getBookshelfWithCacheInfo } from '../api/bookshelf'
+import { evalSourceClick, type ShowBrowserRequest } from '../api/sourceClick'
 import { readerOrigin } from '../api/scheme'
 import { applySystemTheme } from '../utils/systemUi'
 import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
 import { shouldPreferServerReadingPosition, type ReadingPositionSnapshot } from '../utils/readingPosition'
 import { isLocalBook } from '../utils/localBook'
+import { processSourceImageOptions } from '../utils/sourceImageOptions'
 import { handleReaderFontSizeWheel } from '../utils/readerFontSize'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
 import type { Book } from '../types'
@@ -385,7 +425,33 @@ function debugPositionLog(message: string, payload?: unknown) {
   console.log('[pos]', message, payload ?? '')
 }
 
+/** 书源脚本(java.log / java.toast)日志转发开关：排查书源面板时置 true。 */
+const SOURCE_CLICK_LOG_ENABLED = false
+function sourceClickLog(message: string, payload?: unknown) {
+  if (!SOURCE_CLICK_LOG_ENABLED) return
+  console.log('[source-click]', message, payload ?? '')
+}
+
 const config = computed(() => store.config)
+/**
+ * 章节加载阶段文案。
+ *
+ * 后端只在**真正发起网络请求**时才推阶段，缓存命中不会有任何阶段，
+ * 所以这里为空即表示「没在加载」，不需要额外判断 `store.loading`。
+ * 「解析」一步通常最慢（书源脚本 + 段评请求）。
+ */
+const loadStageText = computed(() => {
+  switch (store.loadStage) {
+    case 'fetching':
+      return '正在获取章节…'
+    case 'parsing':
+      return '正在解析正文与段评…'
+    case 'caching':
+      return '正在保存到本地…'
+    default:
+      return ''
+  }
+})
 const theme = computed(() => store.currentTheme)
 const chromeTheme = computed(() => store.chromeTheme)
 const hasReaderBackground = computed(() => Boolean(config.value.backgroundImage) && config.value.applyBackgroundToReader)
@@ -401,6 +467,53 @@ let speechTimerTicker: number | null = null
 let readerViewUnmounted = false
 let suppressNextTapUntil = 0
 const readerContextMenu = ref({ visible: false, top: 0, left: 0, text: '' })
+// `java.showBrowser` 面板(legado 的 BottomWebViewDialog): 底部弹层 + iframe。
+//
+// 面板 HTML 由后端托管在 `reader.localhost`(与应用 `tauri.localhost` 天然跨源),
+// 这样面板内的同步桥(`window.java`/`cache`/`run`)能走同源 HTTP 回调宿主,
+// 而跨源隔离又保证面板脚本碰不到本应用的 DOM / Tauri IPC。
+const sourceBrowser = ref<{ visible: boolean; url: string; src: string } | null>(null)
+
+function openSourceBrowserPanel(request: ShowBrowserRequest) {
+  if (!request.panelId) {
+    console.warn('[source-click] showBrowser 缺少 panelId')
+    return
+  }
+  sourceBrowser.value = {
+    visible: true,
+    url: request.url || '',
+    src: `${readerOrigin}/sourcePanel?panelId=${encodeURIComponent(request.panelId)}`,
+  }
+}
+
+function closeSourceBrowserPanel() {
+  sourceBrowser.value = null
+}
+
+/**
+ * 面板通过 `postMessage` 请求宿主关闭自己或换成另一个面板
+ * (`window.close()` 在 iframe 内无效, 嵌套 `java.showBrowser` 也走这里)。
+ */
+function handleSourcePanelMessage(event: MessageEvent) {
+  const current = sourceBrowser.value
+  if (!current?.visible) return
+  // 只接受来自面板 iframe 的消息
+  if (event.origin !== readerOrigin) return
+  const data = event.data as { type?: string; panelId?: string; url?: string } | null
+  if (!data || typeof data !== 'object') return
+
+  if (data.type === 'close') {
+    // 只处理当前面板自己的关闭请求
+    if (typeof data.panelId === 'string' && !current.src.includes(encodeURIComponent(data.panelId))) {
+      return
+    }
+    closeSourceBrowserPanel()
+    return
+  }
+  if (data.type === 'showBrowser' && data.panelId) {
+    openSourceBrowserPanel({ url: data.url || '', panelId: data.panelId })
+  }
+}
 let restorePositionTimer: number | null = null
 let persistPositionTimer: number | null = null
 let legadoPositionRestoreTimer: number | null = null
@@ -463,6 +576,12 @@ const isIosWebkit = computed(() => {
 const disableSystemCallout = computed(() => {
   return isIosWebkit.value && isMobile.value && config.value.selectAction === 'popup'
 })
+/** 连续阅读模式的「原地刷新」不显示全屏加载态: 章节列表必须留在 DOM 里。
+ *  一旦卸载, `.content-loading` 的 height:100% 会让滚动容器内容塌缩、
+ *  scrollTop 被夹到 0, 重新挂载后 handleScroll 会把第一项(上一章)判为当前章。 */
+const showChapterLoading = computed(() => (
+  store.loading && !(isContinuousMode.value && store.refreshing)
+))
 const touchState = ref({
   startX: 0,
   startY: 0,
@@ -612,8 +731,47 @@ function formatChapterHtml(rawText: string) {
   }
 
   rewriteLocalEpubAssetSrcs(wrapper)
+  processSourceImageOptions(wrapper)
   highlightSearchText(wrapper)
   return wrapper.innerHTML
+}
+
+// `,{json}` 解析与气泡处理见 utils/sourceImageOptions(已单测覆盖)
+/**
+ * 点击正文里的书源图片气泡(段评图标等): 执行 `,{json}` 里的 `click` 脚本。
+ * 脚本在书源 jsLib 作用域运行(后端 `eval_source_click`), 因此插件函数可用;
+ * 插件通常返回面板 HTML 或调用 `java.showBrowser` 弹面板。
+ */
+async function handleSourceImageClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null
+  const image = target?.closest?.('img[data-source-click]') as HTMLImageElement | null
+  if (!image) return
+  const script = image.dataset.sourceClick || ''
+  const sourceUrl = store.book?.origin || ''
+  if (!script || !sourceUrl) return
+
+  // 阻止这次点击被阅读器的翻页/菜单逻辑继续处理
+  event.preventDefault()
+  event.stopPropagation()
+  suppressNextTapUntil = Date.now() + 400
+
+  const rawSrc = image.dataset.sourceRawSrc || image.getAttribute('src') || ''
+  try {
+    const outcome = await evalSourceClick({
+      bookSourceUrl: sourceUrl,
+      script,
+      result: rawSrc,
+      bookUrl: store.book?.bookUrl || '',
+      chapterUrl: store.currentChapter?.url || '',
+    })
+    outcome.logs?.forEach((line) => sourceClickLog('脚本日志', line))
+    if (outcome.showBrowser) {
+      openSourceBrowserPanel(outcome.showBrowser)
+    }
+  } catch (error) {
+    console.warn('[source-click] 执行失败', error)
+    appStore.showToast(error instanceof Error ? error.message : '执行点击脚本失败', 'error')
+  }
 }
 
 function rewriteLocalEpubAssetSrcs(root: HTMLElement) {
@@ -943,16 +1101,18 @@ async function jumpFromCatalog(targetIndex: number) {
 
   try {
     if (!isContinuousMode.value) {
+      // 先关目录再加载：否则弹层一直遮着正文，用户看不到加载阶段提示
+      store.closePanel()
       await store.loadChapter(targetIndex)
       await nextTick()
-      store.closePanel()
       scrollToTop('instant')
       return
     }
 
+    // 连续模式同理：先关目录才能看到阶段提示
+    store.closePanel()
     await rebuildContinuousAtChapter(targetIndex)
     await nextTick()
-    store.closePanel()
   } finally {
     if (skipPositionRestoreIndex === targetIndex) {
       skipPositionRestoreIndex = null
@@ -1789,6 +1949,12 @@ function handleScroll() {
       scheduleSaveReadingPosition()
       return
     }
+    // 原地刷新期间索引与进度都不变, 重排造成的滚动事件不能反推当前章 ——
+    // 刷新瞬间 offsetTop 尚未稳定, 反推会把上一章判成当前章并改写 currentIndex。
+    if (store.refreshing) {
+      scheduleSaveReadingPosition()
+      return
+    }
     const sections = getContinuousSections()
     if (sections.length) {
       const anchorLine = container.scrollTop + container.clientHeight * CONTINUOUS_POSITION_ANCHOR_RATIO
@@ -2259,6 +2425,9 @@ onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('wheel', handleReaderWheel, { passive: false })
   window.addEventListener('click', closeReaderContextMenu)
+  // 书源图片气泡的 click 脚本(捕获阶段, 抢在翻页逻辑之前)
+  document.addEventListener('click', handleSourceImageClick, true)
+  window.addEventListener('message', handleSourcePanelMessage)
   document.addEventListener('mouseup', handleMouseUpSelection)
   document.addEventListener('touchend', handleTouchEndSelection)
     document.addEventListener('selectionchange', handleSelectionChange)
@@ -2298,6 +2467,8 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('wheel', handleReaderWheel)
   window.removeEventListener('click', closeReaderContextMenu)
+  document.removeEventListener('click', handleSourceImageClick, true)
+  window.removeEventListener('message', handleSourcePanelMessage)
   document.removeEventListener('mouseup', handleMouseUpSelection)
   document.removeEventListener('touchend', handleTouchEndSelection)
     document.removeEventListener('selectionchange', handleSelectionChange)
@@ -2403,6 +2574,27 @@ watch(() => store.content, () => {
   handleContentUpdated()
   scheduleRefreshOfflineCacheState()
   scheduleRestoreReadingPosition()
+})
+
+/**
+ * 原地刷新后正文长度可能变化, 章节 section 高度随之改变, 视口会被重排挤走。
+ * 这里按刷新前的章节内进度把视口锚回同一位置; 因为索引与进度都没变, 恢复的
+ * 一定是刷新前那一章, 不会再被 handleScroll 判成上一章。
+ */
+watch(() => store.contentRefreshToken, async () => {
+  if (!isContinuousMode.value) return
+  const index = store.currentIndex
+  const progress = store.chapterScrollProgress
+  // 刷新期间不让 handleScroll 用重排中的 offsetTop 反推当前章。
+  suppressContinuousScrollSyncUntil = Date.now() + 700
+  suppressContinuousAutoLoadUntil = Date.now() + 700
+  markSkipPositionRestore(index)
+  await nextTick()
+  if (typeof window !== 'undefined') {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+  }
+  if (store.currentIndex !== index) return
+  scrollToContinuousChapter(index, false, progress)
 })
 
 watch(() => store.loading, (loading) => {
@@ -2742,6 +2934,42 @@ watch(
   line-height: 1.4;
 }
 
+/* 章节加载阶段：浮层形式，横向分页/普通/连续三种模式共用 */
+.chapter-loading-stage {
+  position: fixed;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  /* 高于左抽屉弹层与阅读工具栏，保证任何时刻都看得见 */
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  line-height: 1.2;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  /* 不拦截点击，避免挡住翻页/菜单手势 */
+  pointer-events: none;
+}
+
+.chapter-loading-spinner {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: chapter-loading-spin 0.8s linear infinite;
+}
+
+@keyframes chapter-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .chapter-text {
   word-break: normal;
   overflow-wrap: anywhere;
@@ -2962,6 +3190,75 @@ watch(
   border-radius: 2px;
 }
 
+/* 书源图片气泡: 剥离 `,{json}` 后可点击的段评图标 */
+:deep(img.source-clickable) {
+  cursor: pointer;
+}
+
+:deep(img.source-inline-bubble) {
+  display: inline-block;
+  height: 1.15em;
+  width: auto;
+  vertical-align: -0.2em;
+  margin: 0 0.15em;
+}
+
+/* java.showBrowser 面板: 底部弹层(legado BottomWebViewDialog) */
+.source-browser-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.source-browser-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 100%);
+  height: min(78vh, 100%);
+  border-radius: 14px 14px 0 0;
+  overflow: hidden;
+  box-shadow: 0 -12px 34px rgba(0, 0, 0, 0.3);
+}
+
+.source-browser-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.source-browser-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.source-browser-close {
+  flex-shrink: 0;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  color: inherit;
+  font-size: 13px;
+}
+
+.source-browser-frame {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
 :deep(.search-highlight.current-match) {
   background: orange;
 }

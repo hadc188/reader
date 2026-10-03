@@ -71,3 +71,4 @@ reader-rust 是「阅读3.0」的 Rust 实现，当前形态为 **Tauri v2 桌�
 - **本地 PDF 管线**（`src/service/local_pdf_book.rs`）：导入时一次性提取全文并按章落盘 `chapters/{index:05}.txt`（零填充五位，如 `00012.txt`），之后翻页是纯缓存直读（亚毫秒）。目录优先用 PDF 书签（`/Root/Outlines`），无书签时从正文认「第X回/章」标题（`detect_headings`），都没有才按 20 页/章分段。`collect_page_ids` 是页序的唯一来源，章节页号/正文提取/书签页映射都走它。提取出的每视觉行由 `merge_wrapped_lines` 重组回段落（栏宽 P85 估算 + 行尾句读双信号，标题/页码/缩进/空行独立成段；`EXTRACTOR_VERSION` 4，旧缓存读取时按新规则重提取）。
 
 - **桌面 origin 迁移**：`http://127.0.0.1:*` → `http://tauri.localhost` 后 localStorage 偏好重置一次；书库数据（SQLite/文件）不受影响。
+

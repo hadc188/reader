@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAppStore } from './app'
 import { nightThemeIndex, useReaderStore } from './reader'
-import { getBookContent, getChapterList, saveBookProgress } from '../api/bookshelf'
+import {
+  getBookContent,
+  getChapterList,
+  saveBookProgress,
+  type ContentLoadStage,
+} from '../api/bookshelf'
 import { syncLegadoBookProgress, uploadLegadoBookProgress } from '../api/webdav'
 import { requestOpenAISpeechAudio } from '../utils/openaiSpeech'
 
@@ -148,6 +153,130 @@ describe('reader local txt chapters', () => {
     expect(readerStore.loading).toBe(false)
     expect(readerStore.content).toBe('缓存章节正文')
     resolveProgress?.('ok')
+  })
+
+  it('exposes chapter load stage to the UI and clears it when finished', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/stage',
+    }
+    readerStore.chapters = [{ title: '第一章', url: 'chapter-0', index: 0 }]
+
+    let resolveContent: ((value: string) => void) | undefined
+    vi.mocked(getBookContent).mockImplementation(async (params) => {
+      // 模拟后端在请求过程中推阶段（书源脚本 / 段评解析）
+      params.onStage?.('parsing')
+      return new Promise<string>((resolve) => {
+        resolveContent = resolve
+      })
+    })
+
+    const loading = readerStore.loadChapter(0)
+    await vi.waitFor(() => {
+      expect(readerStore.loadStage).toBe('parsing')
+    })
+
+    resolveContent?.('chapter-0-正文')
+    await loading
+    // 结束后必须清空，否则界面会一直停在「正在解析正文与段评…」
+    expect(readerStore.loadStage).toBe('')
+  })
+
+  it('shows the load stage immediately, without waiting for backend stage events', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/stage-immediate',
+    }
+    readerStore.chapters = [{ title: '第一章', url: 'chapter-0', index: 0 }]
+
+    let resolveContent: ((value: string) => void) | undefined
+    // 模拟「后端阶段事件迟迟不来」：跳章后不能表现为点了没反应
+    vi.mocked(getBookContent).mockImplementation(
+      async () =>
+        new Promise<string>((resolve) => {
+          resolveContent = resolve
+        }),
+    )
+
+    const loading = readerStore.loadChapter(0)
+    await vi.waitFor(() => {
+      expect(readerStore.loadStage).toBe('fetching')
+    })
+
+    resolveContent?.('chapter-0-正文')
+    await loading
+    expect(readerStore.loadStage).toBe('')
+  })
+
+  it('does not leave a stuck stage when the chapter comes from preload', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    readerStore.updateConfig('enablePreload', true)
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/stage-preload',
+    }
+    readerStore.chapters = [{ title: '第一章', url: 'chapter-0', index: 0 }]
+
+    vi.mocked(getBookContent).mockResolvedValue('chapter-0-正文')
+    await readerStore.preloadNextChapter(0)
+    expect(readerStore.loadStage).toBe('')
+
+    // 连续阅读/跳章会对同一章再要一次内容：这一次命中预加载、不发请求，
+    // 因此**不能**留下「正在获取章节…」——否则提示会永久卡住。
+    const content = await readerStore.fetchChapterContent(0, false, true)
+    expect(content).toBe('chapter-0-正文')
+    expect(readerStore.loadStage).toBe('')
+  })
+
+  it('clears a pending load stage when the reader is reset', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/stage-clear',
+    }
+    readerStore.chapters = [{ title: '第一章', url: 'chapter-0', index: 0 }]
+
+    // 请求不 settle：模拟加载中切书/离开阅读页，原请求的 onStage 之后仍可能回来
+    let emitStage: ((stage: ContentLoadStage) => void) | undefined
+    vi.mocked(getBookContent).mockImplementation(
+      async (params) =>
+        new Promise<string>(() => {
+          emitStage = params.onStage
+        }),
+    )
+
+    void readerStore.loadChapter(0)
+    await vi.waitFor(() => {
+      expect(readerStore.loadStage).toBe('fetching')
+    })
+
+    readerStore.clear()
+    expect(readerStore.loadStage).toBe('')
+    // 必须确实发出过请求，否则下面的断言会因为 emitStage 为空而假绿
+    expect(emitStage).toBeTypeOf('function')
+
+    // 旧请求在被作废后仍推阶段：不能把提示重新点亮，否则重进阅读页时浮层卡住。
+    // 这里必须同步检查——阶段提示是同步赋值，若持有者没被作废会立刻变成 parsing。
+    emitStage?.('parsing')
+    expect(readerStore.loadStage).toBe('')
   })
 
   it('keeps the app appearance unchanged when selecting a reading theme', () => {
@@ -768,5 +897,113 @@ describe('reader toc auto refresh', () => {
 
     await expect(readerStore.refreshTocFromSource()).resolves.toBe(0)
     expect(getChapterList).not.toHaveBeenCalled()
+  })
+})
+
+describe('reader in-place chapter refresh', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+      clear: vi.fn(() => storage.clear()),
+    })
+    vi.mocked(getBookContent).mockReset()
+    vi.mocked(saveBookProgress).mockReset()
+    vi.mocked(saveBookProgress).mockResolvedValue('ok')
+  })
+
+  function setupChapter(readerStore: ReturnType<typeof useReaderStore>, index: number) {
+    readerStore.book = {
+      name: '刷新书',
+      author: '测试作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/refresh',
+    }
+    readerStore.chapters = Array.from({ length: 12 }, (_, i) => ({
+      title: `第${i + 1}章`,
+      url: `chapter-${i}`,
+      index: i,
+    }))
+    readerStore.setActiveChapterState(index, `chapter-${index}-旧正文`, 0.4)
+  }
+
+  it('keeps the current index and in-chapter progress when refreshing chapter 9', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    // 用户场景: 读到第 9 章(index 8)中部, 右键菜单点刷新。
+    setupChapter(readerStore, 8)
+    vi.mocked(getBookContent).mockResolvedValue('chapter-8-新正文')
+
+    await readerStore.refreshContent()
+
+    expect(readerStore.currentIndex).toBe(8)
+    expect(readerStore.content).toBe('chapter-8-新正文')
+    expect(readerStore.chapterScrollProgress).toBeCloseTo(0.4, 5)
+    expect(readerStore.refreshing).toBe(false)
+    // 必须向书源强制重取, 否则拿到的是缓存旧正文。
+    // 原地刷新属于用户可感知的等待, 因此会带上阶段回调(onStage)。
+    expect(getBookContent).toHaveBeenCalledWith({
+      bookUrl: 'https://example.test/refresh',
+      chapterUrl: 'chapter-8',
+      bookSourceUrl: 'test-source',
+      refresh: 1,
+      onStage: expect.any(Function),
+    })
+  })
+
+  it('bumps contentRefreshToken so the reader can re-anchor the viewport', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    setupChapter(readerStore, 8)
+    vi.mocked(getBookContent).mockResolvedValue('chapter-8-新正文')
+    const before = readerStore.contentRefreshToken
+
+    await readerStore.refreshContent()
+
+    expect(readerStore.contentRefreshToken).toBe(before + 1)
+  })
+
+  it('flags refreshing only while the request is in flight', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    setupChapter(readerStore, 8)
+    let release: (value: string) => void = () => undefined
+    vi.mocked(getBookContent).mockImplementation(() => new Promise<string>((resolve) => {
+      release = resolve
+    }))
+
+    const task = readerStore.refreshContent()
+    expect(readerStore.refreshing).toBe(true)
+    expect(readerStore.loading).toBe(true)
+
+    release('chapter-8-新正文')
+    await task
+
+    expect(readerStore.refreshing).toBe(false)
+    expect(readerStore.loading).toBe(false)
+  })
+
+  it('leaves the index untouched when the source refetch fails', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    setupChapter(readerStore, 8)
+    vi.mocked(getBookContent).mockRejectedValue(new Error('书源超时'))
+
+    await expect(readerStore.refreshContent()).rejects.toThrow('书源超时')
+
+    expect(readerStore.currentIndex).toBe(8)
+    expect(readerStore.content).toBe('chapter-8-旧正文')
+    expect(readerStore.refreshing).toBe(false)
   })
 })

@@ -1030,6 +1030,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "des"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffdd80ce8ce993de27e9f063a444a4d53ce8e8db4c1f00cc03af5ad5a9867a1e"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3907,7 +3916,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "reader-desktop"
-version = "1.4.5"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "reader-rust",
@@ -3923,7 +3932,7 @@ dependencies = [
 
 [[package]]
 name = "reader-rust"
-version = "1.4.6"
+version = "1.5.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -3933,7 +3942,9 @@ dependencies = [
  "cbc",
  "chrono",
  "config",
+ "des",
  "dotenvy",
+ "ecb",
  "encoding_rs",
  "feed-rs",
  "futures",

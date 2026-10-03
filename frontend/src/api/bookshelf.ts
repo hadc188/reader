@@ -1,6 +1,7 @@
+import { invoke, Channel } from '@tauri-apps/api/core'
 import { get, post, invokeEnvelope } from './invoke'
 import { readerOrigin } from './scheme'
-import type { Book, BookChapter, BookGroup } from '../types'
+import type { ApiResponse, Book, BookChapter, BookGroup } from '../types'
 
 export function getBookshelf() {
   return get<Book[]>('/getBookshelf').then((r) => r.data)
@@ -60,14 +61,31 @@ export function getChapterList(params: {
   return post<BookChapter[]>('/getChapterList', params).then((r) => r.data)
 }
 
+/** 章节加载阶段（与后端 `ContentLoadStage` 一致）。 */
+export type ContentLoadStage = 'fetching' | 'parsing' | 'caching'
+
 export function getBookContent(params: {
   bookUrl?: string
   chapterUrl?: string
   bookSourceUrl?: string
   index?: number
   refresh?: number
+  /** 加载阶段回调：让「书源脚本 / 段评解析」这类长耗时可见 */
+  onStage?: (stage: ContentLoadStage) => void
 }) {
-  return post<string>('/getBookContent', params).then((r) => r.data)
+  const { onStage, ...req } = params
+  // 后端命令的 Channel 参数是必需的（Tauri 不支持 Option<Channel>），
+  // 所以不关心进度时也要传一个通道，忽略其消息即可。
+  const channel = new Channel<{ stage?: ContentLoadStage }>()
+  if (onStage) {
+    channel.onmessage = (payload) => {
+      if (payload?.stage) onStage(payload.stage)
+    }
+  }
+  return invoke<ApiResponse<string>>('get_book_content', { req, onStage: channel }).then((res) => {
+    if (!res.isSuccess) throw new Error(res.errorMsg || '加载章节失败')
+    return res.data as string
+  })
 }
 
 export function saveBookProgress(params: {

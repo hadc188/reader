@@ -18,7 +18,7 @@ export function loginBookSource(bookSourceUrl: string) {
   }>('/loginBookSource', { bookSourceUrl }).then((r) => r.data)
 }
 
-/** 手动导入书源登录 Cookie(如抓包获取的起点会话)。 */
+/** 手动导入书源登录 Cookie(如通过抓包获取的会话)。 */
 export function setBookSourceCookie(bookSourceUrl: string, cookie: string) {
   return post<{ success: boolean; saved: boolean }>('/setBookSourceCookie', {
     bookSourceUrl,

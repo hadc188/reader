@@ -1,7 +1,7 @@
 use crate::crawler::fetcher::{HttpMethod, RequestSpec};
 use crate::error::error::AppError;
 use crate::model::book_source::BookSource;
-use crate::parser::js::{eval_js, eval_js_url, with_js_lib};
+use crate::parser::js::{eval_js, eval_js_url, with_source};
 use crate::util::text::normalize_source_url;
 use encoding_rs::Encoding;
 use regex::Regex;
@@ -23,7 +23,7 @@ pub fn analyze_url(
     base_url: &str,
     source: &BookSource,
 ) -> Result<RequestSpec, AppError> {
-    with_js_lib(source.js_lib.as_deref(), || {
+    with_source(source,|| {
         let base_url = strip_url_options(&normalize_source_url(base_url)).to_string();
         let mut rule_url = m_url.to_string();
         let mut header_spec = source_header_spec(source)?;

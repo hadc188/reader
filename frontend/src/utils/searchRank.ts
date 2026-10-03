@@ -97,7 +97,7 @@ function normalizeSearchName(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, '')
 }
 
-/** Strip whitespace and the "作者：" label prefix so "作者：辰东" and "辰东" merge. */
+/** Strip whitespace and the "作者：" label prefix so "作者：另一作者" and "另一作者" merge. */
 function normalizeSearchAuthor(value: string): string {
   const compact = value.trim().toLowerCase().replace(/\s+/g, '')
   return compact

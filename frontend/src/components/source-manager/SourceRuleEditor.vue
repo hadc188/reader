@@ -132,7 +132,7 @@ const groups: GroupDef[] = [
     label: '搜索',
     fields: [
       { id: 'searchUrl', title: '搜索 URL', path: 'searchUrl', type: 'string', hint: '{{key}} 为关键词，{{page}} 为页码', placeholder: 'https://example.com/search?q={{key}}' },
-      { id: 'checkKeyWord', title: '搜索关键词', path: 'ruleSearch.checkKeyWord', type: 'string', hint: '测试书源时用的默认关键词', placeholder: '斗破苍穹' },
+      { id: 'checkKeyWord', title: '搜索关键词', path: 'ruleSearch.checkKeyWord', type: 'string', hint: '测试书源时用的默认关键词', placeholder: '测试书籍' },
       { id: 'bookList', title: '书籍列表', path: 'ruleSearch.bookList', type: 'string', placeholder: '.book-list li' },
       { id: 'name', title: '书名', path: 'ruleSearch.name', type: 'string', placeholder: 'div.bookname@text' },
       { id: 'author', title: '作者', path: 'ruleSearch.author', type: 'string', placeholder: 'div.author@text' },

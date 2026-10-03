@@ -518,12 +518,12 @@ mod tests {
         let service = setup_service().await;
         // 源 A 的 URL
         service
-            .add_reading("default", 120, 300, Some("2026-08-10"), Some("url-a"), Some("斗破苍穹"), Some("天蚕土豆"))
+            .add_reading("default", 120, 300, Some("2026-08-10"), Some("url-a"), Some("测试书籍"), Some("测试作者"))
             .await
             .unwrap();
         // 源 B 的 URL (换源后)
         service
-            .add_reading("default", 180, 500, Some("2026-08-11"), Some("url-b"), Some("斗破苍穹"), Some("天蚕土豆"))
+            .add_reading("default", 180, 500, Some("2026-08-11"), Some("url-b"), Some("测试书籍"), Some("测试作者"))
             .await
             .unwrap();
         // 另一本书
@@ -535,7 +535,7 @@ mod tests {
         let books = service.get_by_book("default", "2026-08-10", "2026-08-11").await.unwrap();
         assert_eq!(books.len(), 2, "同一本书换源后应合并成一条, 实际: {:?}", books);
         // 时长累加: 120 + 180 = 300
-        let doupo = books.iter().find(|b| b.book_name == "斗破苍穹").unwrap();
+        let doupo = books.iter().find(|b| b.book_name == "测试书籍").unwrap();
         assert_eq!(doupo.seconds, 300);
         assert_eq!(doupo.characters, 800);
         assert_eq!(doupo.last_read_date, "2026-08-11");

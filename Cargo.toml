@@ -1,6 +1,6 @@
 [package]
 name = "reader-rust"
-version = "1.4.6"
+version = "1.5.0"
 edition = "2021"
 
 # The desktop app is a workspace member so it shares this target/ directory, but
@@ -27,6 +27,8 @@ anyhow = "1"
 aes = "0.8"
 bytes = "1"
 cbc = "0.1"
+des = "0.8"
+ecb = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 encoding_rs = "0.8"
 md-5 = "0.10"

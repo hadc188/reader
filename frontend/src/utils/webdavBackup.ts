@@ -73,10 +73,34 @@ export interface WebdavBackupPayload {
   readingStats?: ReadingStatsExport
 }
 
+/** 备份中因缺少必要标识(如书源名/地址为空)而无法恢复的条目。 */
+export interface SkippedEntryReport {
+  /** 条目所属的备份文件, 如 `bookSource.json`。 */
+  file: string
+  /** 被跳过的条目数量。 */
+  count: number
+  /** 最多若干条可识别的样例名, 便于用户判断跳过是否安全。 */
+  samples: string[]
+  /**
+   * 该文件里的条目是否全部被跳过。
+   *
+   * 恢复是"先清空再写入", 全部跳过会让这一类数据被清空且没有写回。调用方
+   * 应在执行前提醒用户, 这是不可逆的。
+   */
+  allSkipped: boolean
+}
+
 export interface CompatibleBackupParseResult {
   payload: WebdavBackupPayload
   format: 'reader' | 'legado'
   skippedLocalBooks: number
+  /**
+   * 解析时跳过的无效条目, 按文件汇总; 空数组表示全部有效。
+   *
+   * 只有"表述性无效"(字段为空、缺少标识)才会被跳过; 文件解析失败、
+   * 顶层不是数组、元素不是对象这类"结构性损坏"仍然直接报错。
+   */
+  skipped: SkippedEntryReport[]
 }
 
 type JsonRecord = Record<string, unknown>
@@ -197,39 +221,51 @@ export function parseCompatibleBackupArchive(
       payload: parseWebdavBackup(readerBackup),
       format: 'reader',
       skippedLocalBooks: 0,
+      skipped: [],
     }
   }
 
-  const rawBooks = parseArchiveList(files, 'bookshelf.json')
-  const networkBooks = rawBooks.filter((book) => !isLegadoLocalBook(book))
-  const rawGroups = parseArchiveList(files, 'bookGroup.json')
-  const normalizedGroups = rawGroups.map(toBookGroup)
-  const groups = normalizedGroups
-    .filter((group): group is BookGroup => group !== null)
-  const normalizedBooks = networkBooks.map(toBook)
-  const books = normalizedBooks
-    .filter((book): book is Book => book !== null)
-  const rawBookSources = parseArchiveList(files, 'bookSource.json')
-  const bookSources = rawBookSources
-    .filter(hasBookSourceIdentity) as unknown as BookSource[]
-  const rawRssSources = parseArchiveList(files, 'rssSources.json')
-  const rssSources = rawRssSources
-    .filter(hasRssSourceIdentity) as unknown as RssSource[]
-  const rawBookmarks = parseArchiveList(files, 'bookmark.json')
-  const normalizedBookmarks = rawBookmarks.map(toBookmark)
-  const bookmarks = normalizedBookmarks
-    .filter((bookmark): bookmark is Bookmark => bookmark !== null)
-  const rawReplaceRules = parseArchiveList(files, 'replaceRule.json')
-  const normalizedReplaceRules = rawReplaceRules.map(toReplaceRule)
-  const replaceRules = normalizedReplaceRules
-    .filter((rule): rule is ReplaceRule => rule !== null)
+  const skipped: SkippedEntryReport[] = []
 
-  assertAllValid('bookshelf.json', networkBooks.length, books.length)
-  assertAllValid('bookGroup.json', rawGroups.length, groups.length)
-  assertAllValid('bookSource.json', rawBookSources.length, bookSources.length)
-  assertAllValid('rssSources.json', rawRssSources.length, rssSources.length)
-  assertAllValid('bookmark.json', rawBookmarks.length, bookmarks.length)
-  assertAllValid('replaceRule.json', rawReplaceRules.length, replaceRules.length)
+  const rawBooks = parseArchiveList(files, 'bookshelf.json')
+  // 安卓专属本地书是被有意排除的(见 skippedLocalBooks), 不计入无效条目。
+  const networkBooks = rawBooks.filter((book) => !isLegadoLocalBook(book))
+  const groups = normalizeList(
+    parseArchiveList(files, 'bookGroup.json'),
+    toBookGroup,
+    { file: 'bookGroup.json', label: (v) => stringField(v, 'groupName') },
+    skipped,
+  )
+  const books = normalizeList(
+    networkBooks,
+    toBook,
+    { file: 'bookshelf.json', label: (v) => stringField(v, 'name') },
+    skipped,
+  )
+  const bookSources = normalizeList(
+    parseArchiveList(files, 'bookSource.json'),
+    (value) => (hasBookSourceIdentity(value) ? (value as unknown as BookSource) : null),
+    { file: 'bookSource.json', label: (v) => stringField(v, 'bookSourceName') },
+    skipped,
+  )
+  const rssSources = normalizeList(
+    parseArchiveList(files, 'rssSources.json'),
+    (value) => (hasRssSourceIdentity(value) ? (value as unknown as RssSource) : null),
+    { file: 'rssSources.json', label: (v) => stringField(v, 'sourceName') },
+    skipped,
+  )
+  const bookmarks = normalizeList(
+    parseArchiveList(files, 'bookmark.json'),
+    toBookmark,
+    { file: 'bookmark.json', label: (v) => stringField(v, 'bookName') },
+    skipped,
+  )
+  const replaceRules = normalizeList(
+    parseArchiveList(files, 'replaceRule.json'),
+    toReplaceRule,
+    { file: 'replaceRule.json', label: (v) => stringField(v, 'name') },
+    skipped,
+  )
 
   return {
     payload: {
@@ -245,6 +281,7 @@ export function parseCompatibleBackupArchive(
     },
     format: 'legado',
     skippedLocalBooks: rawBooks.length - networkBooks.length,
+    skipped,
   }
 }
 
@@ -331,10 +368,49 @@ function isJsonRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function assertAllValid(name: string, inputCount: number, outputCount: number) {
-  if (inputCount !== outputCount) {
-    throw new Error(`备份中的 ${name} 包含无法恢复的数据`)
+/** 样例名最多保留的条数, 避免提示信息过长。 */
+const MAX_SKIP_SAMPLES = 3
+
+function stringField(value: JsonRecord, key: string) {
+  const raw = value[key]
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : '(未命名)'
+}
+
+/**
+ * 逐条规范化并跳过无效条目, 把被跳过的数量与样例汇总到 `skipped`。
+ *
+ * 单条数据无法恢复(如书源名为空)不应中断整个恢复流程: 一份 4095 条书源的
+ * 备份里只要有一条空书源, 旧的全有无校验就会让其余 4094 条也全部无法导入。
+ * 结构性问题(JSON 解析失败、顶层不是数组、元素不是对象)仍由
+ * `parseArchiveList` 直接报错, 不会被静默跳过。
+ */
+function normalizeList<T>(
+  raw: JsonRecord[],
+  normalize: (value: JsonRecord) => T | null,
+  context: { file: string; label: (value: JsonRecord) => string },
+  skipped: SkippedEntryReport[],
+): T[] {
+  const kept: T[] = []
+  const samples: string[] = []
+  for (const value of raw) {
+    const item = normalize(value)
+    if (item !== null) {
+      kept.push(item)
+    } else if (samples.length < MAX_SKIP_SAMPLES) {
+      samples.push(context.label(value))
+    }
   }
+  const count = raw.length - kept.length
+  if (count > 0) {
+    skipped.push({
+      file: context.file,
+      count,
+      samples,
+      // raw 非空时 kept 为空, 说明这一类数据会被整体清空。
+      allSkipped: raw.length > 0 && kept.length === 0,
+    })
+  }
+  return kept
 }
 
 function toFiniteNumber(value: unknown, fallback = 0) {

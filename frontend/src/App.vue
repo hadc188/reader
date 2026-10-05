@@ -1,7 +1,10 @@
 <template>
   <div
     class="app-shell"
-    :class="{ 'has-custom-background': showCustomBackground }"
+    :class="{
+      'has-custom-background': showCustomBackground,
+      'mini-mode': appStore.miniMode,
+    }"
     :style="appShellStyle"
   >
     <div
@@ -33,6 +36,9 @@
           :key="toast.id"
           class="toast"
           :class="toast.type"
+          role="status"
+          title="点击关闭"
+          @click="appStore.dismissToast(toast.id)"
         >
           {{ toast.message }}
         </div>
@@ -62,8 +68,8 @@ const route = useRoute()
 const appStore = useAppStore()
 const readerStore = useReaderStore()
 
-const showHeader = computed(() => route.name !== 'reader')
-const showBottomNav = computed(() => route.name !== 'reader')
+const showHeader = computed(() => route.name !== 'reader' && !appStore.miniMode)
+const showBottomNav = computed(() => route.name !== 'reader' && !appStore.miniMode)
 const titlebarSurface = computed<'settings' | 'reader-panel' | null>(() => {
   if (appStore.showSettingsDrawer) return 'settings'
   if (appStore.showSourceManager || appStore.showWebdavManager) return 'settings'
@@ -93,6 +99,8 @@ onMounted(() => {
   void appStore.runStartupVersionCheck()
   void appStore.applyBossKey().catch(() => undefined)
   void appStore.applyNetworkProxy().catch(() => undefined)
+  // 迷你模式状态由 Rust 侧持有(桌面壳启动时据此建窗), 这里同步一份用于紧凑布局。
+  void appStore.syncWindowMode()
 })
 
 let closeUnlisten: (() => void) | undefined
@@ -330,6 +338,12 @@ body.custom-background-active .detail-modal :is(.tag, .action-btn:not(.primary))
 
 .app-main.with-bottom-nav {
   padding-bottom: calc(88px + var(--safe-area-bottom));
+}
+
+/* 迷你模式: 隐藏顶栏/底栏后正文能占满小窗。顶栏与底栏本身由 showHeader /
+   showBottomNav 控制不渲染, 这里只收掉标题栏里的应用名, 留出拖动区域。 */
+.app-shell.mini-mode > .titlebar .titlebar-title {
+  display: none;
 }
 
 /* Teleported dialogs live outside .app-shell. Keep their fixed viewport below

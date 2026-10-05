@@ -188,6 +188,10 @@ ul, ol {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  /* 容器是贴着右上角的块级盒子, 即使没有提示也占据一片矩形区域。它的层级
+     高于页面内容, 所以不加这行就会把下方按钮的点击吃掉。卡片自身设为
+     pointer-events: auto(见 .toast), 只有卡片那一小块会接收点击。 */
+  pointer-events: none;
 }
 
 .toast {
@@ -198,6 +202,17 @@ ul, ol {
   box-shadow: var(--shadow-lg);
   font-size: var(--text-sm);
   animation: toastIn var(--duration-normal) var(--ease-out) forwards;
+  /* 卡片可点击以立即关闭(见 App.vue 的 @click)。
+     代价: 卡片覆盖的那一小片在提示存续期间会接收点击而非穿透到下层 —— 这是
+     "可点关闭"必然要付的代价, 换来的是不必干等 3 秒。容器整体仍是
+     pointer-events: none, 所以不会出现整块右上角失效的问题。 */
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toast:hover {
+  border-color: var(--color-text-tertiary);
 }
 
 @media (prefers-reduced-motion: reduce) {

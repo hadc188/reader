@@ -250,6 +250,22 @@ pub struct ChapterPagination {
     pub next_index: i32,
 }
 
+/// 取消信号: 测试书源等后台任务用它中断在途请求。
+///
+/// 用 `AtomicBool` 而不是 `CancellationToken`, 与既有的 `CACHE_BOOK_CANCELLATIONS`
+/// / `SEARCH_CANCELLATIONS` 保持同一套模式。
+pub type CancelSignal = Arc<std::sync::atomic::AtomicBool>;
+
+/// 检查取消标志(集中在两处 loop 里用, 避免每处都写一遍 `load(Relaxed)`)。
+fn is_cancelled(signal: Option<&CancelSignal>) -> bool {
+    signal.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// 取消错误标记: 让调用方能把它与「站点请求失败」区分开。
+///
+/// 测试书源必须区分这两者 —— 把用户主动中止当成检测失败会把可用书源误标为失效。
+pub const CANCELLED_ERR: &str = "cancelled by user";
+
 #[derive(Clone)]
 pub struct BookService {
     http: HttpClient,
@@ -282,6 +298,28 @@ pub struct BookSourceAvailability {
     pub explore_url: Option<String>,
     pub search_error: Option<String>,
     pub explore_error: Option<String>,
+    /// 用户主动中止导致本次检测未完成。
+    ///
+    /// 调用方必须跳过"按结果写库": 这不是"站点不可用", 把它当失效会把好源标坏。
+    /// 统计时也要排除, 否则中止会让"失效数"虚高。
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+/// 构造一个"已取消"的占位结果(不写库、不计入有效/失效)。
+fn cancelled_availability(source: &BookSource, keyword: &str) -> BookSourceAvailability {
+    BookSourceAvailability {
+        book_source_url: source.book_source_url.clone(),
+        book_source_name: source.book_source_name.clone(),
+        valid: false,
+        search_ok: false,
+        explore_ok: false,
+        keyword: keyword.to_string(),
+        explore_url: None,
+        search_error: None,
+        explore_error: None,
+        cancelled: true,
+    }
 }
 
 /// A single step of the source debugger: what URL was fetched, the raw response
@@ -511,6 +549,50 @@ impl BookService {
             .retain(|_, session| session.source_url != source_url);
     }
 
+    /// 批量清理多个书源的登录 Cookie / 客户端 / 登录会话。
+    ///
+    /// 与逐条 `clear_source_cookie` 等价, 但三把锁各只取一次: 删几百个失效源时,
+    /// 逐条调用是 3N 次写锁竞争(每把锁还要 `retain` 整表), 明显拖慢删除。
+    /// 这里先把要清的前缀算好, 再各锁一次批量 `retain`。
+    pub async fn clear_source_cookies(&self, user_ns: &str, source_urls: &[String]) {
+        if source_urls.is_empty() {
+            return;
+        }
+        // key 与 `::proxy=` 前缀成对收集: 客户端缓存键形如 `{key}::proxy={proxy}`。
+        let entries = source_urls
+            .iter()
+            .map(|url| {
+                let key = Self::source_cookie_key(user_ns, url);
+                let prefix = format!("{key}::proxy=");
+                (key, prefix)
+            })
+            .collect::<Vec<_>>();
+
+        {
+            let mut cookies = self.source_cookies.write().await;
+            for (key, _) in &entries {
+                cookies.remove(key);
+            }
+        }
+        {
+            let mut clients = self.source_clients.write().await;
+            clients.retain(|client_key, _| {
+                !entries
+                    .iter()
+                    .any(|(key, prefix)| client_key == key || client_key.starts_with(prefix))
+            });
+        }
+        {
+            // 登录会话记录的是规范化后的 url, 比较前同样要规范化。
+            let normalized = source_urls
+                .iter()
+                .map(|url| normalize_source_url(url))
+                .collect::<std::collections::HashSet<_>>();
+            let mut sessions = self.login_sessions.write().await;
+            sessions.retain(|_, session| !normalized.contains(&session.source_url));
+        }
+    }
+
     /// Validate a candidate login cookie before storing it: run one search
     /// request with the cookie attached and make sure the site still returns
     /// a normal page (Qidian returns a degraded/anti-crawler page — e.g. the
@@ -537,13 +619,22 @@ impl BookService {
         // Cookie validation must not reuse the source's persistent reqwest
         // client: its cookie jar may contain an older session and make an
         // invalid candidate appear valid. Use a fresh client for this request.
-        self.wait_for_rate(source).await;
-        let client = self
-            .http
-            .new_client_with_proxy(spec.proxy.as_deref())
-            .map_err(AppError::Internal)?;
+        let holds_slot = self.wait_for_rate(source).await;
+        let client = match self.http.new_client_with_proxy(spec.proxy.as_deref()) {
+            Ok(client) => client,
+            Err(err) => {
+                // 同 fetch_with_rate_cancellable: 提前返回必须归还 slot,
+                // 否则该源会永久停在 in_flight。
+                if holds_slot {
+                    self.finish_rate(source).await;
+                }
+                return Err(AppError::Internal(err));
+            }
+        };
         let result = fetch_with_client(&client, spec).await;
-        self.finish_rate(source).await;
+        if holds_slot {
+            self.finish_rate(source).await;
+        }
         let res = result.map_err(AppError::Internal)?;
         let body = res.body;
 
@@ -594,36 +685,127 @@ impl BookService {
         source: &BookSource,
         spec: RequestSpec,
     ) -> anyhow::Result<FetchResponse> {
-        self.wait_for_rate(source).await;
-        let request_client = self
+        self.fetch_with_rate_cancellable(user_ns, source, spec, None)
+            .await
+    }
+
+    /// 与 `fetch_with_rate` 相同, 但可被取消信号中断在途请求。
+    ///
+    /// 关键点: 用 `select!` 包住 `fetch_with_client` 的 future, 取消时该 future 被
+    /// **drop** —— reqwest 的连接随之关闭, 这才是"真断", 而不是等它跑到 30s 超时。
+    /// 取消返回 `Err(CANCELLED_ERR)`, 调用方据此把结果标为"已取消"而不是"失效",
+    /// 否则把用户主动中止当成站点不可用, 会把好源误标失效。
+    async fn fetch_with_rate_cancellable(
+        &self,
+        user_ns: &str,
+        source: &BookSource,
+        spec: RequestSpec,
+        cancel: Option<&CancelSignal>,
+    ) -> anyhow::Result<FetchResponse> {
+        if is_cancelled(cancel) {
+            return Err(anyhow::anyhow!(CANCELLED_ERR));
+        }
+        // 限速等待也必须可取消: 配了 `concurrentRate: 2000` 这类较大间隔时,
+        // 傻等限速窗口会让"中止"延迟数秒才生效, 与 100ms 响应上限的意图不符。
+        //
+        // `wait_for_rate` 返回**是否占用了 rate slot**, 据此精确决定要不要归还 ——
+        // 只对"自己占到的 slot"调 finish_rate, 避免把别的在途请求的 slot 误释放
+        // (那会让限速形同虚设)。
+        let holds_slot;
+        if let Some(flag) = cancel {
+            let waited = self.wait_for_rate(source);
+            tokio::pin!(waited);
+            loop {
+                tokio::select! {
+                    acquired = &mut waited => {
+                        holds_slot = acquired;
+                        break;
+                    }
+                    _ = sleep(Duration::from_millis(100)) => {
+                        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            // 提前 drop: 未占用时不归还(别人的 slot 不能动)。
+                            return Err(anyhow::anyhow!(CANCELLED_ERR));
+                        }
+                    }
+                }
+            }
+        } else {
+            holds_slot = self.wait_for_rate(source).await;
+        }
+        if is_cancelled(cancel) {
+            if holds_slot {
+                self.finish_rate(source).await;
+            }
+            return Err(anyhow::anyhow!(CANCELLED_ERR));
+        }
+        let request_client = match self
             .source_http_client(user_ns, &source.book_source_url, spec.proxy.as_deref())
             .await
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        let result = fetch_with_client(&request_client, spec).await;
-        self.finish_rate(source).await;
+        {
+            Ok(client) => client,
+            Err(err) => {
+                // 必须归还 in_flight: 用 `?` 直接返回会让这个源永久停在
+                // in_flight, 之后所有请求都在 wait_for_serial_rate 里死等。
+                if holds_slot {
+                    self.finish_rate(source).await;
+                }
+                return Err(anyhow::anyhow!(err.to_string()));
+            }
+        };
+
+        let result = match cancel {
+            Some(flag) => {
+                // 100ms 轮询而不是"监听一次": 取消标志是 AtomicBool, 没有可等待的
+                // 唤醒机制, 用间隔轮询即可 —— 取消响应延迟上限就是这 100ms。
+                let fetch = fetch_with_client(&request_client, spec);
+                tokio::pin!(fetch);
+                loop {
+                    tokio::select! {
+                        result = &mut fetch => break result,
+                        _ = sleep(Duration::from_millis(100)) => {
+                            if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                // fetch 在此处被 drop → 连接关闭。
+                                if holds_slot {
+                                    self.finish_rate(source).await;
+                                }
+                                return Err(anyhow::anyhow!(CANCELLED_ERR));
+                            }
+                        }
+                    }
+                }
+            }
+            None => fetch_with_client(&request_client, spec).await,
+        };
+        if holds_slot {
+            self.finish_rate(source).await;
+        }
         result
     }
 
-    async fn wait_for_rate(&self, source: &BookSource) {
+    /// 等待限速窗口并**占用 rate slot**(返回时 `in_flight == true` 表示已占)。
+    ///
+    /// 返回 `true` 表示本次调用占用了 slot, 调用方结束请求时必须 `finish_rate` 归还;
+    /// 返回 `false` 表示未占用(无需归还)。
+    async fn wait_for_rate(&self, source: &BookSource) -> bool {
         let Some(rate) = source.concurrent_rate.as_deref().map(str::trim) else {
-            return;
+            return false;
         };
         if rate.is_empty() || rate == "0" {
-            return;
+            return false;
         }
         if let Some((limit, window_ms)) = parse_window_rate(rate) {
-            self.wait_for_window_rate(&source.book_source_url, limit, window_ms)
+            return self
+                .wait_for_window_rate(&source.book_source_url, limit, window_ms)
                 .await;
-            return;
         }
         let Ok(delay_ms) = rate.parse::<u64>() else {
-            return;
+            return false;
         };
         self.wait_for_serial_rate(&source.book_source_url, delay_ms)
-            .await;
+            .await
     }
 
-    async fn wait_for_serial_rate(&self, source_key: &str, delay_ms: u64) {
+    async fn wait_for_serial_rate(&self, source_key: &str, delay_ms: u64) -> bool {
         let delay = Duration::from_millis(delay_ms);
         loop {
             let wait = {
@@ -639,21 +821,21 @@ impl BookService {
                     } else {
                         state.in_flight = true;
                         state.last_start = Some(now);
-                        return;
+                        return true;
                     }
                 } else {
                     state.in_flight = true;
                     state.last_start = Some(now);
-                    return;
+                    return true;
                 }
             };
             sleep(wait).await;
         }
     }
 
-    async fn wait_for_window_rate(&self, source_key: &str, limit: usize, window_ms: u64) {
+    async fn wait_for_window_rate(&self, source_key: &str, limit: usize, window_ms: u64) -> bool {
         if limit == 0 || window_ms == 0 {
-            return;
+            return false;
         }
         let window = Duration::from_millis(window_ms);
         loop {
@@ -672,7 +854,7 @@ impl BookService {
                         .unwrap_or(window)
                 } else {
                     state.window_starts.push(now);
-                    return;
+                    return true;
                 }
             };
             sleep(wait).await;
@@ -693,6 +875,23 @@ impl BookService {
         key: &str,
         page: i32,
     ) -> Result<Vec<SearchBook>, AppError> {
+        self.search_book_cancellable(user_ns, source, key, page, None)
+            .await
+    }
+
+    /// 可取消的搜索。解析段放到阻塞线程池, 避免 `js:` 规则里的同步 HTTP 独占
+    /// tokio worker(那会让取消命令自己排不上队, 表现为"点了没反应")。
+    pub async fn search_book_cancellable(
+        &self,
+        user_ns: &str,
+        source: &BookSource,
+        key: &str,
+        page: i32,
+        cancel: Option<&CancelSignal>,
+    ) -> Result<Vec<SearchBook>, AppError> {
+        if is_cancelled(cancel) {
+            return Err(AppError::BadRequest(CANCELLED_ERR.to_string()));
+        }
         let search_url = source
             .search_url
             .clone()
@@ -714,15 +913,65 @@ impl BookService {
             .await;
 
         tracing::debug!("search_book fetched spec: {:?}", spec);
-        let res = self.fetch_with_rate(user_ns, source, spec).await.map_err(|e| {
-            tracing::error!("fetch failed: {:?}", e);
-            e
-        })?;
+        let res = self
+            .fetch_with_rate_cancellable(user_ns, source, spec, cancel)
+            .await
+            .map_err(|e| {
+                tracing::error!("fetch failed: {:?}", e);
+                e
+            })?;
         let res = apply_login_check_js(source, res);
         tracing::debug!("fetch success, body length: {}", res.body.len());
-        let books = self.parser.search_books(source, &res.body, &res.url);
+        let books = self
+            .parse_search_books_blocking(source, &res.body, &res.url)
+            .await;
         tracing::info!("found {} books", books.len());
         Ok(books)
+    }
+
+    /// 搜索解析放到阻塞线程池: 规则里可能带 `js:` 且 JS 内会发起同步 HTTP
+    /// (reqwest::blocking, 30s 超时), 留在 async worker 上会把它整个占住。
+    ///
+    /// **解析器 panic 必须继续向上传播**, 不能吞成空 `Vec`: 空结果会被上层当成
+    /// "这个源搜不到书" → `search_ok=false` → `valid=false` → 书源被标为失效并写库,
+    /// 把一个完全正常的源标坏。原实现里 `parser.search_books` 是同步调用, panic 会
+    /// 直接终止该检测任务(不产生 outcome、不写库), 这里用 `resume_unwind` 保持同一
+    /// 行为 —— `spawn_blocking` 只是把 panic 包成了 `JoinError`, 并非真的"没有结果"。
+    async fn parse_search_books_blocking(
+        &self,
+        source: &BookSource,
+        body: &str,
+        url: &str,
+    ) -> Vec<SearchBook> {
+        let parser = self.parser.clone();
+        let source = source.clone();
+        let body = body.to_string();
+        let url = url.to_string();
+        match tokio::task::spawn_blocking(move || parser.search_books(&source, &body, &url)).await {
+            Ok(books) => books,
+            // 任务被 abort(取消)不是解析崩溃, 安静返回空结果 —— 调用方紧接着会用
+            // 取消标志判定为"未检测", 不会据此标失效。
+            Err(err) if err.is_cancelled() => Vec::new(),
+            Err(err) => std::panic::resume_unwind(err.into_panic()),
+        }
+    }
+
+    /// 发现页解析的阻塞版本(同 `parse_search_books_blocking` 的理由)。
+    async fn parse_explore_books_blocking(
+        &self,
+        source: &BookSource,
+        body: &str,
+        url: &str,
+    ) -> Vec<SearchBook> {
+        let parser = self.parser.clone();
+        let source = source.clone();
+        let body = body.to_string();
+        let url = url.to_string();
+        match tokio::task::spawn_blocking(move || parser.explore_books(&source, &body, &url)).await {
+            Ok(books) => books,
+            Err(err) if err.is_cancelled() => Vec::new(),
+            Err(err) => std::panic::resume_unwind(err.into_panic()),
+        }
     }
 
     pub async fn explore_book(
@@ -732,6 +981,22 @@ impl BookService {
         rule_find_url: &str,
         page: i32,
     ) -> Result<Vec<SearchBook>, AppError> {
+        self.explore_book_cancellable(user_ns, source, rule_find_url, page, None)
+            .await
+    }
+
+    /// 可取消的发现页搜索(同 `search_book_cancellable`)。
+    pub async fn explore_book_cancellable(
+        &self,
+        user_ns: &str,
+        source: &BookSource,
+        rule_find_url: &str,
+        page: i32,
+        cancel: Option<&CancelSignal>,
+    ) -> Result<Vec<SearchBook>, AppError> {
+        if is_cancelled(cancel) {
+            return Err(AppError::BadRequest(CANCELLED_ERR.to_string()));
+        }
         if rule_find_url.trim().is_empty() {
             return Err(AppError::BadRequest("ruleFindUrl required".to_string()));
         }
@@ -740,8 +1005,14 @@ impl BookService {
         self.apply_source_cookie(user_ns, source, &mut spec.headers)
             .await;
 
-        let res = apply_login_check_js(source, self.fetch_with_rate(user_ns, source, spec).await?);
-        Ok(self.parser.explore_books(source, &res.body, &res.url))
+        let res = apply_login_check_js(
+            source,
+            self.fetch_with_rate_cancellable(user_ns, source, spec, cancel)
+                .await?,
+        );
+        Ok(self
+            .parse_explore_books_blocking(source, &res.body, &res.url)
+            .await)
     }
 
     pub fn explore_kinds(&self, source: &BookSource) -> Result<Vec<ExploreKind>, AppError> {
@@ -754,19 +1025,34 @@ impl BookService {
         source: &BookSource,
         keyword: Option<&str>,
     ) -> BookSourceAvailability {
+        self.test_book_source_availability_cancellable(user_ns, source, keyword, None)
+            .await
+    }
+
+    /// 可取消的书源可用性检测。
+    ///
+    /// 与不可取消版本的区别: 单次请求可被中断(连接真断), 且取消时返回的可用性对象
+    /// 带 `cancelled = true`。调用方必须据此**跳过写库** —— 否则把"用户中止"当成
+    /// "站点不可用", 会把好源误标成失效。
+    pub async fn test_book_source_availability_cancellable(
+        &self,
+        user_ns: &str,
+        source: &BookSource,
+        keyword: Option<&str>,
+        cancel: Option<&CancelSignal>,
+    ) -> BookSourceAvailability {
         let keyword = keyword
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .or_else(|| {
-                source
-                    .rule_search
-                    .as_ref()
-                    .and_then(|rule| rule.check_key_word.as_deref())
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            })
-            .unwrap_or("测试")
-            .to_string();
+            .map(str::to_string)
+            // 不给关键词时用源自己的 checkKeyWord, 否则回退默认值(见 check_keyword
+            // 的注释: 默认值是"我的"而不是"测试", 避免把好源误判失效)。
+            .unwrap_or_else(|| source.check_keyword());
+
+        // 取消时立即返回一个"已取消"的占位结果: 不写库, 也不计入有效/失效统计。
+        if is_cancelled(cancel) {
+            return cancelled_availability(source, &keyword);
+        }
 
         let (search_ok, search_error) = if source
             .search_url
@@ -774,13 +1060,20 @@ impl BookService {
             .is_some_and(|value| !value.trim().is_empty())
             && source.rule_search.is_some()
         {
-            match self.search_book(user_ns, source, &keyword, 1).await {
+            match self
+                .search_book_cancellable(user_ns, source, &keyword, 1, cancel)
+                .await
+            {
                 Ok(books) => (!books.is_empty(), None),
                 Err(err) => (false, Some(format!("{err:?}"))),
             }
         } else {
             (false, Some("missing searchUrl or ruleSearch".to_string()))
         };
+        // 搜索阶段被取消: 不再发发现页请求, 直接返回取消结果。
+        if is_cancelled(cancel) {
+            return cancelled_availability(source, &keyword);
+        }
 
         let explore_url = self.explore_kinds(source).ok().and_then(|kinds| {
             kinds
@@ -790,13 +1083,19 @@ impl BookService {
                 .find(|url| !url.is_empty())
         });
         let (explore_ok, explore_error) = if let Some(url) = explore_url.as_deref() {
-            match self.explore_book(user_ns, source, url, 1).await {
+            match self
+                .explore_book_cancellable(user_ns, source, url, 1, cancel)
+                .await
+            {
                 Ok(books) => (!books.is_empty(), None),
                 Err(err) => (false, Some(format!("{err:?}"))),
             }
         } else {
             (false, Some("missing explore category url".to_string()))
         };
+        if is_cancelled(cancel) {
+            return cancelled_availability(source, &keyword);
+        }
 
         BookSourceAvailability {
             book_source_url: source.book_source_url.clone(),
@@ -808,6 +1107,7 @@ impl BookService {
             explore_url,
             search_error,
             explore_error,
+            cancelled: false,
         }
     }
 
@@ -1757,8 +2057,70 @@ impl BookService {
             .iter()
             .map(|url| normalize_source_url(url))
             .collect::<HashSet<_>>();
+
+        // 廉价短路: 先看原始 JSON 里有没有出现这些源地址, 没有就直接返回。
+        //
+        // 删失效书源时这步几乎总是命中 —— 失效源通常从没被任何书引用过。
+        // 完整走一遍是「反序列化整本书架 + 遍历所有候选 + 整表重写」, 书架有几百
+        // 上千本时是几百毫秒级; 一次子串扫描则几乎无成本。
+        //
+        // 只做**保守**判断: 未命中则一定没有引用, 可以安全跳过; 命中可能只是
+        // 恰好出现同名字段, 仍走完整流程(那样也不会误删任何东西)。
+        //
+        // 转义形式要一并比较: JSON 里 `"`/`\` 等会被写成 `\"`/`\\`, 只比对原始
+        // URL 会在含这类字符时误判成"无引用"而错误跳过。
+        let candidates = removed
+            .iter()
+            .flat_map(|url| {
+                let escaped = serde_json::to_string(url).unwrap_or_else(|_| format!("\"{url}\""));
+                // to_string 会带外层引号, 去掉它才是字段值内部的样子。
+                let inner = escaped
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(url.as_str())
+                    .to_string();
+                [url.clone(), inner]
+            })
+            .collect::<Vec<_>>();
+        let path = self.bookshelf_path(user_ns);
+        if !path.exists() {
+            return Ok(());
+        }
+        // 短路探测用锁外读: 它只做一次子串扫描, 不参与写入决策。
+        // 真正的读-改-写必须在锁内重新读, 见下方 `_write_guard` 之后 —— 用这里的
+        // `probe` 去反序列化会让写锁形同虚设 (与并发 save_books/delete_book 交错时
+        // 用陈旧内容整表覆盖, 丢失并发写入)。
+        let probe = fs::read_to_string(&path)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        if !candidates.iter().any(|url| probe.contains(url.as_str())) {
+            return Ok(());
+        }
+        drop(probe);
+
         let _write_guard = self.bookshelf_write_lock.lock().await;
-        let mut list = self.read_bookshelf(user_ns).await?;
+        // 锁内重新读: 上面的探测与这里之间可能有并发写入, 必须基于最新内容修改。
+        let raw = fs::read_to_string(&path)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        let mut list: Vec<Book> = match serde_json::from_str(&raw) {
+            Ok(list) => list,
+            Err(primary_err) => {
+                let recovered = recover_bookshelf_entries(&raw)
+                    .ok_or_else(|| AppError::BadRequest(primary_err.to_string()))?;
+                tracing::warn!(
+                    "recovered malformed bookshelf for user_ns={}, path={}, entries={}",
+                    user_ns,
+                    path.display(),
+                    recovered.len()
+                );
+                self.write_bookshelf(user_ns, &recovered).await?;
+                recovered
+            }
+        };
+        for book in &mut list {
+            sanitize_book_urls(book);
+        }
         let mut changed = false;
         for book in &mut list {
             if let Some(candidates) = book.source_candidates.as_mut() {
@@ -2671,6 +3033,108 @@ mod tests {
             ..Book::default()
         };
         assert!(is_local_book(&book));
+    }
+
+    /// `remove_source_candidates` 的廉价短路不能因 JSON 转义而漏判。
+    ///
+    /// JSON 里 `"` / `\` 会被写成 `\"` / `\\`, 若只用原始 URL 做子串比较, 含这类
+    /// 字符的源地址会被误判成"书架里没有引用"而**错误跳过清理**。
+    #[tokio::test]
+    async fn escaped_source_url_is_detected_by_removal_shortcut() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-rust-remove-candidates-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let service = BookService::new(
+            HttpClient::new(5, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+
+        // 含引号的源地址: 写进 JSON 后会出现 `\"` 转义。
+        let awkward_origin = "https://a.example.com/\"quoted\"";
+        let book = Book {
+            book_url: "https://a.example.com/book/1".to_string(),
+            name: "书".to_string(),
+            author: "作者".to_string(),
+            source_candidates: Some(vec![crate::model::search::SearchBook {
+                origin: awkward_origin.to_string(),
+                book_url: "https://a.example.com/book/1".to_string(),
+                name: "书".to_string(),
+                author: "作者".to_string(),
+                ..Default::default()
+            }]),
+            ..Book::default()
+        };
+        service
+            .write_bookshelf("default", &vec![book])
+            .await
+            .unwrap();
+
+        service
+            .remove_source_candidates(
+                "default",
+                &std::collections::HashSet::from([awkward_origin.to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let list = service.read_bookshelf("default").await.unwrap();
+        assert!(
+            list[0].source_candidates.is_none(),
+            "含转义字符的源地址也必须被清理, 不能被短路跳过"
+        );
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+    }
+
+    /// 书架里完全没有引用时, 短路应跳过清理(并且不破坏书架内容)。
+    #[tokio::test]
+    async fn removal_shortcut_keeps_bookshelf_intact_when_unreferenced() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-rust-remove-shortcut-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let service = BookService::new(
+            HttpClient::new(5, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+
+        let book = Book {
+            book_url: "https://b.example.com/book/1".to_string(),
+            name: "书".to_string(),
+            author: "作者".to_string(),
+            source_candidates: Some(vec![crate::model::search::SearchBook {
+                origin: "https://b.example.com".to_string(),
+                book_url: "https://b.example.com/book/1".to_string(),
+                name: "书".to_string(),
+                author: "作者".to_string(),
+                ..Default::default()
+            }]),
+            ..Book::default()
+        };
+        service
+            .write_bookshelf("default", &vec![book])
+            .await
+            .unwrap();
+
+        service
+            .remove_source_candidates(
+                "default",
+                &std::collections::HashSet::from(["https://unrelated.test".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let list = service.read_bookshelf("default").await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(
+            list[0].source_candidates.is_some(),
+            "无关源不应被清理"
+        );
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
     }
 
     #[tokio::test]

@@ -10,10 +10,14 @@ mod win;
 use reader_rust::api::protocol::handle_reader_scheme;
 use reader_rust::app::bootstrap;
 use reader_rust::app::config::AppConfig;
+use reader_rust::app::window_state::{capture, InitialGeometry, WindowStateStore};
+use std::sync::Mutex;
 use tauri::menu::MenuItemBuilder;
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::NewWindowResponse;
-use tauri::{App, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    App, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 
 /// Hosts allowed to navigate / open a new window inside the app webview:
 /// the application origins themselves plus the login page family and the
@@ -64,7 +68,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let result = tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -85,12 +89,24 @@ fn main() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
 
-    if let Err(err) = result {
-        win::fatal(&format!("应用运行失败：{err}"));
-        std::process::exit(1);
-    }
+    let app = match app {
+        Ok(app) => app,
+        Err(err) => {
+            win::fatal(&format!("应用运行失败：{err}"));
+            std::process::exit(1);
+        }
+    };
+
+    app.run(|app_handle, event| {
+        // 退出前补写最后一次窗口变化, 否则刚调整完尺寸就退出的用户会丢失它。
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            if let Some(window) = app_handle.get_webview_window("main") {
+                persist_window_state(app_handle, &window, true);
+            }
+        }
+    });
 }
 
 fn start(app: &mut App) -> anyhow::Result<()> {
@@ -120,10 +136,16 @@ fn start(app: &mut App) -> anyhow::Result<()> {
     // Load the embedded frontend assets in both debug and release. The old
     // debug path pointed at a Vite dev server (localhost:5173) that isn't
     // running in a plain `cargo build`, which showed ERR_CONNECTION_REFUSED.
+    let store = WindowStateStore::new(paths.window_state.clone());
+    let saved_state = store.load();
+    // 迷你模式下窗口下限更小(控件只有上一章/下一章/目录, 不需要完整布局宽度)。
+    let initial_mini = saved_state.map(|s| s.mini_mode).unwrap_or(false);
+    let (min_width, min_height) = InitialGeometry::min_size_for(initial_mini);
+
     let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("阅读")
-        .inner_size(1180.0, 820.0)
-        .min_inner_size(880.0, 600.0)
+        .inner_size(InitialGeometry::DEFAULT_WIDTH, InitialGeometry::DEFAULT_HEIGHT)
+        .min_inner_size(min_width, min_height)
         // Custom title bar drawn by the frontend; this hides the native frame.
         .decorations(false)
         .center()
@@ -164,6 +186,29 @@ fn start(app: &mut App) -> anyhow::Result<()> {
         })
         .build()?;
 
+    // 用保存的尺寸/位置覆盖默认值。要在 `.center()` 之后应用, 否则会先居中
+    // 再跳走, 用户能看到闪烁; 先建窗再调整是因为安全范围校验需要窗口句柄。
+    let geometry = InitialGeometry::resolve(&window, saved_state);
+    let _ = window.set_size(geometry.size);
+    match geometry.position {
+        Some(position) => {
+            let _ = window.set_position(position);
+        }
+        // 位置越界(显示器被拔掉)或没有历史状态时居中。
+        None => {
+            let _ = window.center();
+        }
+    }
+    if geometry.maximized {
+        let _ = window.maximize();
+    }
+    // 迷你模式: 自动置顶, 并在下次启动时仍以迷你尺寸建窗(见 resolve)。
+    if geometry.mini_mode {
+        let _ = window.set_always_on_top(true);
+    }
+
+    app.manage(Mutex::new(store));
+
     // Some Linux desktop environments do not provide a status notifier. The
     // app must still start there, and closing the window must really exit.
     let tray_available = match setup_tray(app) {
@@ -187,7 +232,37 @@ fn start(app: &mut App) -> anyhow::Result<()> {
         });
     }
 
+    // 窗口尺寸/位置持久化。与上面的关闭拦截分开注册是安全的: Tauri 会同时
+    // 调用同一窗口的多个监听器, 互不覆盖。
+    {
+        let app_handle = app.handle().clone();
+        let tracked = window.clone();
+        window.on_window_event(move |event| {
+            if matches!(event, WindowEvent::Resized(_) | WindowEvent::Moved(_)) {
+                persist_window_state(&app_handle, &tracked, false);
+            }
+        });
+    }
+
     Ok(())
+}
+
+/// 记录窗口尺寸/位置。`force` 为真时跳过节流, 用于退出前补写最后一次变化。
+fn persist_window_state(app: &tauri::AppHandle, window: &tauri::WebviewWindow, force: bool) {
+    let Some(store) = app.try_state::<Mutex<WindowStateStore>>() else {
+        return;
+    };
+    let Ok(mut store) = store.lock() else {
+        return;
+    };
+    if !force && !store.should_save_now() {
+        return;
+    }
+    // 最小化时位置无意义(Windows 会报告 -32000), capture 内部会返回 None,
+    // 因此不会把垃圾坐标写进状态文件。
+    if let Some(state) = capture(window, store.load()) {
+        store.save(state);
+    }
 }
 
 /// System tray so the app can keep running in the background after the window

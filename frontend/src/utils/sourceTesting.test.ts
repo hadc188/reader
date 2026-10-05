@@ -47,8 +47,40 @@ describe('sourceTesting', () => {
       invalid: 1,
       markedInvalid: 1,
       cancelled: false,
+      cancelledCount: 0,
       results: responses.flatMap((response) => response.results),
     })
+  })
+
+  it('merges cancelled counts and propagates the cancelled flag', () => {
+    const responses: BookSourceTestResponse[] = [
+      {
+        total: 2,
+        valid: 1,
+        invalid: 1,
+        markedInvalid: 1,
+        cancelled: false,
+        results: [sourceResult('https://valid.example', true)],
+      },
+      {
+        total: 3,
+        valid: 1,
+        invalid: 0,
+        markedInvalid: 0,
+        cancelled: true,
+        cancelledCount: 2,
+        results: [sourceResult('https://done.example', true)],
+      },
+    ]
+
+    const merged = mergeBookSourceTestResponses(responses)
+
+    expect(merged.cancelled).toBe(true)
+    expect(merged.cancelledCount).toBe(2)
+    // 未完成的条目既不算有效也不算失效: 统计不能把它们算进去。
+    expect(merged.valid).toBe(2)
+    expect(merged.invalid).toBe(1)
+    expect(merged.total).toBe(5)
   })
 })
 

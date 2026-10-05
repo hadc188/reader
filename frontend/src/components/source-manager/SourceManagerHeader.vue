@@ -6,6 +6,7 @@
         共 {{ total }} 个 · 启用 {{ enabled }} 个 · 当前筛选 {{ filtered }} 个
         <span v-if="selected > 0"> · 已选 {{ selected }} 个</span>
         <span v-if="testing"> · 测试进度 {{ testCompleted }} / {{ testTotal }}（{{ testPercent }}%）</span>
+        <span v-if="stopping" class="stopping-hint"> · 正在中止…</span>
       </p>
     </div>
     <div class="header-actions">
@@ -23,11 +24,11 @@
       <button
         class="action-btn"
         :class="{ danger: testing }"
-        :disabled="!testing && total === 0"
+        :disabled="(!testing && total === 0) || stopping"
         type="button"
         @click="testing ? $emit('cancel-test') : $emit('test-sources')"
       >
-        {{ testing ? '中止测试' : '测试书源' }}
+        {{ stopping ? '正在中止…' : (testing ? '中止测试' : '测试书源') }}
       </button>
       <button
         class="action-btn danger"
@@ -60,6 +61,8 @@ const props = defineProps<{
   testCompleted: number
   testTotal: number
   invalidCount: number
+  /** 已发出中止请求、还在等后端收尾(写回已完成的结果)。 */
+  stopping?: boolean
 }>()
 
 const testPercent = computed(() => (
@@ -104,6 +107,10 @@ defineEmits<{
   margin-top: 6px;
   font-size: 13px;
   color: var(--color-text-tertiary);
+}
+
+.stopping-hint {
+  color: var(--color-primary);
 }
 
 .header-actions {

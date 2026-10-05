@@ -30,11 +30,42 @@ impl BookSourceService {
         self.repo.upsert(user_ns, &source, &json).await
     }
 
+    /// 批量保存。串行 `await` 会让导入 500 条源变成 500 次往返, 这里并发提交。
+    ///
+    /// 与 `save` 保持同样的错误语义: 任一失败仍上报(返回第一个错误), 但**不再
+    /// 中断其余写入** —— 与"取消测试后照常写库"同一考虑, 半途中断会留下
+    /// "部分导入成功"这种更难排查的状态。
     pub async fn save_many(&self, user_ns: &str, sources: Vec<BookSource>) -> Result<(), AppError> {
-        for s in sources {
-            self.save(user_ns, s).await?;
+        if sources.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let mut writes = tokio::task::JoinSet::new();
+        for source in sources {
+            let repo = self.repo.clone();
+            let ns = user_ns.to_string();
+            writes.spawn(async move {
+                let json =
+                    serde_json::to_string(&source).map_err(|e| AppError::BadRequest(e.to_string()))?;
+                repo.upsert(&ns, &source, &json).await
+            });
+        }
+        let mut first_error: Option<AppError> = None;
+        while let Some(joined) = writes.join_next().await {
+            let error = match joined {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => Some(err),
+                Err(err) => Some(AppError::Internal(anyhow::anyhow!("保存书源失败: {err}"))),
+            };
+            if let Some(err) = error {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Pin a source to the top of the search/换源 order by giving it the
@@ -116,6 +147,15 @@ impl BookSourceService {
 
     pub async fn delete(&self, user_ns: &str, book_source_url: &str) -> Result<(), AppError> {
         self.repo.delete(user_ns, book_source_url).await
+    }
+
+    /// 批量删除, 返回实际删除条数(见 `BookSourceRepo::delete_many`)。
+    pub async fn delete_many(
+        &self,
+        user_ns: &str,
+        book_source_urls: &[String],
+    ) -> Result<u64, AppError> {
+        self.repo.delete_many(user_ns, book_source_urls).await
     }
 
     pub async fn delete_all(&self, user_ns: &str) -> Result<(), AppError> {

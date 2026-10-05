@@ -15,6 +15,9 @@ pub struct Paths {
     pub storage: PathBuf,
     pub assets: PathBuf,
     pub db: PathBuf,
+    /// 窗口尺寸/位置状态。跟随便携数据目录, 而不是 Tauri 的 app config
+    /// 目录 —— 后者会让状态在整份拷贝移动到别的机器后错位。
+    pub window_state: PathBuf,
     /// Set the first time data lands outside the executable's directory because
     /// that directory was read-only.
     pub relocated_notice: bool,
@@ -29,6 +32,7 @@ pub fn resolve() -> anyhow::Result<Paths> {
 
     Ok(Paths {
         db: data_dir.join("reader.db"),
+        window_state: data_dir.join("window-state.json"),
         data_dir,
         storage,
         assets,

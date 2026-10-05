@@ -61,6 +61,23 @@ pub async fn init_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
+/// 测试专用的内存库: 跑完全部迁移, 不需要清理任何文件。
+///
+/// 必须 `max_connections(1)` + `shared_cache` 语义: SQLite 的 `:memory:` 库是
+/// **每个连接一个独立数据库**, 池里有多条连接时, 建表连接与查询连接看到的表
+/// 会不是同一个, 测试会莫名其妙报 "no such table"。
+#[cfg(test)]
+pub(crate) async fn test_pool() -> SqlitePool {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("open in-memory sqlite");
+    let migrator = stable_migrator();
+    migrator.run(&pool).await.expect("run migrations");
+    pool
+}
+
 /// Older Windows packages could embed CRLF migration scripts while CI packages
 /// embedded LF. SQLx hashes raw bytes, so the same SQL then looked modified.
 /// Only repair a checksum when it exactly matches the alternate line-ending form.

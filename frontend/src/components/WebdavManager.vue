@@ -238,6 +238,7 @@ import {
   createWebdavBackupPayload,
   parseWebdavBackup,
   restoreWebdavBackup,
+  type SkippedEntryReport,
 } from '../utils/webdavBackup'
 
 type EntryRow = WebdavFileEntry & { toParent?: boolean }
@@ -391,14 +392,25 @@ async function restoreRemoteBackup(entry: LegadoWebdavBackupEntry) {
   if (!ok) return
   remoteWorking.value = true
   remoteAction.value = 'restore'
+  // 解析阶段失败时尚未触碰任何现有数据; 一旦开始写入, 失败就可能留下半套数据。
+  let writing = false
   try {
     const contents = await getLegadoWebdavBackupArchive(remoteDraft.value, entry.name)
     const result = parseCompatibleBackupArchive(contents)
+    const warning = clearAllWarning(result.skipped)
+    if (warning && !(await appStore.confirmDialog(warning, { title: '数据将被清空', danger: true }))) {
+      return
+    }
+    writing = true
     await restoreWebdavBackup(result.payload)
-    appStore.showToast('恢复完成，正在刷新页面', 'success')
+    const skipMessage = formatSkipReport(result.skipped, result.skippedLocalBooks)
+    appStore.showToast(
+      `恢复完成${skipMessage}，正在刷新页面`,
+      result.skipped.length ? 'warning' : 'success',
+    )
     window.setTimeout(() => window.location.reload(), 800)
   } catch (error) {
-    remoteError.value = (error as Error).message || '恢复备份失败'
+    remoteError.value = restoreErrorMessage(error, writing)
   } finally {
     remoteWorking.value = false
     remoteAction.value = ''
@@ -420,6 +432,38 @@ async function deleteRemoteBackup(entry: LegadoWebdavBackupEntry) {
     remoteWorking.value = false
     remoteAction.value = ''
   }
+}
+
+/**
+ * 一类数据在备份里全部无效时, 恢复会清空它且不写回。这是不可逆的, 必须在
+ * 动手前让用户确认, 而不是恢复完再告知。
+ */
+function clearAllWarning(skipped: SkippedEntryReport[]) {
+  const files = skipped.filter((entry) => entry.allSkipped).map((entry) => entry.file)
+  if (!files.length) return null
+  return `备份中这些文件的条目全部无效：${files.join('、')}。继续恢复会清空当前的对应数据（不可撤销），确定继续吗？`
+}
+
+/** 汇总恢复时被跳过的条目, 生成 attach 到成功提示后的说明。 */
+function formatSkipReport(skipped: SkippedEntryReport[], skippedLocalBooks: number) {
+  const parts: string[] = []
+  for (const report of skipped) {
+    const samples = report.samples.length ? `（如：${report.samples.join('、')}）` : ''
+    parts.push(`${report.count} 条无效 ${report.file}${samples}`)
+  }
+  if (skippedLocalBooks > 0) {
+    parts.push(`${skippedLocalBooks} 本仅含安卓路径的本地书籍`)
+  }
+  return parts.length ? `，已跳过 ${parts.join('、')}` : ''
+}
+
+/**
+ * 恢复失败时的提示。写入阶段失败意味着现有数据可能已被部分覆盖, 必须
+ * 明确告知, 否则用户会以为"什么都没发生"而不再重试。
+ */
+function restoreErrorMessage(error: unknown, writing: boolean) {
+  const message = (error as Error)?.message || '恢复失败'
+  return writing ? `${message}（已开始写入，当前数据可能不完整，请重新恢复）` : message
 }
 
 function formatSize(size: number) {
@@ -594,6 +638,8 @@ async function restoreBackup(entry: EntryRow) {
   }
 
   working.value = true
+  // 解析阶段失败时尚未触碰任何现有数据; 一旦开始写入, 失败就可能留下半套数据。
+  let writing = false
   try {
     const result = entry.name.toLowerCase().endsWith('.zip')
       ? parseCompatibleBackupArchive(await getWebdavBackupArchive(entry.path))
@@ -601,17 +647,25 @@ async function restoreBackup(entry: EntryRow) {
           payload: parseWebdavBackup(await getWebdavFileText(entry.path)),
           format: 'reader' as const,
           skippedLocalBooks: 0,
+          skipped: [],
         }
+    const warning = clearAllWarning(result.skipped)
+    if (warning && !(await appStore.confirmDialog(warning, { title: '数据将被清空', danger: true }))) {
+      working.value = false
+      return
+    }
+    writing = true
     await restoreWebdavBackup(result.payload)
-    const skippedMessage = result.skippedLocalBooks > 0
-      ? `，已跳过 ${result.skippedLocalBooks} 本仅含安卓路径的本地书籍`
-      : ''
-    appStore.showToast(`恢复完成${skippedMessage}，正在刷新页面`, 'success')
+    const skipMessage = formatSkipReport(result.skipped, result.skippedLocalBooks)
+    appStore.showToast(
+      `恢复完成${skipMessage}，正在刷新页面`,
+      result.skipped.length ? 'warning' : 'success',
+    )
     window.setTimeout(() => {
       window.location.reload()
     }, 800)
   } catch (error) {
-    appStore.showToast((error as Error).message || '恢复失败', 'error')
+    appStore.showToast(restoreErrorMessage(error, writing), 'error')
     working.value = false
   }
 }

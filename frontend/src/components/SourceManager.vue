@@ -14,6 +14,7 @@
             :selected="selectedFilteredSources.length"
             :loading="loading"
             :testing="testingSources"
+            :stopping="sourceTestStopRequested && testingSources"
             :test-completed="sourceTestProgress.completed"
             :test-total="sourceTestProgress.total"
             :invalid-count="invalidSources.length"
@@ -433,7 +434,8 @@ async function testSources() {
         await testBookSources({
           bookSourceUrls: batch,
           markInvalid: true,
-          concurrent: 12,
+          // 与后端 clamp 后的上限一致(8): 设更高只会被截断, 反而误导。
+          concurrent: 8,
           taskId: sourceTestTaskId.value,
         })
       )
@@ -443,11 +445,21 @@ async function testSources() {
     }
     const result = mergeBookSourceTestResponses(responses)
     await loadSources()
-    if (result.invalid > 0) {
+    if (result.invalid > 0 && !result.cancelled) {
       filterGroup.value = '失效'
     }
     if (sourceTestStopRequested.value || result.cancelled) {
-      appStore.showToast(`测试已中止，已完成 ${result.total} / ${targets.length} 个`, 'warning')
+      // 如实区分三种数: 已完成(有效/失效)与未检测的。不能把未完成的算成"失效"。
+      //
+      // 未检测数必须用 `targets.length - valid - invalid`:
+      // 后端 `valid + invalid` 恰好等于"真正完成检测的源数"(被取消的不计入),
+      // 所以这个差集天然覆盖「从未派发」「派发了但结果被丢弃」「已返回已取消」
+      // 三种情况。不能用 `cancelledCount`(只含最后一种) 或 `total`(含已取消条目),
+      // 否则 100 个源只测 5 个就中止时会显示成"2 个未检测"。
+      const undone = Math.max(0, targets.length - result.valid - result.invalid)
+      const parts = [`测试已中止`, `有效 ${result.valid}`, `失效 ${result.invalid}`]
+      if (undone > 0) parts.push(`${undone} 个未检测`)
+      appStore.showToast(parts.join('，'), 'warning')
     } else {
       appStore.showToast(
         `测试完成：有效 ${result.valid} 个，失效 ${result.invalid} 个，更新分组 ${result.markedInvalid} 个`,
@@ -469,7 +481,10 @@ async function cancelSourceTest() {
   sourceTestStopRequested.value = true
   const taskId = sourceTestTaskId.value
   if (taskId) {
-    await cancelBookSourceTest(taskId).catch(() => undefined)
+    // 不吞掉失败: 取消命令没送到会让后端继续检测, 必须留下线索而不是静默。
+    await cancelBookSourceTest(taskId).catch((err) => {
+      console.warn('[source-test] 取消请求失败', err)
+    })
   }
 }
 

@@ -66,6 +66,8 @@ struct TestBookSourceItem {
     search_error: Option<String>,
     explore_error: Option<String>,
     marked_invalid: bool,
+    /// 该条因用户中止而未检测完成(既不算有效也不算失效)。
+    cancelled: bool,
     group: Option<String>,
 }
 
@@ -77,6 +79,8 @@ struct TestBookSourcesResponse {
     invalid: usize,
     marked_invalid: usize,
     cancelled: bool,
+    /// 因中止而未完成的条数, 供前端如实提示"已中止, N 个未检测"。
+    cancelled_count: usize,
     results: Vec<TestBookSourceItem>,
 }
 
@@ -137,12 +141,20 @@ pub async fn save_book_sources(
         .iter()
         .any(|source| source_became_available(existing_sources.get(&source.book_source_url), source));
     let count = sources.len();
-    state
+    let save_result = state
         .book_source_service
         .save_many(&user_ns, sources)
-        .await?;
+        .await;
     if has_new_available_source {
-        invalidate_shelf_book_source_caches(&state, &user_ns).await?;
+        // save_many 是"尽力写入"(并发提交, 任一失败仍继续其余写入), 因此返回 Err 时
+        // **可能已有部分源入库**。缓存失效必须照常执行, 否则换源结果与刚写入的源
+        // 不一致。用 `?` 直接返回会跳过这一步, 留下已入库但缓存陈旧的源。
+        let invalidate_result = invalidate_shelf_book_source_caches(&state, &user_ns).await;
+        // 保存错误优先上报(它更关键), 但不能因此丢掉缓存失效的错误。
+        save_result?;
+        invalidate_result?;
+    } else {
+        save_result?;
     }
     Ok(ApiResponse::ok(
         serde_json::json!({"saved": true, "count": count}),
@@ -274,17 +286,13 @@ pub async fn set_book_source_cookie(
         .get(&user_ns, &url)
         .await?
         .ok_or_else(|| AppError::NotFound("bookSource not found".to_string()))?;
-    // 存储前校验: 带 cookie 跑一次搜索, 无效/过期则拒绝写入, 避免毒化
-    let validate_keyword = source
-        .rule_search
-        .as_ref()
-        .and_then(|r| r.check_key_word.as_deref())
-        .map(|k| k.trim())
-        .filter(|k| !k.is_empty())
-        .unwrap_or("测试");
+    // 存储前校验: 带 cookie 跑一次搜索, 无效/过期则拒绝写入, 避免毒化。
+    // 关键词同样走 check_keyword(默认"我的"), 不用"测试"——后者在很多站点
+    // 搜不到任何书, 会让"Cookie 校验失败"误报。
+    let validate_keyword = source.check_keyword();
     state
         .book_service
-        .validate_source_cookie(&user_ns, &source, &cookie, validate_keyword)
+        .validate_source_cookie(&user_ns, &source, &cookie, &validate_keyword)
         .await?;
 
     state
@@ -344,7 +352,10 @@ pub async fn test_book_sources(
         })
         .collect::<Vec<_>>();
 
-    let concurrent = req.concurrent.unwrap_or(12).clamp(1, 12);
+    // 上限 8: 每个源在检测过程中会有一次阻塞解析(js: 规则里还可能发起同步 HTTP),
+    // 并发越高, 取消时需要收尾的在途任务越多、峰值线程也越高。12 → 8 后,
+    // 取消响应更快且不会把两轮 HTTP 超时叠在一起。
+    let concurrent = req.concurrent.unwrap_or(8).clamp(1, 8);
     let keyword = req.keyword.clone();
     let mark_invalid = req.mark_invalid.unwrap_or(true);
     let task_id = req.task_id.filter(|id| !id.trim().is_empty());
@@ -375,22 +386,48 @@ pub async fn test_book_sources(
         }
     }
 
+    // 先把要落库的源收集起来, 循环结束后一次性并发写入。
+    //
+    // 原实现是在这个循环里逐条 `save().await`: 取消时要收尾的已测源可能有一两百个,
+    // 每次都等一次 SQL 往返, 用户点了"中止"却还要盯着界面等好几秒。改成
+    // 「收集 → 并发写」后, 写库总耗时从 O(N) 次串行往返降到约一次往返的量级。
+    let mut pending_saves: Vec<BookSource> = Vec::new();
     let mut results = Vec::with_capacity(outcomes.len());
     let mut marked_invalid = 0usize;
+    let mut cancelled_count = 0usize;
     for (mut source, availability) in outcomes {
+        // 被取消的源绝不能按结果写库: 它的 valid 是 false(未检测完),
+        // 走到下面会被 set_invalid_book_source_group 误标成"失效"并保存,
+        // 把一个可能完全正常的书源标坏。只如实回报, 不改分组。
+        if availability.cancelled {
+            cancelled_count += 1;
+            results.push(TestBookSourceItem {
+                book_source_url: availability.book_source_url,
+                book_source_name: availability.book_source_name,
+                valid: false,
+                search_ok: false,
+                explore_ok: false,
+                keyword: availability.keyword,
+                explore_url: None,
+                search_error: None,
+                explore_error: None,
+                marked_invalid: false,
+                cancelled: true,
+                group: source.book_source_group,
+            });
+            continue;
+        }
+
         let changed = if mark_invalid {
             set_invalid_book_source_group(&mut source, !availability.valid)
         } else {
             false
         };
         if changed {
-            state
-                .book_source_service
-                .save(&user_ns, source.clone())
-                .await?;
             if !availability.valid {
                 marked_invalid += 1;
             }
+            pending_saves.push(source.clone());
         }
 
         results.push(TestBookSourceItem {
@@ -404,19 +441,57 @@ pub async fn test_book_sources(
             search_error: availability.search_error,
             explore_error: availability.explore_error,
             marked_invalid: changed && !availability.valid,
+            cancelled: false,
             group: source.book_source_group,
         });
     }
 
+    // 并发写回分组。这里**不能**在失败时立刻 `return Err`:
+    // `JoinSet` 被 drop 时会 abort 所有剩余任务(tokio 的 Drop 实现是
+    // `drain(|h| h.abort())`), 那样"已算好但还没落库"的源会被静默丢弃 ——
+    // 用户点"中止"后本应照常写库, 结果这些源既没进 DB、又不会出现在失效列表里,
+    // 连"删除失效"都删不掉, 只能重测。所以先全部写完, 再统一上报第一个错误。
+    if !pending_saves.is_empty() {
+        let mut writes = JoinSet::new();
+        for source in pending_saves {
+            let service = state.book_source_service.clone();
+            let ns = user_ns.to_string();
+            writes.spawn(async move { service.save(&ns, source).await });
+        }
+        let mut first_error: Option<AppError> = None;
+        while let Some(joined) = writes.join_next().await {
+            let error = match joined {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => Some(err),
+                Err(err) => Some(AppError::Internal(anyhow::anyhow!(
+                    "保存书源分组失败: {err}"
+                ))),
+            };
+            // 只记第一个错误, 但循环继续跑完 —— 失败要上报, 其余写入不能因此中断。
+            if let Some(err) = error {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+        }
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+    }
+
     results.sort_by(|a, b| a.book_source_name.cmp(&b.book_source_name));
-    let valid = results.iter().filter(|item| item.valid).count();
-    let invalid = results.len().saturating_sub(valid);
+    // 统计只算**已完成**的条目: 被取消的既不算有效也不算失效,
+    // 否则中止会让前端看到虚高的"失效 N 个"并可能去点"删除失效"。
+    let completed = results.iter().filter(|item| !item.cancelled).collect::<Vec<_>>();
+    let valid = completed.iter().filter(|item| item.valid).count();
+    let invalid = completed.len().saturating_sub(valid);
     let response = TestBookSourcesResponse {
         total: results.len(),
         valid,
         invalid,
         marked_invalid,
-        cancelled,
+        cancelled: cancelled || cancelled_count > 0,
+        cancelled_count,
         results,
     };
     Ok(ApiResponse::ok(
@@ -484,9 +559,17 @@ async fn test_sources_in_parallel(
         let book_service = book_service.clone();
         let user_ns = user_ns.clone();
         let keyword = keyword.clone();
+        // 把取消信号一路传进单源检测: 解析段在阻塞线程池里跑, 在途 HTTP 用
+        // select! 包裹, 取消时 future 被 drop → 连接真断, 而不是等 30s 超时。
+        let cancel = cancel_flag.clone();
         tasks.spawn(async move {
             let availability = book_service
-                .test_book_source_availability(&user_ns, &source, keyword.as_deref())
+                .test_book_source_availability_cancellable(
+                    &user_ns,
+                    &source,
+                    keyword.as_deref(),
+                    Some(&cancel),
+                )
                 .await;
             (source, availability)
         });
@@ -504,7 +587,9 @@ async fn test_sources_in_parallel(
         if cancel_flag.load(Ordering::Relaxed) {
             cancelled = true;
             tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
+            // 取消后不再等被 abort 的任务: 它们正卡在阻塞线程池的解析段里,
+            // 旧实现 `while join_next().await.is_some() {}` 会一直等到它们跑完,
+            // 这正是「前端已取消、后端还在检测」的来源。这里直接丢弃句柄。
             break;
         }
 
@@ -513,7 +598,11 @@ async fn test_sources_in_parallel(
                 if let Some(result) = result {
                     match result {
                         Ok(outcome) => {
-                            if outcome.1.valid { valid += 1; } else { invalid += 1; }
+                            // 被取消的单源不计入有效/失效: 它的结果不完整,
+                            // 计进去会让"失效数"虚高并触发误标失效。
+                            if !outcome.1.cancelled {
+                                if outcome.1.valid { valid += 1; } else { invalid += 1; }
+                            }
                             outcomes.push(outcome);
                             if let Some(id) = task_id.as_deref() {
                                 emit_source_test_progress(
@@ -588,19 +677,24 @@ pub async fn delete_invalid_book_sources(
         .filter(|source| book_source_has_group(source, INVALID_BOOK_SOURCE_GROUP))
         .map(|source| source.book_source_url.clone())
         .collect::<Vec<_>>();
-    for url in &invalid_urls {
-        state.book_source_service.delete(&user_ns, url).await?;
-    }
+    // 一条 SQL 批量删除, 不再逐条 await(删几百条时那是几百次往返)。
+    let deleted = state
+        .book_source_service
+        .delete_many(&user_ns, &invalid_urls)
+        .await?;
     state
         .book_service
         .remove_source_candidates(&user_ns, &invalid_urls.iter().cloned().collect())
         .await?;
-    // 失效源删除时一并清理登录 Cookie, 避免坏 Cookie 留在内存里继续毒化
-    for url in &invalid_urls {
-        state.book_service.clear_source_cookie(&user_ns, url).await;
-    }
+    // 失效源删除时一并清理登录 Cookie, 避免坏 Cookie 留在内存里继续毒化。
+    // 批量版只各取一次写锁(逐条调用是 3N 次锁竞争)。
+    state
+        .book_service
+        .clear_source_cookies(&user_ns, &invalid_urls)
+        .await;
+    // 用 DB 实际删除行数而不是"待删列表长度": 两者不一致时前者才是真相。
     Ok(ApiResponse::ok(serde_json::json!({
-        "deleted": invalid_urls.len()
+        "deleted": deleted
     })))
 }
 
@@ -631,18 +725,23 @@ pub async fn delete_book_sources(
     let mut deleted_urls = HashSet::new();
     for item in req {
         if let Some(url) = item.book_source_url {
-            state.book_source_service.delete(&user_ns, &url).await?;
             deleted_urls.insert(url);
         }
     }
+    // 与"删除失效"同样改成批量: 逐个 await 删除 + 逐个清 Cookie 是 4N 次往返/锁。
+    let deleted_list = deleted_urls.iter().cloned().collect::<Vec<_>>();
+    state
+        .book_source_service
+        .delete_many(&user_ns, &deleted_list)
+        .await?;
     state
         .book_service
         .remove_source_candidates(&user_ns, &deleted_urls)
         .await?;
-    // 批量删除: 一并清掉这些源的登录 Cookie
-    for url in &deleted_urls {
-        state.book_service.clear_source_cookie(&user_ns, url).await;
-    }
+    state
+        .book_service
+        .clear_source_cookies(&user_ns, &deleted_list)
+        .await;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 
@@ -663,10 +762,12 @@ pub async fn delete_all_book_sources(
         .book_service
         .remove_source_candidates(&user_ns, &deleted_urls)
         .await?;
-    // 清空书源时一并清空全部登录 Cookie
-    for url in &deleted_urls {
-        state.book_service.clear_source_cookie(&user_ns, url).await;
-    }
+    // 清空书源时一并清空全部登录 Cookie(批量, 避免 N 次写锁竞争)。
+    let deleted_list = deleted_urls.iter().cloned().collect::<Vec<_>>();
+    state
+        .book_service
+        .clear_source_cookies(&user_ns, &deleted_list)
+        .await;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 

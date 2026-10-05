@@ -160,6 +160,164 @@ pub struct CancelCacheBookRequest {
     pub book_url: String,
 }
 
+/// 运行中的搜索任务(多源搜索 / 单源搜索 / 可用源探测), 按前端生成的 taskId 登记,
+/// 供 cancel_book_search 中断。
+///
+/// 与 `CACHE_BOOK_CANCELLATIONS` 的区别: 搜索的 SSE 任务里**没有**「结束」按钮,
+/// 用户离开界面时前端只是关掉 channel, 后端完全感知不到。不登记取消标志的话,
+/// 关掉界面后剩余书源仍会被逐个真实请求完。
+static SEARCH_CANCELLATIONS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// 取消请求先于任务登记到达的 taskId -> 记下取消的时间。
+///
+/// 前端是「发出搜索 invoke」后立刻可能关流并发取消: 那个搜索任务的登记还没跑到,
+/// 直接查 `SEARCH_CANCELLATIONS` 会查不到而把取消丢掉, 搜索随后照常跑完全部书源。
+/// 这里先把取消记下来, `SearchCancellationGuard::register` 登记时消费掉。
+///
+/// 记时间戳是为了能清理孤儿条目: 若后端其实**已经**发完 end(任务早已注销),
+/// 而前端的取消到达晚了一步, 这条记录就永远等不到登记它的任务。
+/// 见 [`SEARCH_CANCEL_REQUEST_TTL`]。
+static SEARCH_CANCEL_REQUESTS: Lazy<Mutex<HashMap<String, std::time::Instant>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// 孤儿取消记录的存活上限。
+///
+/// 只有「搜索任务早已结束、但取消命令晚到」这一种情况会留下孤儿记录, 而正常路径
+/// (任务还在跑) 的登记发生在搜索 invoke 处理的最开头, 与取消之间只隔着一次 IPC,
+/// 远小于该时限。所以超过这个时间仍没被消费的记录一定是孤儿, 可以安全丢弃。
+const SEARCH_CANCEL_REQUEST_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 丢弃过期的孤儿取消记录, 返回当前存活条数(仅用于日志/调试)。
+fn prune_stale_search_cancel_requests(pending: &mut HashMap<String, std::time::Instant>) {
+    let now = std::time::Instant::now();
+    pending.retain(|_, recorded_at| now.saturating_duration_since(*recorded_at) < SEARCH_CANCEL_REQUEST_TTL);
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelBookSearchRequest {
+    pub task_id: String,
+}
+
+/// 搜索任务的取消登记守卫: 任务结束时自动注销自己。
+///
+/// 用 Drop 而不是在每个 `return` 前手写移除 —— 这些 SSE 任务里提前返回的分支很多
+/// (参数校验失败、书源为空、书籍不存在…), 漏掉任何一条都会在登记表里留下永久条目,
+/// 反复搜索就会不断堆积。同名任务重复发起时取消旧任务(与缓存行为一致)。
+struct SearchCancellationGuard {
+    flag: Arc<AtomicBool>,
+    registered: Option<(String, Arc<AtomicBool>)>,
+}
+
+/// 让守卫能跨任务共享同一个标志(如缓存命中分支的推送循环)。
+///
+/// 只有 `flag` 被克隆出去, `registered` 保持 None —— 注销动作必须唯一地由
+/// 原始守卫的 Drop 负责, 否则副本析构会提前把登记注销掉。
+impl Clone for SearchCancellationGuard {
+    fn clone(&self) -> Self {
+        Self {
+            flag: self.flag.clone(),
+            registered: None,
+        }
+    }
+}
+
+impl SearchCancellationGuard {
+    /// `task_id` 缺失或为空时不登记: 调用方拿不到句柄, 行为与加取消之前一致。
+    fn register(task_id: Option<&str>) -> Self {
+        let Some(id) = task_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return Self {
+                flag: Arc::new(AtomicBool::new(false)),
+                registered: None,
+            };
+        };
+        let flag = Arc::new(AtomicBool::new(false));
+        // 锁被 poison(持锁线程 panic)时按 poison 内的数据继续用, 而不是跳过登记 ——
+        // 跳过会构造出 registered: Some(..) 却不在表里, 该任务的取消将静默失效。
+        {
+            let mut tasks = SEARCH_CANCELLATIONS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(previous) = tasks.insert(id.to_string(), flag.clone()) {
+                previous.store(true, Ordering::Relaxed);
+            }
+        }
+        // 取消已经先到了(前端一发完 invoke 就关流): 立刻置位, 这个搜索不会真的开始跑。
+        let cancel_already_requested = SEARCH_CANCEL_REQUESTS
+            .lock()
+            .map(|mut pending| {
+                // 顺带清掉等不到登记的孤儿记录, 避免反复搜索退出时无界增长。
+                prune_stale_search_cancel_requests(&mut pending);
+                pending.remove(id)
+            })
+            .ok()
+            .flatten();
+        if cancel_already_requested.is_some() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        Self {
+            flag: flag.clone(),
+            registered: Some((id.to_string(), flag)),
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for SearchCancellationGuard {
+    fn drop(&mut self) {
+        let Some((key, flag)) = self.registered.take() else {
+            return;
+        };
+        if let Ok(mut tasks) = SEARCH_CANCELLATIONS.lock() {
+            // 同一 taskId 已被新任务覆盖时保留新任务的标志, 不要误删。
+            // pending 的清理也放在这个判定里: 新任务可能正等着那条取消记录,
+            // 旧任务无权替它删掉 (see M4 / Arc::ptr_eq 语义)。
+            let still_ours = tasks
+                .get(&key)
+                .map(|current| Arc::ptr_eq(current, &flag))
+                .unwrap_or(false);
+            if still_ours {
+                tasks.remove(&key);
+                SEARCH_CANCEL_REQUESTS
+                    .lock()
+                    .map(|mut pending| pending.remove(&key))
+                    .ok();
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn cancel_book_search(
+    req: CancelBookSearchRequest,
+) -> Result<ApiResponse<Value>, AppError> {
+    let registered = SEARCH_CANCELLATIONS
+        .lock()
+        .ok()
+        .and_then(|tasks| tasks.get(&req.task_id).cloned());
+    match registered {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            Ok(ApiResponse::ok(serde_json::json!({ "cancelled": true })))
+        }
+        None => {
+            // 任务还没登记(前端刚发完搜索就退出): 记下来, 等它登记时立即取消。
+            SEARCH_CANCEL_REQUESTS
+                .lock()
+                .map(|mut pending| {
+                    prune_stale_search_cancel_requests(&mut pending);
+                    pending.insert(req.task_id.clone(), std::time::Instant::now());
+                })
+                .ok();
+            Ok(ApiResponse::ok(serde_json::json!({ "cancelled": false })))
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SearchBookMultiSseRequest {
     key: Option<String>,
@@ -171,6 +329,8 @@ pub struct SearchBookMultiSseRequest {
     last_index: Option<i32>,
     #[serde(rename = "concurrentCount")]
     concurrent_count: Option<i32>,
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +343,8 @@ pub struct SearchBookSourceSseRequest {
     #[serde(rename = "searchSize")]
     search_size: Option<i32>,
     refresh: Option<i32>,
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +368,8 @@ pub struct GetAvailableBookSourceRequest {
     result_limit: Option<i32>,
     #[serde(rename = "concurrentCount")]
     concurrent_count: Option<i32>,
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1831,6 +1995,9 @@ pub async fn search_book_multi_sse(
             .and_then(|g| if g.trim().is_empty() { None } else { Some(g) });
 
     let state_clone = state.inner().clone();
+    // 前端离开搜索界面时只能关掉 channel, 后端感知不到; 登记取消标志后,
+    // cancel_book_search 才能让这个任务停下并掐断剩余书源。
+    let cancel_guard = SearchCancellationGuard::register(req.task_id.as_deref());
 
     tokio::spawn(async move {
         if key.trim().is_empty() {
@@ -1881,6 +2048,12 @@ pub async fn search_book_multi_sse(
         // shows once with N origins. Deduping here would drop the later sources'
         // rows before the frontend ever sees them.
         while (idx as usize) < sources.len() || !tasks.is_empty() {
+            // 取消检查必须在等待任务完成之前: 放到 tasks.next().await 之后的话,
+            // 要等某个源搜完才会轮询到, 前端离开界面后的响应会延迟一整个源请求。
+            if cancel_guard.is_cancelled() {
+                abort_all_search_tasks(&mut tasks);
+                break;
+            }
             while tasks.len() < concurrent && (idx as usize) < sources.len() {
                 let source = sources[idx as usize].clone();
                 let svc = state_clone.book_service.clone();
@@ -1894,7 +2067,12 @@ pub async fn search_book_multi_sse(
                 idx += 1;
             }
 
-            if let Some(res) = tasks.next().await {
+            // 用 select 让取消能在等待期间被发现; 否则整个 await 期间无法响应。
+            let next = tokio::select! {
+                res = tasks.next() => res,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
+            };
+            if let Some(res) = next {
                 match res {
                     Ok((cur_idx, _source_name, Ok(list))) => {
                         last_idx = cur_idx;
@@ -1940,6 +2118,7 @@ pub async fn search_book_source_sse(
             .and_then(|g| if g.trim().is_empty() { None } else { Some(g) });
 
     let state_clone = state.inner().clone();
+    let cancel_guard = SearchCancellationGuard::register(req.task_id.as_deref());
 
     tokio::spawn(async move {
         if book_url.trim().is_empty() {
@@ -1987,6 +2166,14 @@ pub async fn search_book_source_sse(
         let mut all_results: Vec<crate::model::search::SearchBook> = Vec::new();
 
         while (idx as usize) < sources.len() || !tasks.is_empty() {
+            if cancel_guard.is_cancelled() {
+                abort_all_search_tasks(&mut tasks);
+                // 必须补一个 end: 否则将来若有「停止搜索」按钮(只发取消、不关流),
+                // 前端的 isSearching 会永远卡在加载态。这里同时跳过后面的缓存写入,
+                // 避免把半截结果固化 (与 multi/available 两处行为对齐)。
+                let _ = on_event.send(json_end(last_idx));
+                return;
+            }
             while tasks.len() < concurrent && (idx as usize) < sources.len() {
                 let source = sources[idx as usize].clone();
                 let svc = state_clone.book_service.clone();
@@ -2004,7 +2191,11 @@ pub async fn search_book_source_sse(
                 idx += 1;
             }
 
-            if let Some(res) = tasks.next().await {
+            let next = tokio::select! {
+                res = tasks.next() => res,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
+            };
+            if let Some(res) = next {
                 if let Ok((cur_idx, Ok(list), target_name, target_author)) = res {
                     let mut batch = Vec::new();
                     for b in list {
@@ -2227,6 +2418,10 @@ pub async fn get_available_book_source_sse(
     let last_index_start = req.last_index.unwrap_or(-1);
     let concurrent_count = effective_available_concurrent_count(req.concurrent_count);
     let book_url = req.url.clone();
+    // 登记必须放在所有提前 return 之前: 下面的「缓存命中」分支也会提前 return,
+    // 若登记晚于它, 该 taskId 永远不会进入取消表 —— 前端离开界面时发出的取消
+    // 只能落进 pending 而无人消费(既泄漏记录, 也让这段缓存推送无法被取消)。
+    let cancel_guard = SearchCancellationGuard::register(req.task_id.as_deref());
     let sources = state.book_source_service.list_enabled(&user_ns).await?;
     let enabled_source_url_set = enabled_source_urls(&sources);
 
@@ -2262,9 +2457,21 @@ pub async fn get_available_book_source_sse(
                     usize::MAX,
                 );
                 let on_event_clone = on_event.clone();
+                // 缓存条目多时这段推送本身也可能耗时; 用户离开界面后应能停下。
+                //
+                // 这里必须 **move 守卫本体**, 不能只 clone 一个副本: clone 出的副本
+                // `registered` 为 None(不负责注销), 而原守卫若在此 `return Ok(())` 时
+                // Drop, 就会立刻把该 taskId 从取消表移除 —— 之后前端发的
+                // cancel_book_search 查不到登记, 只能落进 pending 且无人消费(等 TTL),
+                // 那个仍在推送的任务持有的 flag 便再没有人能置位, 与"用户离开界面后
+                // 应能停下"的承诺不符。move 进去后, 注销发生在推送真正结束
+                // (或 channel 关闭而提前 return) 的那一刻。
                 tokio::spawn(async move {
                     let mut last_index = -1;
                     for book in cached {
+                        if cancel_guard.is_cancelled() {
+                            return;
+                        }
                         last_index += 1;
                         let payload = serde_json::json!({
                             "event": "data",
@@ -2308,12 +2515,20 @@ pub async fn get_available_book_source_sse(
         let mut all_results: Vec<SearchBook> = Vec::new();
         let mut seen = std::collections::HashSet::<String>::new();
         let mut tasks = JoinSet::new();
+        // 用户离开换源面板时前端只关 channel, 后端感知不到; 登记取消后才能停下,
+        // 否则剩余启用源仍会被逐个请求完。
+        let mut cancelled = false;
 
         // 搜索不再因「前端推送满 20 个」就提前截断(否则靠前的源占满名额、后续
         // 源永远不被扫描、缓存还会固化这份残缺列表)。`emitted` 只控制前端推送。
         // 但也不无条件扫完全部启用源: 当累计有效候选达到软上限(远大于前端 20)
         // 时提前停止, 在「缓存足够完整」与「后台扫描开销」间取平衡。
         while next_index < sources.len() || !tasks.is_empty() {
+            if cancel_guard.is_cancelled() {
+                cancelled = true;
+                tasks.abort_all();
+                break;
+            }
             // 已收集足够多候选且无在途任务时提前结束, 不再派发新搜索
             if all_results.len() >= AVAILABLE_SOURCE_SSE_SCAN_SOFT_LIMIT
                 && tasks.is_empty()
@@ -2343,7 +2558,11 @@ pub async fn get_available_book_source_sse(
                 break;
             }
 
-            match tasks.join_next().await {
+            let next = tokio::select! {
+                res = tasks.join_next() => res,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
+            };
+            match next {
                 Some(Ok((source_index, search_result, target_name, target_author))) => {
                     last_idx = last_idx.max(source_index);
                     match search_result {
@@ -2403,7 +2622,9 @@ pub async fn get_available_book_source_sse(
         // 全扫描(或达到软上限)完成后才写缓存, 缓存里是「能搜到这本书的源」而非
         // 被前端结果上限截断的前 20 个。保存前剔除「恰好是当前书源」的条目, 避免
         // 缓存被「只有当前源」的假阴性结果固化, 导致换源面板查不到其他源。
-        if last_index_start < 0 && !has_more {
+        // 被取消时同样不写: 这份结果是半截的, 写进去会把「还没扫到的源」当成
+        // 「搜不到这本书」固化下来 (与 `has_more` 同理)。
+        if last_index_start < 0 && !has_more && !cancelled {
             let cache_list: Vec<SearchBook> = all_results
                 .iter()
                 .filter(|candidate| candidate.origin != book.origin)
@@ -2507,6 +2728,21 @@ pub async fn book_source_debug_sse(
 
 fn json_err(msg: &str) -> Value {
     serde_json::json!({"event": "error", "errorMsg": msg})
+}
+
+/// 取消搜索时掐掉所有在途的单源搜索任务。
+///
+/// **已知限制(非立即停止)**: `JoinHandle::abort` 只在任务的下一个 await 点生效。单源
+/// 解析 `parser.search_books` 是同步调用, `js:` 规则里还会走 blocking HTTP(30s 超时),
+/// 正卡在这一段的任务会把当前这一步跑完才结束。所以取消保证的是「不再派发新书源,
+/// 且已派发的不再往下走」, 而不是「在途请求立刻断开」。
+///
+/// 只用于「即将 drop 掉集合」的场景: 这里逐个 abort 后调用方立即 break/return,
+/// 不再 poll 这些句柄。
+fn abort_all_search_tasks<T>(tasks: &mut FuturesUnordered<tokio::task::JoinHandle<T>>) {
+    for task in tasks.iter() {
+        task.abort();
+    }
 }
 
 fn json_end(last_index: i32) -> Value {
@@ -2924,8 +3160,9 @@ mod tests {
         should_use_available_source_cache,
         take_available_source_cached_matches,
         take_available_source_sse_matches, GetAvailableBookSourceRequest,
-    };
-    use crate::error::error::AppError;
+        SearchCancellationGuard, SEARCH_CANCELLATIONS, SEARCH_CANCEL_REQUESTS,
+        SEARCH_CANCEL_REQUEST_TTL,
+    };    use crate::error::error::AppError;
     use crate::model::book_chapter::BookChapter;
     use crate::model::{book::Book, search::SearchBook};
     use futures::StreamExt;
@@ -3170,6 +3407,118 @@ mod tests {
         assert!(success < 20, "取消后不应继续跑完剩余章节, 实际 {success}");
     }
 
+    /// 搜索任务结束时必须自动注销自己, 否则反复搜索会不断堆积登记条目。
+    #[test]
+    fn search_cancellation_guard_unregisters_on_drop() {
+        let task_id = "test-guard-unregister";
+        {
+            let _guard = SearchCancellationGuard::register(Some(task_id));
+            let registered = SEARCH_CANCELLATIONS
+                .lock()
+                .map(|tasks| tasks.contains_key(task_id))
+                .unwrap_or(false);
+            assert!(registered, "登记后应能在取消表里查到");
+        }
+        let leaked = SEARCH_CANCELLATIONS
+            .lock()
+            .map(|tasks| tasks.contains_key(task_id))
+            .unwrap_or(false);
+        assert!(!leaked, "守卫 Drop 后应已注销");
+    }
+
+    /// 前端「刚发出搜索就退出」时, 取消会先于任务登记到达; 这种取消不能被丢掉。
+    #[test]
+    fn search_cancel_arriving_before_registration_is_honoured() {
+        let task_id = "test-cancel-before-register";
+        // 模拟取消先到: 表里还没有这个任务, 应落到 pending 里。
+        assert!(
+            SEARCH_CANCELLATIONS
+                .lock()
+                .map(|tasks| !tasks.contains_key(task_id))
+                .unwrap_or(false)
+        );
+        SEARCH_CANCEL_REQUESTS
+            .lock()
+            .map(|mut pending| pending.insert(task_id.to_string(), std::time::Instant::now()))
+            .ok();
+
+        let guard = SearchCancellationGuard::register(Some(task_id));
+
+        assert!(guard.is_cancelled(), "登记时应消费掉先到的取消请求");
+        assert!(
+            SEARCH_CANCEL_REQUESTS
+                .lock()
+                .map(|pending| !pending.contains_key(task_id))
+                .unwrap_or(true),
+            "pending 里的取消请求应已被消费, 不能被下一个任务复用"
+        );
+    }
+
+    /// 「任务早已结束、取消晚到」会留下等不到登记的孤儿记录, 必须有 TTL 兜底,
+    /// 否则反复「搜索后立刻退出」会让 pending 无界增长。
+    #[test]
+    fn stale_search_cancel_requests_are_pruned() {
+        let mut pending: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        pending.insert("orphan".to_string(), std::time::Instant::now() - SEARCH_CANCEL_REQUEST_TTL * 2);
+        pending.insert("fresh".to_string(), std::time::Instant::now());
+
+        super::prune_stale_search_cancel_requests(&mut pending);
+
+        assert!(!pending.contains_key("orphan"), "超龄孤儿记录应被清掉");
+        assert!(pending.contains_key("fresh"), "未超龄的记录不能误删");
+    }
+
+    /// 旧任务被同 id 新任务覆盖后 Drop, 不能把新任务正等待的取消记录删掉。
+    #[test]
+    fn drop_keeps_pending_owned_by_newer_task() {
+        let task_id = "test-drop-keeps-newer-pending";
+        {
+            let _old = SearchCancellationGuard::register(Some(task_id));
+            // 新任务覆盖同一 id。
+            let _new = SearchCancellationGuard::register(Some(task_id));
+            // 模拟新任务的取消记录就位。
+            SEARCH_CANCEL_REQUESTS
+                .lock()
+                .map(|mut pending| pending.insert(task_id.to_string(), std::time::Instant::now()))
+                .ok();
+
+            drop(_old);
+
+            assert!(
+                SEARCH_CANCEL_REQUESTS
+                    .lock()
+                    .map(|pending| pending.contains_key(task_id))
+                    .unwrap_or(false),
+                "旧任务 Drop 不应删掉新任务正在等待的取消记录"
+            );
+            SEARCH_CANCEL_REQUESTS
+                .lock()
+                .map(|mut pending| pending.remove(task_id))
+                .ok();
+        }
+        assert!(
+            SEARCH_CANCELLATIONS
+                .lock()
+                .map(|tasks| !tasks.contains_key(task_id))
+                .unwrap_or(true),
+            "两个守卫都析构后应清空该 id 的登记"
+        );
+    }
+
+    /// 没有 taskId 时不登记: 老调用方(不传 taskId)行为不变, 也不会污染取消表。
+    ///
+    /// 断言只针对这个守卫自身, 不检查全局表是否为空 —— 测试是并行跑的, 别的用例
+    /// 可能正持有登记条目。
+    #[test]
+    fn search_cancellation_guard_ignores_blank_task_id() {
+        for value in [None, Some(""), Some("   ")] {
+            let guard = SearchCancellationGuard::register(value);
+            assert!(!guard.is_cancelled());
+            assert!(guard.registered.is_none(), "空白 taskId 不应登记");
+        }
+    }
+
     #[test]
     fn delete_target_matches_by_book_url() {
         let shelf_book = Book {
@@ -3277,6 +3626,7 @@ mod tests {
             last_index: None,
             result_limit: None,
             concurrent_count: None,
+            task_id: None,
         };
 
         let book = fallback_available_book(&req).expect("fallback book");

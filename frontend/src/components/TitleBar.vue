@@ -14,6 +14,21 @@
       <span class="titlebar-title" data-tauri-drag-region>阅读</span>
     </div>
     <div class="titlebar-controls">
+      <button
+        class="tb-btn mini"
+        :class="{ active: appStore.miniMode }"
+        :title="appStore.miniMode ? '退出迷你模式' : '迷你模式（小窗置顶）'"
+        @click="toggleMiniMode"
+      >
+        <svg v-if="appStore.miniMode" viewBox="0 0 12 12" width="12" height="12">
+          <rect x="3.5" y="3.5" width="5" height="5" fill="none" stroke="currentColor" stroke-width="1.2" />
+          <path d="M2 2.5h3M2 2.5V4M10 9.5H7M10 9.5V8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+        </svg>
+        <svg v-else viewBox="0 0 12 12" width="12" height="12">
+          <rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2" />
+          <rect x="5" y="5" width="4.5" height="4.5" fill="currentColor" opacity="0.5" />
+        </svg>
+      </button>
       <button class="tb-btn" title="最小化" @click="minimize">
         <svg viewBox="0 0 12 12" width="12" height="12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
       </button>
@@ -33,12 +48,14 @@ import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useReaderStore } from '../stores/reader'
+import { useAppStore } from '../stores/app'
 
 const { surface = null } = defineProps<{
   surface?: 'settings' | 'reader-panel' | null
 }>()
 
 const readerStore = useReaderStore()
+const appStore = useAppStore()
 const route = useRoute()
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 const appWindow = isTauri ? getCurrentWindow() : null
@@ -90,6 +107,14 @@ async function toggleMaximize() {
 }
 async function close() {
   await appWindow?.close()
+}
+
+async function toggleMiniMode() {
+  try {
+    await appStore.toggleMiniMode()
+  } catch (error) {
+    appStore.showToast((error as Error).message || '切换迷你模式失败', 'error')
+  }
 }
 
 onMounted(async () => {
@@ -189,6 +214,14 @@ onBeforeUnmount(() => cleanup())
 .tb-btn.close:hover {
   background: #e81123;
   color: #fff;
+}
+
+/* 迷你模式开关: 激活时只用很淡的中性底纹区分, 不用彩色 —— 迷你模式本就是
+   为了不显眼, 一个亮色图标反而突兀。图标本身会随状态切换(放大/缩小), 因此
+   即使没有颜色也能分辨当前是否处于迷你模式。 */
+.tb-btn.mini.active {
+  opacity: 0.9;
+  background: rgba(127, 127, 127, 0.12);
 }
 
 </style>

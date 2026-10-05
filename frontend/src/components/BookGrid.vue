@@ -1,6 +1,15 @@
 <template>
   <div class="book-grid" :class="{ 'touch-sorting': touchDragState.started }">
-    <TransitionGroup name="card" tag="div" class="book-grid-list">
+    <!--
+      animate=false 时不用 TransitionGroup: 它会对每个子元素 clone 一个节点插入
+      DOM 来探测过渡是否存在(见 Vue runtime-dom 的 hasCSSTransform), 上千条结果
+      每次列表变动都做一遍开销很大。搜索场景不参与拖拽补间, 直接渲染即可。
+    -->
+    <component
+      :is="animateEnabled ? TransitionGroup : 'div'"
+      v-bind="animateEnabled ? { tag: 'div', name: 'card' } : {}"
+      class="book-grid-list"
+    >
       <div
         v-for="item in displayItems"
         :key="getDisplayKey(item)"
@@ -43,7 +52,7 @@
           @addToShelf="$emit('addToShelf', $event)"
         />
       </div>
-    </TransitionGroup>
+    </component>
     <div
       v-if="touchDragState.started && draggedBook"
       class="touch-drag-ghost"
@@ -73,7 +82,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, ref, TransitionGroup } from 'vue'
 import BookCard from './BookCard.vue'
 import type { Book, SearchBook } from '../types'
 import { searchMergeKey } from '../utils/searchRank'
@@ -81,7 +90,7 @@ import { searchMergeKey } from '../utils/searchRank'
 type DisplayItem = (Book | SearchBook) | { __placeholder: true }
 const PLACEHOLDER_KEY = '__drag-placeholder__'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   books: (Book | SearchBook)[]
   editMode?: boolean
   selectedUrls?: Set<string>
@@ -90,11 +99,29 @@ const props = defineProps<{
   emptyText?: string
   sortable?: boolean
   showDeleteAction?: boolean
+  /**
+   * 是否启用卡片进出/位移过渡。
+   *
+   * `TransitionGroup` 会在每次列表变动时对**每个**子元素做 FLIP 位置计算, 还会
+   * clone 节点插入 DOM 探测过渡; 搜索结果动辄上千条且分批到达, 每次插入都全量算
+   * 一遍会让主线程长时间阻塞。搜索等"大批量、只增不改顺序"的场景传 `false`。
+   *
+   * **默认必须在这里显式声明为 `true`**, 不能用 `props.animate !== false` 代替:
+   * Vue 对 Boolean prop 的规则是「缺席且无 default 时取 false」(runtime-core
+   * `resolvePropValue`: `if (isAbsent && !hasDefault) value = false`), 书架/最近/
+   * 发现三个视图都不传这个 prop, 靠 `!== false` 判断会让它们的动画静默失效。
+   */
+  animate?: boolean
   /** 已在书架的书 URL 集合，用于搜索模式下显示「已加入」。 */
   shelfBookUrls?: Set<string>
   /** 已在书架的书名与作者标识，跨书源判断同一本书。 */
   shelfBookKeys?: Set<string>
-}>()
+}>(), {
+  animate: true,
+})
+
+/** 过渡开关: 由 `animate` 的默认值决定, 未显式传 `false` 时为 true。 */
+const animateEnabled = computed(() => props.animate)
 
 const emit = defineEmits<{
   click: [book: Book | SearchBook]

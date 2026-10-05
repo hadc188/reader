@@ -1,5 +1,9 @@
-﻿<template>
-  <div class="reader-catalog" :style="{ background: theme.popup, color: theme.fontColor }">
+<template>
+  <div
+    class="reader-catalog"
+    :class="{ mini }"
+    :style="{ background: theme.popup, color: theme.fontColor }"
+  >
     <div class="catalog-header">
       <div class="tabs">
         <div 
@@ -144,8 +148,14 @@ import type { Bookmark } from '../../types'
 
 const props = withDefaults(defineProps<{
   initialTab?: 'chapters' | 'bookmarks'
+  /**
+   * 迷你模式: 压缩头部/工具栏/列表项的尺寸。
+   * 小窗只有 240px 高, 常规尺寸下头部+工具栏会吃掉一半以上, 列表只剩两行。
+   */
+  mini?: boolean
 }>(), {
   initialTab: 'chapters',
+  mini: false,
 })
 const emit = defineEmits<{
   jumpChapter: [index: number]
@@ -669,5 +679,76 @@ function formatDate(ts?: number) {
 .bm-delete svg {
   width: 14px;
   height: 14px;
+}
+
+/*
+ * 迷你模式的紧凑尺寸。
+ *
+ * 小窗(默认 320×240)里, 常规尺寸的头部(56px)加工具栏(61px)会占掉抽屉一半以上,
+ * 列表只剩约 92px —— 只能看到两条章节。这里把这两块压到 43+42px, 列表可用高度
+ * 提升约 36%(实测 92px → 125px, 可见章节 2 条 → 3 条)。
+ *
+ * 只收尺寸, 不动配色与交互: 分类在 .mini 作用域内, 大窗口完全不受影响。
+ */
+.reader-catalog.mini .catalog-header {
+  height: 42px;
+}
+
+.reader-catalog.mini .tabs {
+  gap: 14px;
+}
+
+.reader-catalog.mini .tab {
+  font-size: 13px;
+}
+
+.reader-catalog.mini .icon-btn,
+.reader-catalog.mini .close-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.reader-catalog.mini .chapter-toolbar {
+  padding: 7px 10px;
+  gap: 6px;
+}
+
+.reader-catalog.mini .search-input {
+  padding: 6px 26px 6px 10px;
+  font-size: 12px;
+}
+
+.reader-catalog.mini .jump-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.reader-catalog.mini .list-container {
+  padding: 2px 0 6px;
+}
+
+.reader-catalog.mini .list-item {
+  padding: 7px 10px;
+  gap: 8px;
+}
+
+.reader-catalog.mini .item-index {
+  width: 20px;
+  font-size: 10px;
+}
+
+.reader-catalog.mini .item-title {
+  font-size: 12px;
+}
+
+.reader-catalog.mini .status-badge {
+  padding: 1px 5px;
+  font-size: 10px;
+}
+
+.reader-catalog.mini .loading,
+.reader-catalog.mini .empty {
+  padding: 20px;
+  font-size: 12px;
 }
 </style>

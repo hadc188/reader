@@ -103,6 +103,8 @@ export interface BookSourceTestResult {
   searchError?: string
   exploreError?: string
   markedInvalid: boolean
+  /** 该条因用户中止而未检测完成(既不算有效也不算失效)。 */
+  cancelled?: boolean
   group?: string
 }
 
@@ -112,6 +114,8 @@ export interface BookSourceTestResponse {
   invalid: number
   markedInvalid: number
   cancelled: boolean
+  /** 因中止而未完成的条数。 */
+  cancelledCount?: number
   results: BookSourceTestResult[]
 }
 

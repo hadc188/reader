@@ -1,5 +1,5 @@
 <template>
-  <div class="search-results">
+  <div ref="resultsContainerRef" class="search-results">
     <div class="search-header">
       <h2>
         搜索 "{{ searchKey }}"
@@ -7,7 +7,7 @@
           <span class="dot-pulse"></span>
           搜索中...
         </span>
-        <span v-else class="result-count">({{ displayResults.length }} 个结果)</span>
+        <span v-else class="result-count">({{ rankedResults.length }} 个结果)</span>
       </h2>
       <button class="back-btn" @click="$emit('back')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
@@ -68,12 +68,48 @@
       :shelf-book-urls="shelfBookUrls"
       :shelf-book-keys="shelfBookKeys"
       :loading="isSearching && displayResults.length === 0"
+      :animate="false"
       empty-text="未找到相关书籍"
       @click="handleBookClick"
       @info="handleBookInfo"
       @addToShelf="handleAddToShelf"
       @contextmenu="handleBookContextMenu"
     />
+
+    <div v-if="totalPages > 1" class="pagination">
+      <div class="pagination-count">{{ pageRangeText }}</div>
+      <div class="pagination-controls">
+        <button
+          type="button"
+          class="page-btn"
+          :disabled="currentPage <= 1"
+          @click="goToPage(currentPage - 1)"
+        >
+          上一页
+        </button>
+        <template v-for="(item, index) in pageItems" :key="`${item}-${index}`">
+          <span v-if="item === 'ellipsis'" class="page-ellipsis">…</span>
+          <button
+            v-else
+            type="button"
+            class="page-btn page-number"
+            :class="{ active: item === currentPage }"
+            :aria-current="item === currentPage ? 'page' : undefined"
+            @click="goToPage(item)"
+          >
+            {{ item }}
+          </button>
+        </template>
+        <button
+          type="button"
+          class="page-btn"
+          :disabled="currentPage >= totalPages"
+          @click="goToPage(currentPage + 1)"
+        >
+          下一页
+        </button>
+      </div>
+    </div>
 
     <BookDetailModal
       v-model="showBookDetail"
@@ -83,7 +119,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useAppStore } from '../stores/app'
 import { useSourceStore } from '../stores/source'
@@ -119,6 +155,7 @@ const {
 
 let eventSource: SseLike | null = null
 let searchGeneration = 0
+const resultsContainerRef = ref<HTMLElement | null>(null)
 const showBookDetail = ref(false)
 const selectedBook = ref<Book | SearchBook | null>(null)
 
@@ -167,7 +204,28 @@ const enabledSourceSignature = computed(() => {
   return sourceOptions.value.map((source) => source.bookSourceUrl).join('\n')
 })
 
-const displayResults = computed<SearchBook[]>(() => {
+/**
+ * 搜索结果每页条数。
+ *
+ * 多源搜索动辄上千条(实测 1964 条), 而 BookGrid 是 `v-for` 全量渲染 + TransitionGroup,
+ * 全部铺进 DOM 会让布局/样式重算成本随条数线性增长, 滚动直接掉帧。
+ * 因此按页渲染, 只把当前页交给 BookGrid。
+ *
+ * **已知局限**: 分页只降低**渲染**量, 没有改动下面 `rankedResults` 的全量
+ * filter/map/sort —— 搜索**进行中**每收到一批 SSE 消息仍会整体重算一遍
+ * (见 onmessage 里整体替换 `searchResults`)。用户反馈的"搜索完成后卡顿"
+ * 主因是 DOM 数量, 所以这里已足够; 若之后要优化搜索过程本身, 应改
+ * `shallowRef` + 分帧提交, 而不是继续加大分页。
+ */
+const SEARCH_RESULT_PAGE_SIZE = 100
+
+const currentPage = ref(1)
+
+/** 页码按钮项: 数字直接跳页, `'ellipsis'` 渲染成省略号。 */
+type PageItem = number | 'ellipsis'
+
+/** 全部命中结果(已完成按书源可用性与相关度过滤排序), 用于展示总数与分页。 */
+const rankedResults = computed<SearchBook[]>(() => {
   const enriched = results.value
     .filter((book) => enabledSourceUrls.value.has(book.origin))
     .map((book) => {
@@ -184,6 +242,72 @@ const displayResults = computed<SearchBook[]>(() => {
     })
   return rankSearchResults(enriched, searchKey.value)
 })
+
+/** 真正交给 BookGrid 渲染的当前页切片。 */
+const displayResults = computed<SearchBook[]>(() => {
+  const start = (currentPage.value - 1) * SEARCH_RESULT_PAGE_SIZE
+  return rankedResults.value.slice(start, start + SEARCH_RESULT_PAGE_SIZE)
+})
+
+const totalPages = computed(() =>
+  Math.max(1, Math.ceil(rankedResults.value.length / SEARCH_RESULT_PAGE_SIZE))
+)
+
+/** 当前页第一条/最后一条在全部结果中的序号(1-based), 用于"第 X-Y 条"提示。 */
+const pageRangeText = computed(() => {
+  const total = rankedResults.value.length
+  if (total === 0) return ''
+  const start = (currentPage.value - 1) * SEARCH_RESULT_PAGE_SIZE + 1
+  const end = Math.min(total, currentPage.value * SEARCH_RESULT_PAGE_SIZE)
+  return `第 ${start}-${end} 条，共 ${total} 条`
+})
+
+/**
+ * 计算要渲染的页码按钮。
+ *
+ * 结果多时页数可达几十页, 全列出来会把分页条撑成一条长带; 只保留首页、末页
+ * 与当前页附近的若干页, 中间用省略号。`siblingCount` 是当前页两侧各保留几个。
+ */
+const pageItems = computed<PageItem[]>(() => {
+  const total = totalPages.value
+  const current = currentPage.value
+  const siblingCount = 1
+  // 页数少时直接全列(不留省略号, 免得比页码还占地方)。
+  const maxWithoutEllipsis = 7
+  if (total <= maxWithoutEllipsis) {
+    return Array.from({ length: total }, (_, index) => index + 1)
+  }
+
+  const first = 1
+  const last = total
+  const left = Math.max(first + 1, current - siblingCount)
+  const right = Math.min(last - 1, current + siblingCount)
+  const items: PageItem[] = [first]
+  if (left > first + 1) items.push('ellipsis')
+
+  for (let page = left; page <= right; page += 1) {
+    items.push(page)
+  }
+
+  if (right < last - 1) items.push('ellipsis')
+  items.push(last)
+  return items
+})
+
+/**
+ * 跳页。
+ *
+ * 页码变化后把滚动容器回到顶部: 停在底部再翻页会看到新一页的末尾,
+ * 用户会以为"没翻动"。用 nextTick 等 DOM 更新完再滚, 否则滚的是旧高度。
+ */
+function goToPage(page: number) {
+  const target = Math.min(Math.max(1, page), totalPages.value)
+  if (target === currentPage.value) return
+  currentPage.value = target
+  nextTick(() => {
+    resultsContainerRef.value?.scrollTo({ top: 0 })
+  })
+}
 
 function closeEventSource() {
   if (eventSource) {
@@ -210,6 +334,8 @@ function ensureSearchSelection() {
 function doSearch(key: string) {
   closeEventSource()
   const generation = ++searchGeneration
+  // 新搜索从第一页开始: 沿用上一次的页码会落在空页上(新结果更少时)。
+  currentPage.value = 1
 
   if (searchScope.value === 'group' && !selectedGroup.value) {
     shelfStore.searchResults = []
@@ -294,6 +420,7 @@ watch(
       closeEventSource()
       shelfStore.searchResults = []
       shelfStore.isSearching = false
+      currentPage.value = 1
     }
   },
   { immediate: true }
@@ -495,6 +622,65 @@ defineEmits<{
   background: var(--color-bg-elevated);
   color: var(--color-text);
   font-size: var(--text-sm);
+}
+
+.pagination {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) 0 var(--space-8);
+}
+
+.pagination-count {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+}
+
+.pagination-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.page-btn {
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+
+.page-btn:hover:not(:disabled):not(.active) {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: var(--color-bg-hover);
+}
+
+.page-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.page-number.active {
+  color: #fff;
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  font-weight: 600;
+}
+
+.page-ellipsis {
+  min-width: 24px;
+  text-align: center;
+  color: var(--color-text-tertiary);
+  user-select: none;
 }
 
 @media (max-width: 720px) {

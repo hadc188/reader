@@ -60,6 +60,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::book::get_invalid_book_sources,
         commands::book::cache_book_sse,
         commands::book::cancel_cache_book,
+        commands::book::cancel_book_search,
         commands::book::search_book_multi_sse,
         commands::book::search_book_source_sse,
         commands::book::get_available_book_source,
@@ -152,5 +153,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::webdav::get_legado_webdav_backup_archive,
         commands::webdav::delete_legado_webdav_backup,
         commands::window::configure_boss_key,
+        commands::window::get_window_mode,
+        commands::window::toggle_mini_mode,
     ]
 }

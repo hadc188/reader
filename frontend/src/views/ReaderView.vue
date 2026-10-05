@@ -43,6 +43,7 @@
           <ReaderCatalog
             v-if="store.activePanel === 'catalog' || store.activePanel === 'bookmark'"
             :initial-tab="store.activePanel === 'bookmark' ? 'bookmarks' : 'chapters'"
+            :mini="appStore.miniMode"
             @jump-chapter="jumpFromCatalog"
           />
           <ReadSettings v-else-if="store.activePanel === 'settings'" />
@@ -54,44 +55,15 @@
       </Transition>
     </Teleport>
 
-    <!-- PC Desktop Toolbars -->
-    <div
-      v-if="!isMobile"
-      class="reader-edge-trigger reader-edge-trigger-left"
-      @mouseenter="leftToolbarRevealed = true"
-      @mouseleave="leftToolbarRevealed = false"
-    >
-      <ReaderSidebar
-        :edge-active="leftToolbarRevealed"
-        @goHome="goHome"
-        @scrollTop="scrollToTop"
-        @scrollBottom="scrollToBottom"
-      />
-    </div>
-    <div
-      v-if="!isMobile"
-      class="reader-edge-trigger reader-edge-trigger-right"
-      @mouseenter="rightToolbarRevealed = true"
-      @mouseleave="rightToolbarRevealed = false"
-    >
-      <ReaderToolbar
-        :edge-active="rightToolbarRevealed"
-        :is-speaking="store.isSpeaking"
-        :is-paused="store.isPaused"
-        @bookmark="toggleBookmark"
-        @search="toggleSearch"
-        @info="openInfo"
-        @tts="handleTTS"
-        @prev="prevChapter"
-        @next="nextChapter"
-        @progress="openCachePanel"
-      />
-    </div>
-
-    <!-- Mobile Controls (Click to toggle) -->
+    <!--
+      阅读页控件统一用 ReaderMobileControls(点击正文呼出上/下栏 + 左右悬浮钮),
+      宽屏与迷你模式共用同一套交互与外观。
+      历史: 宽屏曾走"鼠标移到左右边缘滑出竖栏"的独立组件, 已随本次统一删除
+      (见 backups/2026-10-05-review-fixes/)。
+    -->
     <ReaderMobileControls
-      v-if="isMobile"
       :show="showControls || !!store.activePanel"
+      :mini="appStore.miniMode"
       @goHome="goHome"
       @scrollTop="scrollToTop"
       @scrollBottom="scrollToBottom"
@@ -102,6 +74,7 @@
       @info="openInfo"
       @tts="handleTTS"
       @progress="openCachePanel"
+      @seekChapter="jumpFromCatalog"
     />
 
     <Transition name="auto-reading-status">
@@ -392,8 +365,6 @@ import { handleReaderFontSizeWheel } from '../utils/readerFontSize'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
 import type { Book } from '../types'
 
-import ReaderSidebar from '../components/reader/ReaderSidebar.vue'
-import ReaderToolbar from '../components/reader/ReaderToolbar.vue'
 import ReaderMobileControls from '../components/reader/ReaderMobileControls.vue'
 import { useReaderSearch } from '../composables/useReaderSearch'
 import { useReaderSelection } from '../composables/useReaderSelection'
@@ -461,8 +432,6 @@ const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
 const showControls = ref(false)
 const isMobile = ref(false)
-const leftToolbarRevealed = ref(false)
-const rightToolbarRevealed = ref(false)
 let speechTimerTicker: number | null = null
 let readerViewUnmounted = false
 let suppressNextTapUntil = 0
@@ -614,7 +583,6 @@ const {
   searchIndex,
   searchCount,
   bookSearchStatus,
-  toggleSearch,
   openSearch,
   closeSearch,
   runSearch,
@@ -1898,9 +1866,10 @@ function handleGlobalClick(e: MouseEvent) {
 
 function clickZoneAction(zone: 'prev' | 'menu' | 'next') {
   if (zone === 'menu') {
-    if (isMobile.value) {
-      showControls.value = !showControls.value
-    }
+    // 宽屏也走"点击正文中部呼出控件": 阅读页控件已统一为 ReaderMobileControls,
+    // 不再有"鼠标移到边缘滑出竖栏"这条宽屏专属路径, 这里不能再按 isMobile 拦截,
+    // 否则大窗口下点了中部什么都不会发生。
+    showControls.value = !showControls.value
     return
   }
 
@@ -2689,22 +2658,6 @@ watch(
 .reader-view.disable-system-callout .horizontal-page-content,
 .reader-view.disable-system-callout .continuous-reading {
   -webkit-touch-callout: none;
-}
-
-.reader-edge-trigger {
-  position: fixed;
-  top: var(--titlebar-height, 32px);
-  bottom: 0;
-  width: 32px;
-  z-index: 19;
-}
-
-.reader-edge-trigger-left {
-  left: 0;
-}
-
-.reader-edge-trigger-right {
-  right: 0;
 }
 
 .auto-reading-status {

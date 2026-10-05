@@ -444,13 +444,23 @@ export const useAppStore = defineStore('app', () => {
   // ─── Toast ───
   const toasts = ref<Array<{ id: number; message: string; type: string }>>([])
   let toastId = 0
+  /** 记录自动消失的定时器, 点击关闭时一并清掉, 避免留下悬空回调。 */
+  const toastTimers = new Map<number, ReturnType<typeof setTimeout>>()
+
+  /** 手动关闭一条提示(点击提示本身)。 */
+  function dismissToast(id: number) {
+    const timer = toastTimers.get(id)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      toastTimers.delete(id)
+    }
+    toasts.value = toasts.value.filter((t) => t.id !== id)
+  }
 
   function showToast(message: string, type: 'success' | 'error' | 'warning' = 'success') {
     const id = ++toastId
     toasts.value.push({ id, message, type })
-    setTimeout(() => {
-      toasts.value = toasts.value.filter((t) => t.id !== id)
-    }, 3000)
+    toastTimers.set(id, setTimeout(() => dismissToast(id), 3000))
   }
 
   function setOnlineStatus(value: boolean) {
@@ -476,8 +486,34 @@ export const useAppStore = defineStore('app', () => {
     confirmState.value = null
   }
 
+  // ─── 迷你模式(小窗置顶) ───
+  // 状态以 Rust 侧 window-state.json 为准(桌面壳启动时要据此决定建窗尺寸),
+  // 前端只镜像一份驱动紧凑布局, 因此不写 localStorage。
+  const miniMode = ref(false)
+
+  async function syncWindowMode() {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+    try {
+      const mode = await invokeRaw<{ miniMode: boolean; alwaysOnTop: boolean }>('get_window_mode')
+      miniMode.value = Boolean(mode?.miniMode)
+    } catch {
+      // 查询失败时保持默认(非迷你), 不影响正常使用。
+    }
+  }
+
+  async function toggleMiniMode() {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
+      throw new Error('迷你模式仅在桌面应用可用')
+    }
+    const mode = await invokeRaw<{ miniMode: boolean; alwaysOnTop: boolean }>('toggle_mini_mode')
+    miniMode.value = Boolean(mode?.miniMode)
+    showToast(miniMode.value ? '已进入迷你模式' : '已退出迷你模式', 'success')
+    return mode
+  }
+
   return {
     theme, setTheme, toggleTheme,
+    miniMode, syncWindowMode, toggleMiniMode,
     closeToTray, setCloseToTray, toggleCloseToTray,
     legadoWebdavConfig, setLegadoWebdavConfig, legadoSyncEnabled, setLegadoSyncEnabled,
     bossKeyEnabled, bossKeyShortcut, applyBossKey, setBossKeyEnabled, setBossKeyShortcut,
@@ -489,7 +525,7 @@ export const useAppStore = defineStore('app', () => {
     updateDialogVisible, closeUpdateProgressDialog,
     isOnline, setOnlineStatus,
     readingStats, readingStatsSummary, startReadingSession, stopReadingSession, setReadingSessionBook, markBookOpened, markChapterRead,
-    toasts, showToast,
+    toasts, showToast, dismissToast,
     confirmState, confirmDialog, resolveConfirm,
     hiddenFeatures, isFeatureHidden, toggleHiddenFeature,
   }

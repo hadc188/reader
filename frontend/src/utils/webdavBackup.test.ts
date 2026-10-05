@@ -151,6 +151,118 @@ describe('compatible backup archives', () => {
     })).toThrow('bookshelf.json 不是数据列表')
   })
 
+  it('skips empty book sources instead of failing the whole restore', () => {
+    const result = parseCompatibleBackupArchive({
+      'bookSource.json': JSON.stringify([
+        { bookSourceName: '有效源', bookSourceUrl: 'https://ok.test' },
+        // 真实备份里的脏数据: 名称与地址均为空串。
+        { bookSourceName: '', bookSourceUrl: '', bookSourceGroup: '搜索链接规则为空,天龙' },
+        { bookSourceName: '另一个有效源', bookSourceUrl: 'https://ok2.test' },
+      ]),
+    })
+
+    expect(result.payload.bookSources).toHaveLength(2)
+    expect(result.skipped).toHaveLength(1)
+    expect(result.skipped[0]?.file).toBe('bookSource.json')
+    expect(result.skipped[0]?.count).toBe(1)
+    expect(result.skipped[0]?.samples).toEqual(['(未命名)'])
+    expect(result.skipped[0]?.allSkipped).toBe(false)
+  })
+
+  it('reports every file with invalid entries independently', () => {
+    const result = parseCompatibleBackupArchive({
+      'bookshelf.json': JSON.stringify([
+        { name: '正常书', bookUrl: 'https://example.test/b', origin: 'https://s.test' },
+        { name: '缺地址', bookUrl: '', origin: 'https://s.test' },
+      ]),
+      'bookSource.json': JSON.stringify([
+        { bookSourceName: '', bookSourceUrl: '' },
+      ]),
+      'rssSources.json': JSON.stringify([
+        { sourceName: '有效RSS', sourceUrl: 'https://rss.test' },
+        { sourceName: '缺地址RSS', sourceUrl: '' },
+      ]),
+      'bookmark.json': JSON.stringify([
+        { bookName: '', bookAuthor: '', chapterIndex: 1 },
+      ]),
+      'replaceRule.json': JSON.stringify([
+        { name: '有效规则', pattern: 'a' },
+        { name: '', pattern: 'b' },
+      ]),
+      'bookGroup.json': JSON.stringify([
+        { groupId: 0, groupName: '' },
+      ]),
+    })
+
+    expect(result.payload.bookshelf.books).toHaveLength(1)
+    expect(result.payload.bookSources).toHaveLength(0)
+    expect(result.payload.rssSources).toHaveLength(1)
+    expect(result.payload.bookmarks).toHaveLength(0)
+    expect(result.payload.replaceRules).toHaveLength(1)
+    expect(result.payload.bookshelf.groups).toHaveLength(0)
+
+    const files = result.skipped.map((entry) => entry.file).sort()
+    expect(files).toEqual([
+      'bookGroup.json',
+      'bookSource.json',
+      'bookmark.json',
+      'bookshelf.json',
+      'replaceRule.json',
+      'rssSources.json',
+    ])
+  })
+
+  it('still rejects structurally broken entries', () => {
+    // 元素不是对象属于结构性损坏, 不能被静默跳过。
+    expect(() => parseCompatibleBackupArchive({
+      'bookSource.json': '[null]',
+    })).toThrow('bookSource.json 包含无效数据')
+  })
+
+  it('keeps skipped empty when every entry is valid', () => {
+    const result = parseCompatibleBackupArchive({
+      'bookSource.json': '[{"bookSourceName":"a","bookSourceUrl":"https://a.test"}]',
+    })
+
+    expect(result.skipped).toEqual([])
+    expect(result.payload.bookSources).toHaveLength(1)
+  })
+
+  it('flags a file whose entries are all invalid', () => {
+    // 恢复是先清空再写入; 该类数据全无效意味着会被清空且不写回,
+    // 调用方据此在动手前确认。
+    const result = parseCompatibleBackupArchive({
+      'bookSource.json': JSON.stringify([
+        { bookSourceName: '', bookSourceUrl: '' },
+        { bookSourceName: '有名无址', bookSourceUrl: '' },
+      ]),
+    })
+
+    expect(result.payload.bookSources).toHaveLength(0)
+    expect(result.skipped).toHaveLength(1)
+    expect(result.skipped[0]?.allSkipped).toBe(true)
+    expect(result.skipped[0]?.samples).toEqual(['(未命名)', '有名无址'])
+  })
+
+  it('does not flag partial skips as fully invalid', () => {
+    const result = parseCompatibleBackupArchive({
+      'bookSource.json': JSON.stringify([
+        { bookSourceName: '好源', bookSourceUrl: 'https://ok.test' },
+        { bookSourceName: '', bookSourceUrl: '' },
+      ]),
+    })
+
+    expect(result.skipped[0]?.allSkipped).toBe(false)
+  })
+
+  it('does not flag an empty file as fully invalid', () => {
+    // 备份里本来就是 0 条属于正常情况, 不是"全部无效"。
+    const result = parseCompatibleBackupArchive({ 'bookSource.json': '[]' })
+
+    expect(result.skipped).toEqual([])
+    expect(result.payload.bookSources).toHaveLength(0)
+  })
+
   it('accepts v1 backups without local books, fonts or stats', () => {
     const parsed = parseWebdavBackup(JSON.stringify({
       version: 1,

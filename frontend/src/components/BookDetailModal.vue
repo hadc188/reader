@@ -12,22 +12,93 @@
             </svg>
           </button>
 
+          <!-- ── 编辑态: 只保留可编辑的四项, 不显示书源/目录等只读信息 ── -->
+          <div v-if="isEditing" class="edit-form">
+            <h2 class="edit-form-title">编辑书籍信息</h2>
+
+            <div class="edit-cover-block">
+              <div class="edit-cover" :class="{ empty: !coverSrc }">
+                <img v-if="coverSrc" :src="coverSrc" :alt="draft.name" @error="coverFailed = true">
+                <span v-else class="edit-cover-empty">无封面</span>
+              </div>
+              <div class="edit-cover-side">
+                <div class="edit-cover-buttons">
+                  <button
+                    class="cover-edit-btn"
+                    type="button"
+                    :disabled="uploadingCover"
+                    @click="coverInputRef?.click()"
+                  >{{ uploadingCover ? '上传中…' : (draft.customCoverUrl ? '更换图片' : '选择图片') }}</button>
+                  <button
+                    v-if="draft.customCoverUrl"
+                    class="cover-edit-btn subtle"
+                    type="button"
+                    @click="resetCover"
+                  >恢复原始封面</button>
+                </div>
+                <p class="edit-cover-note">支持 PNG / JPG / GIF / WebP / AVIF，不超过 8 MB</p>
+              </div>
+              <input
+                ref="coverInputRef"
+                class="hidden-file-input"
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp,image/avif"
+                @change="handleCoverFileChange"
+              >
+            </div>
+
+            <label class="edit-field">
+              <span class="edit-field-label">书名</span>
+              <input
+                v-model="draft.name"
+                class="edit-field-input"
+                type="text"
+                maxlength="120"
+                placeholder="书名"
+              >
+            </label>
+
+            <label class="edit-field">
+              <span class="edit-field-label">作者</span>
+              <input
+                v-model="draft.author"
+                class="edit-field-input"
+                type="text"
+                maxlength="120"
+                placeholder="可留空"
+              >
+            </label>
+
+            <label class="edit-field">
+              <span class="edit-field-label">简介</span>
+              <textarea
+                v-model="draft.intro"
+                class="edit-field-textarea"
+                rows="5"
+                maxlength="5000"
+                placeholder="可留空"
+              ></textarea>
+            </label>
+          </div>
+
+          <!-- ── 详情态 ── -->
+          <template v-else>
           <!-- Book Header -->
           <div class="book-header">
             <div class="book-cover-lg">
               <img
                 v-if="coverSrc"
                 :src="coverSrc"
-                :alt="book.name"
+                :alt="displayBook.name"
                 @error="coverFailed = true"
               />
               <div v-else class="cover-placeholder-lg">
-                <span>{{ book.name }}</span>
+                <span>{{ displayBook.name }}</span>
               </div>
             </div>
             <div class="book-header-info">
-              <h2>{{ book.name }}</h2>
-              <p class="author">{{ book.author || '未知作者' }}</p>
+              <h2>{{ displayBook.name }}</h2>
+              <p class="author">{{ displayBook.author || '未知作者' }}</p>
               <div class="book-tags">
                 <span v-if="book.kind" class="tag">{{ book.kind }}</span>
                 <span v-if="(book as Book).totalChapterNum" class="tag">共{{ (book as Book).totalChapterNum }}章</span>
@@ -40,9 +111,9 @@
           </div>
 
           <!-- Intro -->
-          <div v-if="book.intro" class="book-intro">
+          <div v-if="displayBook.intro" class="book-intro">
             <h3>简介</h3>
-            <p>{{ book.intro }}</p>
+            <p>{{ displayBook.intro }}</p>
           </div>
 
           <!-- Available Sources -->
@@ -97,29 +168,64 @@
             <div class="loading-spinner"></div>
             加载目录中...
           </div>
+          </template>
 
           <!-- Actions -->
           <div class="modal-actions">
-            <button class="action-btn primary" @click="startReading">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
-                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
-              </svg>
-              {{ (book as Book).durChapterIndex ? '继续阅读' : '开始阅读' }}
-            </button>
-            <button v-if="!isShelfBook()" class="action-btn" @click="addToShelf">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-              加入书架
-            </button>
-            <button v-else class="action-btn" :disabled="removingFromShelf" @click="removeFromShelf">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <path d="M5 12h14" />
-              </svg>
-              {{ removingFromShelf ? '正在取消...' : '取消加入' }}
-            </button>
-            <button class="action-btn" @click="close">关闭</button>
+            <!-- 编辑态: 只留还原/保存/取消, 避免误触阅读或退架 -->
+            <template v-if="isEditing">
+              <button
+                class="action-btn"
+                type="button"
+                :disabled="!canRevert || savingEdit"
+                :title="canRevert
+                  ? '放弃已保存的自定义内容，恢复为最初的书籍信息（点保存后生效）'
+                  : '这本书还没有自定义过，没有可还原的内容'"
+                @click="revertEdit"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                  <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+                  <path d="M3 3v5h5" />
+                </svg>
+                还原
+              </button>
+              <button class="action-btn primary" :disabled="savingEdit || uploadingCover" @click="saveEdit">
+                {{ uploadingCover ? '封面上传中…' : (savingEdit ? '正在保存…' : '保存') }}
+              </button>
+              <button class="action-btn" :disabled="savingEdit" @click="cancelEdit">取消</button>
+            </template>
+            <template v-else>
+              <button class="action-btn primary" @click="startReading">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                  <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+                  <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+                </svg>
+                {{ (book as Book).durChapterIndex ? '继续阅读' : '开始阅读' }}
+              </button>
+              <button v-if="!isShelfBook()" class="action-btn" @click="addToShelf">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                加入书架
+              </button>
+              <template v-else>
+                <!-- 只有书架里的书才谈得上编辑信息 -->
+                <button class="action-btn" @click="startEdit">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                  </svg>
+                  编辑信息
+                </button>
+                <button class="action-btn" :disabled="removingFromShelf" @click="removeFromShelf">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                    <path d="M5 12h14" />
+                  </svg>
+                  {{ removingFromShelf ? '正在取消...' : '取消加入' }}
+                </button>
+              </template>
+              <button class="action-btn" @click="close">关闭</button>
+            </template>
           </div>
         </div>
       </div>
@@ -128,7 +234,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { getCoverUrl, getChapterList, saveBook, setBookSource } from '../api/bookshelf'
 import { getAvailableBookSourceSSE } from '../api/search'
@@ -140,6 +246,19 @@ import { useAppStore } from '../stores/app'
 import type { Book, SearchBook, BookChapter } from '../types'
 import { isLocalBook } from '../utils/localBook'
 import { matchesSourceSwitchAuthor, searchMergeKey } from '../utils/searchRank'
+import { deleteBookCover, uploadBookCover } from '../api/bookCover'
+import {
+  canRevertToOrigin,
+  createBookEditDraft,
+  editableFieldsForSave,
+  normalizeBookEditDraft,
+  obsoleteCoverUrl,
+  originPatchForSave,
+  resolveRevertDraft,
+  validateBookEditDraft,
+  validateCoverFile,
+  type BookEditDraft,
+} from '../utils/bookEdit'
 
 const SOURCE_CANDIDATES_CACHE_LIMIT = 20
 const sourceCandidatesCache = new Map<string, SearchBook[]>()
@@ -147,6 +266,8 @@ const sourceCandidatesCache = new Map<string, SearchBook[]>()
 const props = defineProps<{
   modelValue: boolean
   book: Book | SearchBook | null
+  /** 打开弹窗后直接进入编辑态(书架右键「编辑信息」用)。 */
+  startInEdit?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -180,15 +301,50 @@ const detailKey = computed(() => {
   return `${book.name}::${book.author}::${book.bookUrl}::${book.origin}`
 })
 
+/** 保存成功后覆盖在本地的展示值。
+ *
+ *  props.book 是父组件在打开弹窗时传入的对象引用, store 重新拉取书架不会改到它,
+ *  所以保存后必须自己记住新值, 否则弹窗仍显示旧书名/旧封面, 看起来像没保存。 */
+const savedOverride = ref<BookEditDraft | null>(null)
+
 const coverSrc = computed(() => {
   if (coverFailed.value || !props.book) return ''
-  const url = (props.book as Book).customCoverUrl || props.book.coverUrl
+  // 编辑态读草稿(选完图立刻能看到); 非编辑态优先用刚保存的结果。
+  //
+  // 注意 `savedOverride` 的存在性要单独判, 不能把它的 `customCoverUrl` 混进 OR 链:
+  // 用户点「恢复原始封面」时保存的是**空串**(表示回落到书源封面), 空串是 falsy,
+  // 会被 `||` 跳过而回落到 `props.book.customCoverUrl` —— 那正是刚被删除的旧封面
+  // 文件, 图片 404 → 显示「无封面」, 用户刚点完还原却看不到书源封面。
+  const url = isEditing.value
+    ? (draft.value.customCoverUrl || props.book.coverUrl)
+    : savedOverride.value
+    ? (savedOverride.value.customCoverUrl || props.book.coverUrl)
+    : ((props.book as Book).customCoverUrl || props.book.coverUrl)
   return url ? getCoverUrl(url) : ''
 })
 
 const displayChapters = computed(() => {
   if (showAllChapters.value) return chapters.value
   return chapters.value.slice(0, 50)
+})
+
+/** 非编辑态展示用的书籍信息: 优先用刚保存的结果, 其次才是 props。
+ *  props.book 是打开弹窗时的对象引用, 保存后不会自动更新。 */
+const displayBook = computed(() => {
+  const base = props.book
+  if (!base) return { name: '', author: '', intro: '' }
+  if (savedOverride.value) {
+    return {
+      name: savedOverride.value.name,
+      author: savedOverride.value.author,
+      intro: savedOverride.value.intro,
+    }
+  }
+  return {
+    name: base.name,
+    author: base.author || '',
+    intro: base.intro || '',
+  }
 })
 
 const displayOriginName = computed(() => {
@@ -465,6 +621,168 @@ function close() {
   emit('update:modelValue', false)
 }
 
+/* ─── 编辑书籍信息 ───
+ *  只改书架里的记录(书名/作者/封面/简介), 不碰磁盘上的原始文件 ——
+ *  本地导入的书籍改的也只是显示名。 */
+
+const isEditing = ref(false)
+const savingEdit = ref(false)
+const uploadingCover = ref(false)
+const coverInputRef = ref<HTMLInputElement | null>(null)
+const draft = ref<BookEditDraft>(createBookEditDraft({ name: '' }))
+
+/** 进入编辑态那一刻的快照, 供「还原」把草稿恢复回来。 */
+const editBaseline = ref<BookEditDraft>(createBookEditDraft({ name: '' }))
+
+/** 本次编辑会话中上传过、但尚未写进书架记录的封面 URL。
+ *
+ *  用户可能传了图又点「恢复原始封面」(或直接取消) —— 那些文件已成孤儿。
+ *  取消时的残留是可接受的, 但保存时能顺手清掉就该清掉。 */
+const pendingCoverUploads = ref<string[]>([])
+
+/** 是否有「最初的书籍信息」可还原。
+ *
+ *  曾自定义过(后端记下了 original*)或当前有自定义封面时为真。保存之后它依然为真
+ *  —— 这正是用户要的: 保存过也能一键回到原样。 */
+const canRevert = computed(() => {
+  const shelfBook = findShelfBook()
+  return shelfBook ? canRevertToOrigin(shelfBook) : false
+})
+
+function startEdit() {
+  // 只允许编辑书架里的书: 搜索结果形态缺 toc_url, 走 save_book 会触发书源网络
+  // 回填并按「当前启用书源」过滤 source_candidates, 可能永久剔除已禁用源的候选。
+  const shelfBook = findShelfBook()
+  if (!shelfBook) {
+    // 右键菜单会立刻调这个函数, 但书架数据是异步拉的 —— 还没到位时静默 return
+    // 会让用户以为「编辑信息」这个菜单项坏了。给一句明确反馈。
+    appStore.showToast('书架信息还没加载完，请稍后再试', 'warning')
+    return
+  }
+  const baseline = createBookEditDraft(shelfBook)
+  editBaseline.value = baseline
+  draft.value = { ...baseline }
+  pendingCoverUploads.value = []
+  coverFailed.value = false
+  isEditing.value = true
+}
+
+/** 还原: 回到「最初的书籍信息」(首次自定义之前的书名/作者/简介, 以及书源封面)。
+ *
+ *  只改表单, 仍需点「保存」才写入 —— 与编辑页其它改动保持一致, 也让用户能先看清
+ *  还原后的样子再决定。 */
+function revertEdit() {
+  const shelfBook = findShelfBook()
+  if (!shelfBook) return
+  draft.value = resolveRevertDraft(shelfBook, editBaseline.value)
+  coverFailed.value = false
+}
+
+function cancelEdit() {
+  isEditing.value = false
+  savingEdit.value = false
+  // 取消时已上传的文件留在磁盘上, 但 UI 不该再记得它们。
+  pendingCoverUploads.value = []
+}
+
+/** 恢复书源自带的封面: 清空自定义封面即可回落到 coverUrl。 */
+function resetCover() {
+  draft.value.customCoverUrl = ''
+  coverFailed.value = false
+}
+
+async function handleCoverFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  // 无论成败都要清空, 否则同一张图再选一次不会触发 change。
+  input.value = ''
+  if (!file || uploadingCover.value) return
+
+  const invalid = validateCoverFile(file)
+  if (invalid) {
+    appStore.showToast(invalid, 'error')
+    return
+  }
+
+  uploadingCover.value = true
+  try {
+    const url = await uploadBookCover(file)
+    draft.value.customCoverUrl = url
+    pendingCoverUploads.value = [...pendingCoverUploads.value, url]
+    coverFailed.value = false
+  } catch (error) {
+    appStore.showToast((error as Error).message || '封面上传失败', 'error')
+  } finally {
+    uploadingCover.value = false
+  }
+}
+
+async function saveEdit() {
+  const shelfBook = findShelfBook()
+  if (!shelfBook || savingEdit.value) return
+  // 上传还没结束就保存的话, 提交的仍是旧封面, 而用户以为保存成功了。
+  if (uploadingCover.value) {
+    appStore.showToast('封面还在上传，请稍候再保存', 'error')
+    return
+  }
+
+  const invalid = validateBookEditDraft(draft.value)
+  if (invalid) {
+    appStore.showToast(invalid, 'error')
+    return
+  }
+  const next = normalizeBookEditDraft(draft.value)
+
+  savingEdit.value = true
+  const bookKeyAtSave = detailKey.value
+  try {
+    // 换封面时旧文件会变成孤儿, 保存后用它的 URL 清理(远程封面会被后端忽略)。
+    const obsolete = obsoleteCoverUrl(shelfBook.customCoverUrl, next.customCoverUrl)
+    // 首次自定义时把「编辑前」的值记成原始值, 之后不再变动 —— 这是「还原」能
+    // 回到最初样子的依据。已经记过的书这里返回空对象, 不会覆盖。
+    const originPatch = originPatchForSave(shelfBook, editBaseline.value)
+    // 原本没有值的字段若照 '' 回传, 会把后端的 None 写成 Some(""), 使
+    // merge_book 的「书源有简介就回填」判据失效 —— 用这个函数省略掉这类键。
+    const edited = editableFieldsForSave(shelfBook, next)
+    await saveBook({ ...shelfBook, ...originPatch, ...edited })
+    // 本次会话里传过但最终没被采用的图(换了两次 / 又点回原始封面)也要清掉。
+    const unused = pendingCoverUploads.value.filter((url) => url !== next.customCoverUrl)
+    if (bookKeyAtSave !== detailKey.value) return
+    await shelfStore.fetchBooks()
+    savedOverride.value = next
+    for (const url of [obsolete, ...unused]) {
+      if (!url) continue
+      // 清理失败不该让用户以为保存失败 —— 记录保存在前, 这里只是收尾。
+      await deleteBookCover(url).catch(() => undefined)
+    }
+    pendingCoverUploads.value = []
+    appStore.showToast('已保存书籍信息', 'success')
+    isEditing.value = false
+  } catch (error) {
+    if (bookKeyAtSave === detailKey.value) {
+      appStore.showToast((error as Error).message || '保存失败', 'error')
+    }
+  } finally {
+    savingEdit.value = false
+  }
+}
+
+/** 关窗/切书时退出编辑态, 避免下次打开还停在编辑中。
+ *  未保存的改动直接丢弃 —— 换封面上传的文件会留在磁盘上, 但那是几十 KB 的
+ *  无害孤儿, 不值得为它做一套回收机制。 */
+watch([() => props.modelValue, detailKey], ([visible]) => {
+  isEditing.value = false
+  savingEdit.value = false
+  pendingCoverUploads.value = []
+  // 换了另一本书就丢掉旧的覆盖值, 否则会显示成上一本改后的名字/封面。
+  savedOverride.value = null
+  // 书架右键「编辑信息」进来时直接落到编辑态。
+  // 用 nextTick 让书架数据/详情先就位, findShelfBook 才找得到这本书。
+  if (visible && props.startInEdit) {
+    void nextTick(() => startEdit())
+  }
+}, { immediate: true })
+
 /** The book to open for reading, preferring the user-selected source. */
 function activeBook(): Book {
   const base = props.book as Book
@@ -537,19 +855,31 @@ async function persistSourceSwitchIfNeeded() {
 async function startReading() {
   await persistSourceSwitchIfNeeded()
   const b = activeBook()
-  await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
-  await readerStore.loadBook(b)
+  // 置顶只是书架排序, 不该挡在跳转前面 —— 失败也无所谓, 不打断阅读。
+  void shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
   close()
+  // 先跳转、后加载: loadBook 自己会取目录并加载 durChapterIndex 那一章,
+  // 阅读页挂载时用 waitForChapterListReady 承接等待。
+  void readerStore.loadBook(b).catch((error: unknown) => {
+    appStore.showToast((error as Error).message || '加载书籍失败', 'error')
+  })
   router.push('/reader')
 }
 
+/** 打开指定章节。
+ *
+ *  先把目标章号写进传入的书(阅读页靠它决定初始章), 再立刻跳转 —— 目录抓取与正文
+ *  下载都在阅读页里进行, 用户点章节后马上就进入阅读页, 不再对着详情页干等。
+ *  注意绝不能 await loadBook/loadChapter: 那正是本次要消除的「加载完才跳转」。 */
 async function readChapter(index: number) {
   await persistSourceSwitchIfNeeded()
-  const b = activeBook()
-  await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
-  await readerStore.loadBook(b)
-  await readerStore.loadChapter(index)
+  // activeBook() 在未换源时返回 props.book 本身, 直接改会污染调用方的对象。
+  const b = { ...activeBook(), durChapterIndex: index, durChapterPos: 0 }
+  void shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
   close()
+  void readerStore.loadBook(b).catch((error: unknown) => {
+    appStore.showToast((error as Error).message || '加载章节失败', 'error')
+  })
   router.push('/reader')
 }
 
@@ -967,5 +1297,150 @@ async function removeFromShelf() {
 
 .action-btn.primary:hover {
   background: var(--color-primary-dark);
+}
+
+/* ─── 编辑书籍信息 ───
+   编辑态是一张独立的表单, 只放可编辑的四项; 书源/目录等只读信息不在此显示。 */
+.edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.edit-form-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 700;
+}
+
+.edit-cover-block {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.edit-cover {
+  position: relative;
+  flex-shrink: 0;
+  width: 96px;
+  height: 128px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--color-bg-sunken);
+  border: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.edit-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.edit-cover.empty {
+  border-style: dashed;
+}
+
+.edit-cover-empty {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+.edit-cover-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.edit-cover-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.edit-cover-note {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+.edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.edit-field-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.edit-field-input,
+.edit-field-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+}
+
+.edit-field-input:focus,
+.edit-field-textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-bg);
+}
+
+.edit-field-textarea {
+  resize: vertical;
+  line-height: 1.7;
+  min-height: 96px;
+}
+
+.cover-edit-btn {
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+
+.cover-edit-btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  border-color: var(--color-primary-border);
+}
+
+.cover-edit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cover-edit-btn.subtle {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.action-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 </style>

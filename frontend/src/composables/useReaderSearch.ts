@@ -1,5 +1,6 @@
 import { computed, nextTick, ref } from 'vue'
 import type { useReaderStore } from '../stores/reader'
+import { cancelPageScrollAnimation } from '../utils/readerPaging'
 
 type ReaderStore = ReturnType<typeof useReaderStore>
 
@@ -116,6 +117,9 @@ export function useReaderSearch(store: ReaderStore) {
       }
       const target = matches[targetIndex] as HTMLElement | undefined
       if (!target) return
+      // 翻页补间每帧写 scrollTop, 与 scrollIntoView 的平滑滚动会互抢位置。
+      // 搜索跳转是用户意图, 让补间先让位。
+      cancelPageScrollAnimation(target.closest('.reader-scroll-container') as HTMLElement | null)
       target.scrollIntoView({ block: 'center', behavior: 'smooth' })
       matches.forEach((item) => item.classList.remove('current-match'))
       target.classList.add('current-match')

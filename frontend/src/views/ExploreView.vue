@@ -44,6 +44,8 @@
           <BookGrid
             :books="store.books"
             :is-search="true"
+            :shelf-book-urls="shelfBookUrls"
+            :shelf-book-keys="shelfBookKeys"
             empty-text="暂无数据"
             @click="handleBookClick"
             @addToShelf="handleAddToShelf"
@@ -70,7 +72,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useExploreStore } from '../stores/explore'
 import { useReaderStore } from '../stores/reader'
@@ -85,10 +87,14 @@ import {
   isExploreCategorySection,
   type ExploreCategory,
 } from '../utils/exploreCategories'
+import { searchMergeKey } from '../utils/searchRank'
+import { isBookOnShelf } from '../utils/bookEdit'
+import { useBookshelfStore } from '../stores/bookshelf'
 
 const store = useExploreStore()
 const readerStore = useReaderStore()
 const appStore = useAppStore()
+const shelfStore = useBookshelfStore()
 const router = useRouter()
 
 const scrollContainer = ref<HTMLElement>()
@@ -96,7 +102,16 @@ const openingBookUrl = ref('')
 const selectedBook = ref<Book | SearchBook | null>(null)
 const showDetail = ref(false)
 
+// 已在书架的书集合, 用于发现页卡片显示「已加入」并禁用重复加入。
+// 少了这两个集合, 「加入书架」在本页永不 disabled, 点到已在书架的书会走
+// save_book 的整条覆盖分支, 把用户自定义的封面/简介等冲掉。
+const shelfBookUrls = computed(() => new Set(shelfStore.books.map((book) => book.bookUrl)))
+const shelfBookKeys = computed(() => new Set(shelfStore.books.map((book) => searchMergeKey(book))))
+
 onMounted(async () => {
+  // 书架为空时「已加入」标记与 join 判重全都失效(见 shelfBookUrls 注释),
+  // 所以本页必须自己保证书架数据到手; 失败不阻断发现页浏览。
+  void shelfStore.fetchBooks().catch(() => undefined)
   await store.init()
 })
 
@@ -135,6 +150,12 @@ async function handleBookClick(book: Book | SearchBook) {
 }
 
 async function handleAddToShelf(book: Book | SearchBook) {
+  // 已在书架就不能再走一遍 saveBook: 这里只提交 5 个字段, 而后端对同一本书是
+  // 整条覆盖, 会把用户自定义过的封面/简介等清空。卡片按钮与右键菜单两条入口都要挡。
+  if (isBookOnShelf(book, shelfStore.books)) {
+    appStore.showToast(`"${book.name}" 已在书架中`, 'warning')
+    return
+  }
   try {
     await saveBook({
       name: book.name,
@@ -143,6 +164,7 @@ async function handleAddToShelf(book: Book | SearchBook) {
       origin: book.origin,
       coverUrl: book.coverUrl,
     })
+    await shelfStore.fetchBooks()
     appStore.showToast(`"${book.name}" 已加入书架`, 'success')
   } catch (e: unknown) {
     appStore.showToast((e as Error).message, 'error')

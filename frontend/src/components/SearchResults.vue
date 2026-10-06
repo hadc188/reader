@@ -126,6 +126,7 @@ import { useSourceStore } from '../stores/source'
 import { searchBookMultiSSE } from '../api/search'
 import type { SseLike } from '../api/sse'
 import { saveBook } from '../api/bookshelf'
+import { isBookOnShelf } from '../utils/bookEdit'
 import {
   initializeSearchResult,
   isSearchResultRelevant,
@@ -460,6 +461,14 @@ function handleBookInfo(book: Book | SearchBook) {
 }
 
 async function handleAddToShelf(book: Book | SearchBook) {
+  // 函数级判重, 不能只靠 UI 置灰: 卡片禁用与右键菜单都依赖 shelfStore.books
+  // 已加载, 一旦它还是空(启动竞态/加载失败被静默吞掉), 两层拦截都会失效,
+  // 点下去就会走 save_book 的整条覆盖分支 —— 这里只提交 6 个字段, 会把用户
+  // 自定义的封面、简介、original_* 等一并清空。
+  if (isBookOnShelf(book, shelfStore.books)) {
+    appStore.showToast(`"${book.name}" 已在书架中`, 'warning')
+    return
+  }
   try {
     await saveBook({
       name: book.name,

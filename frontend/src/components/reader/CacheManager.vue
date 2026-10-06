@@ -307,9 +307,10 @@ function stopWorking() {
 }
 
 .cache-opt.primary {
-  background: var(--color-primary, #c97f3a);
-  border-color: var(--color-primary, #c97f3a);
-  color: white;
+  background: var(--color-selected-bg);
+  border-color: var(--color-selected-border);
+  color: var(--color-primary, #c97f3a);
+  font-weight: 600;
 }
 
 .cache-opt.danger {

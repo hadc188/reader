@@ -16,6 +16,11 @@ export interface Book {
   tocUrl?: string
   charset?: string
   customCoverUrl?: string
+  /** 首次自定义之前的原始值, 供「还原」回退。
+   *  后端是 Rust `Option<String>`, 未记录时经 JSON 往返为 `null`(key 存在)。 */
+  originalName?: string | null
+  originalAuthor?: string | null
+  originalIntro?: string | null
   canUpdate?: boolean
   durChapterIndex?: number
   durChapterPos?: number

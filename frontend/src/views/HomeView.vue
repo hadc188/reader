@@ -151,6 +151,7 @@
     <BookDetailModal
       v-model="showDetail"
       :book="selectedBook"
+      :start-in-edit="openDetailInEdit"
     />
 
     <!-- Group Select Modal -->
@@ -166,7 +167,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
@@ -189,10 +190,18 @@ const appStore = useAppStore()
 
 const showDetail = ref(false)
 const showGroupSelect = ref(false)
+/** 右键「移入分组」时记住目标书; 为空表示走批量(编辑模式多选)路径。 */
+const groupTargetBookUrl = ref('')
 const showGroupManager = ref(false)
 const showCacheManager = ref(false)
 const showExportModal = ref(false)
 const selectedBook = ref<Book | SearchBook | null>(null)
+/** 本次打开详情弹窗是否直接进入编辑态(书架右键「编辑信息」)。 */
+const openDetailInEdit = ref(false)
+// 关闭后清掉, 避免下次打开沿用上一次的「直接编辑」意图。
+watch(showDetail, (visible) => {
+  if (!visible) openDetailInEdit.value = false
+})
 const openingBookUrl = ref('')
 const localBookFileInputRef = ref<HTMLInputElement | null>(null)
 const localBookUploading = ref(false)
@@ -268,7 +277,13 @@ async function handleBookClick(book: Book | SearchBook) {
 }
 
 function handleBookInfo(book: Book | SearchBook) {
+  openDetail(book, false)
+}
+
+/** 打开详情弹窗。editNow 为真时直接落到编辑态(书架右键「编辑信息」)。 */
+function openDetail(book: Book | SearchBook, editNow: boolean) {
   selectedBook.value = book
+  openDetailInEdit.value = editNow
   showDetail.value = true
 }
 
@@ -290,8 +305,10 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   const menuItems = [
     { label: '开始阅读', action: () => handleBookClick(book) },
     { label: '查看详情', action: () => handleBookInfo(book) },
+    { label: '编辑信息', action: () => openDetail(book, true) },
     { divider: true },
-    { label: '移入分组', action: () => { showGroupSelect.value = true } },
+    // 单本移入分组: 记下这本书, 选中集此时必然是空的(编辑模式不弹本菜单)。
+    { label: '移入分组', action: () => openGroupSelect(book.bookUrl) },
     { label: '缓存管理', action: () => { showCacheManager.value = true } },
     { divider: true },
     { label: '删除', danger: true, action: () => handleDeleteBook(book) },
@@ -319,16 +336,31 @@ async function handleBulkDelete() {
 }
 
 async function handleBulkMove() {
+  openGroupSelect('')
+}
+
+/** 打开分组选择弹窗。`bookUrl` 非空表示单本移入, 空表示批量(编辑模式多选)。 */
+function openGroupSelect(bookUrl: string) {
+  groupTargetBookUrl.value = bookUrl
   showGroupSelect.value = true
 }
 
 async function handleSetGroup(groupId: number) {
-  const count = shelfStore.selectedBookUrls.size
+  const target = groupTargetBookUrl.value
   try {
-    await shelfStore.bulkSetGroup(groupId)
-    appStore.showToast(`成功将 ${count} 本书移至新分组`, 'success')
+    if (target) {
+      // 单本: 右键菜单路径。不能走 bulkSetGroup —— 那时选中集为空, 会静默什么都不做。
+      await shelfStore.setBookGroup(target, groupId)
+      appStore.showToast('已移入分组', 'success')
+    } else {
+      const count = shelfStore.selectedBookUrls.size
+      await shelfStore.bulkSetGroup(groupId)
+      appStore.showToast(`成功将 ${count} 本书移至新分组`, 'success')
+    }
   } catch (e: any) {
     appStore.showToast(e.message, 'error')
+  } finally {
+    groupTargetBookUrl.value = ''
   }
 }
 async function handleReorderBooks(payload: { draggedUrl: string; targetUrl: string }) {

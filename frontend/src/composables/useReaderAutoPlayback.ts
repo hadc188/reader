@@ -1,5 +1,6 @@
 import type { ComputedRef, Ref } from 'vue'
 import type { useReaderStore } from '../stores/reader'
+import { cancelPageScrollAnimation } from '../utils/readerPaging'
 
 type ReaderStore = ReturnType<typeof useReaderStore>
 const OPENAI_SPEECH_CHUNK_CHAR_LIMIT = 70
@@ -322,6 +323,9 @@ export function useReaderAutoPlayback(
     if (!container || !paragraph) return
 
     const targetTop = Math.max(0, paragraph.offsetTop - 24)
+    // 朗读推进是用户意图, 先让翻页补间让位, 否则补间每帧写回的 scrollTop
+    // 会把本次滚动顶掉。
+    cancelPageScrollAnimation(container)
     container.scrollTo({
       top: targetTop,
       behavior: smooth ? 'smooth' : 'auto',
@@ -356,9 +360,10 @@ export function useReaderAutoPlayback(
     const deltaMs = lastAutoScrollTime ? Math.min(100, now - lastAutoScrollTime) : 16
     lastAutoScrollTime = now
 
-    // 必须显式 instant: 容器 CSS 是 scroll-behavior: smooth, 直接赋 scrollTop
-    // 会被转成慢启动的平滑动画, 每帧重启动画的起步段, 步长越大实际越慢。
-    // 位移按整像素滚动, 不足 1px 的部分累积到下一帧, 低速(如 2px/秒)也能匀速前进。
+    // 必须显式 instant: 直接赋 scrollTop 会被 CSS 平滑转成慢启动动画, 每帧重启
+    // 动画的起步段, 步长越大实际越慢(容器 scroll-behavior 现为 auto, 但这条
+    // 防御对未来的样式改动仍成立)。位移按整像素滚动, 不足 1px 的部分累积到
+    // 下一帧, 低速(如 2px/秒)也能匀速前进。
     const raw = (config.value.autoScrollSpeed * deltaMs) / 1000 + autoScrollRemainder
     const whole = Math.floor(raw)
     autoScrollRemainder = raw - whole

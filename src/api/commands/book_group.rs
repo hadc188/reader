@@ -10,6 +10,30 @@ pub struct GroupIdParam {
     group_id: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GroupIdsParam {
+    #[serde(rename = "groupIds", default)]
+    group_ids: Vec<i64>,
+}
+
+/// 批量删除分组。一次读改写, 避免逐个删除时的 N 次全量重写。
+#[tauri::command]
+pub async fn delete_book_groups(
+    state: tauri::State<'_, AppState>,
+    req: GroupIdsParam,
+) -> Result<ApiResponse<Value>, AppError> {
+    let user_ns = "default";
+    // 去重, 免得同一个 id 传两次把计数算错。
+    let mut ids = req.group_ids;
+    ids.sort_unstable();
+    ids.dedup();
+    let removed = state
+        .book_group_service
+        .delete_groups(user_ns, &ids)
+        .await?;
+    Ok(ApiResponse::ok(serde_json::json!({ "removed": removed })))
+}
+
 #[tauri::command]
 pub async fn get_book_groups(
     state: tauri::State<'_, AppState>,

@@ -63,6 +63,7 @@ import UpdateProgressDialog from './components/UpdateProgressDialog.vue'
 import ContextMenu from './components/ContextMenu.vue'
 import TitleBar from './components/TitleBar.vue'
 import { resolveWindowClose } from './utils/windowClose'
+import { resolveShellBackgroundImage } from './utils/readerColor'
 
 const route = useRoute()
 const appStore = useAppStore()
@@ -76,19 +77,38 @@ const titlebarSurface = computed<'settings' | 'reader-panel' | null>(() => {
   if (route.name === 'reader' && readerStore.activePanel) return 'reader-panel'
   return null
 })
-const showCustomBackground = computed(() => {
-  if (!readerStore.config.backgroundImage) return false
-  return route.name !== 'reader' || readerStore.config.applyBackgroundToReader
+const showCustomBackground = computed(() => Boolean(shellBackgroundImage.value))
+const shellBackgroundImage = computed(() => {
+  const onReader = route.name === 'reader'
+  // 不按页面清空参数: 由 resolveShellBackgroundImage 自己按 onReader 分流。
+  // 早先在这里把阅读页专属参数置空, 配合函数内部的阅读页优先级, 会让
+  // applyBackgroundToReader=false 时连桌面背景都判成空。
+  return resolveShellBackgroundImage({
+    customBackgroundColor: readerStore.readerBackgroundColor,
+    readerBackgroundImage: readerStore.config.readerBackgroundImage,
+    backgroundImage: readerStore.config.backgroundImage,
+    applyBackgroundToReader: readerStore.config.applyBackgroundToReader,
+  }, onReader)
 })
 const appShellStyle = computed(() => ({
   background: route.name === 'reader'
-    ? readerStore.currentTheme.body
+    ? readerStore.readerTheme.body
     : 'var(--color-bg)',
 }))
-const customBackgroundStyle = computed(() => ({
-  backgroundImage: `url(${readerStore.config.backgroundImage})`,
-  opacity: readerStore.config.backgroundOpacity,
-}))
+const customBackgroundStyle = computed(() => {
+  // 透明度要跟着**实际铺出去的那张图**走: 铺的是阅读页专属图就用它的透明度,
+  // 否则用桌面图自己的。早先只看 readerBackgroundImage 是否存在, 于是在桌面页
+  // (铺的是桌面图)也会误用阅读页专属图的透明度。
+  const usingReaderImage = route.name === 'reader'
+    && Boolean(readerStore.config.readerBackgroundImage)
+  return {
+    // 图铺在外壳最底层(标题栏也在其中), 因此标题栏必须透明才能透出背景。
+    backgroundImage: shellBackgroundImage.value ? `url(${shellBackgroundImage.value})` : undefined,
+    opacity: usingReaderImage
+      ? readerStore.config.readerImageOpacity
+      : readerStore.config.backgroundOpacity,
+  }
+})
 
 const stopBackgroundClassSync = watch(showCustomBackground, (active) => {
   if (typeof document === 'undefined') return

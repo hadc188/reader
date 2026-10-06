@@ -38,3 +38,6 @@ test-results/
 toc_tmp.html
 *.tmp.html
 .ace-tool/
+
+# 改动前的临时回滚副本（内容已进版本库, 不必再存一份）
+backups/

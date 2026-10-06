@@ -1983,6 +1983,21 @@ impl BookService {
         if book.book_url.trim().is_empty() {
             return Err(AppError::BadRequest("bookUrl required".to_string()));
         }
+        // 空简介归一化回 None。
+        //
+        // `intro` 的 `None` 在这套数据里有个具体含义: 「还没有简介」。
+        // `merge_book` 正是用 `target.intro.is_none()` 判断「书源带回了简介就填进去」,
+        // 所以 `None` 与 `Some("")` **不能**混为一谈。
+        //
+        // 前端「编辑书籍信息 → 还原」会把原始值(可能是空)整份提交回来, 于是原本
+        // `None` 的简介会被写成 `Some("")` —— 那条回填判据从此永久失效, 换源/刷新
+        // 再也补不进新书源的简介。在这里统一收口, 任何调用方都逃不掉。
+        //
+        // 注意只动 `intro`, 不碰 `original_intro`: 后者的 `''` 表示「记录过且原始为空」,
+        // 是「还原」功能的依据, 归一化它会让还原目标丢失。
+        if book.intro.as_deref() == Some("") {
+            book.intro = None;
+        }
 
         let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
@@ -2017,6 +2032,18 @@ impl BookService {
             }
             if book.group.is_none() {
                 book.group = exist.group;
+            }
+            // 原始值一旦记下就不再被覆盖: 它代表「首次自定义之前的样子」。
+            // 前端会整份回传, 这里兜底是为了任何只传部分字段的调用方(以及
+            // 旧版本客户端)都不会把已记录的原始值冲掉。
+            if book.original_name.is_none() {
+                book.original_name = exist.original_name;
+            }
+            if book.original_author.is_none() {
+                book.original_author = exist.original_author;
+            }
+            if book.original_intro.is_none() {
+                book.original_intro = exist.original_intro;
             }
             list[i] = book.clone();
         } else {
@@ -3134,6 +3161,89 @@ mod tests {
             list[0].source_candidates.is_some(),
             "无关源不应被清理"
         );
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+    }
+
+    /// 造一个只用于简介归一化测试的 service。
+    fn cover_test_service(tag: &str) -> (BookService, PathBuf) {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-rust-intro-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let service = BookService::new(
+            HttpClient::new(5, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        (service, storage_dir)
+    }
+
+    #[tokio::test]
+    async fn empty_intro_is_normalized_back_to_none_on_save() {
+        // 回归测试: 前端「编辑信息 → 还原」会把原始简介整份提交回来, 原始为空时
+        // 提交的是 Some("")。若原样落库, `merge_book` 的 `intro.is_none()` 判据
+        // 就永久失效 —— 换源后再也补不进新书源的简介。save_book 必须把它收回 None。
+        let (service, storage_dir) = cover_test_service("normalize");
+        let book = Book {
+            book_url: "https://i.example.com/book/1".to_string(),
+            name: "书".to_string(),
+            author: "作者".to_string(),
+            origin: "https://i.example.com".to_string(),
+            intro: None,
+            ..Book::default()
+        };
+        service.save_book("default", book.clone()).await.unwrap();
+
+        // 带空简介保存(模拟还原)
+        let mut with_empty = book.clone();
+        with_empty.intro = Some(String::new());
+        service.save_book("default", with_empty).await.unwrap();
+
+        let list = service.read_bookshelf("default").await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(
+            list[0].intro.is_none(),
+            "空简介应被归一化回 None, 实际: {:?}",
+            list[0].intro
+        );
+
+        // 非空的简介当然要保留
+        let mut with_text = book.clone();
+        with_text.intro = Some("真实简介".to_string());
+        service.save_book("default", with_text).await.unwrap();
+        let list = service.read_bookshelf("default").await.unwrap();
+        assert_eq!(list[0].intro.as_deref(), Some("真实简介"));
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+    }
+
+    #[tokio::test]
+    async fn normalized_intro_still_allows_source_backfill() {
+        // 归一化的意义所在: 简介保持 None 才允许「书源带回了简介就填进去」。
+        // `merge_book`(在 api/commands/book.rs) 的判据就是 `target.intro.is_none()`,
+        // 这里不复刻那个函数, 只守住它依赖的不变量 —— 简介落库后必须是 None。
+        let (service, storage_dir) = cover_test_service("backfill");
+        let book = Book {
+            book_url: "https://j.example.com/book/1".to_string(),
+            name: "书".to_string(),
+            author: "作者".to_string(),
+            origin: "https://j.example.com".to_string(),
+            intro: Some(String::new()),
+            ..Book::default()
+        };
+        service.save_book("default", book).await.unwrap();
+
+        let saved = service.read_bookshelf("default").await.unwrap();
+        assert_eq!(saved.len(), 1);
+        // 这条断言就是 merge_book 能回填的前提: 空简介入库后仍是 None。
+        // 若哪天归一化被删掉, 这里会变成 Some(""), 回填能力静默失效。
+        assert!(
+            saved[0].intro.is_none(),
+            "空简介入库后必须是 None, 否则「书源简介回填」永久失效; 实际: {:?}",
+            saved[0].intro
+        );
+
         let _ = tokio::fs::remove_dir_all(&storage_dir).await;
     }
 

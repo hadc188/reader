@@ -218,11 +218,12 @@ export function useContinuousReading(
       if (generation !== continuousGeneration || !isContinuousMode.value) return
       if (container) {
         const anchor = container.querySelector(anchorSelector) as HTMLElement | null
-        // The scroll container disables native scroll anchoring and sets CSS
-        // scroll-behavior: smooth, so pin the viewport back to the content the
-        // user was reading with an explicit instant jump: how far the anchor
-        // moved equals the height inserted above it. Measured off the CURRENT
-        // scrollTop so scrolling during the fetch is not fought.
+        // The scroll container disables native scroll anchoring, so pin the
+        // viewport back to the content the user was reading with an explicit
+        // instant jump: how far the anchor moved equals the height inserted
+        // above it. Measured off the CURRENT scrollTop so scrolling during the
+        // fetch is not fought. instant 也避开「动画时长」补间 —— 这是一次校正,
+        // 不是翻页。翻页补间若在运行, 会在下一帧检测到本次赋值并自动让位。
         const anchorDelta = anchor ? anchor.offsetTop - previousAnchorOffset : 0
         container.scrollTo({
           top: Math.max(0, container.scrollTop + anchorDelta),
@@ -289,8 +290,8 @@ export function useContinuousReading(
         })()
     container.scrollTo({
       top: Math.max(0, targetTop),
-      // 'auto' would follow the container's CSS scroll-behavior: smooth and
-      // animate the jump across the prepended chapter.
+      // 跳章必须瞬时: 跨过前置章节的动画既慢又没意义。这里的 smooth 分支是
+      // 打开书/原地刷新时的定位, 走原生平滑而非「动画时长」补间。
       behavior: smooth ? 'smooth' : 'instant',
     })
   }

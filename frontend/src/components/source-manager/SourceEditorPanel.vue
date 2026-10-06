@@ -326,6 +326,17 @@ watch(
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
+  /* 输入光标同样别跟着主题走, 这个编辑器是固定深色底。 */
+  caret-color: #f4ede4;
+}
+
+/* 这个编辑器是固定深色的(不跟随主题), 所以不能用全局 ::selection ——
+   全局那套取 --color-text 作文字色, 亮色主题下是深灰 #20252a, 压在深色选区
+   上对比度只有 1.06:1, 选中内容等于隐形。这里给编辑器单独的选区配色,
+   亮/暗主题下都按其深色底来算。 */
+.editor-textarea::selection {
+  background: rgba(197, 111, 53, 0.42);
+  color: #f4ede4;
 }
 
 .editor-empty {

@@ -25,6 +25,17 @@ import {
   DEFAULT_READER_BACKGROUND_OPACITY,
   normalizeReaderBackgroundOpacity,
 } from '../utils/readerBackground'
+import { normalizeReaderColor } from '../utils/readerColor'
+import {
+  HOTKEY_ACTION_MAP,
+  bindActionToKey,
+  isDefaultHotkeyBindings,
+  listHotkeyConflicts,
+  normalizeHotkeyBindings,
+  unbindActionFromKey,
+  type HotkeyActionId,
+  type HotkeyBindings,
+} from '../utils/readerHotkeys'
 import {
   DEFAULT_OPENAI_BASE_URL,
   getSpeechApiFormatOption,
@@ -43,6 +54,8 @@ import { deleteCustomFont, listCustomFonts, uploadCustomFont, type CustomFontEnt
 const READER_SESSION_KEY = 'reader-last-session'
 const READER_READ_HISTORY_PREFIX = 'reader-read-history:'
 const READER_BACKGROUND_IMAGE_KEY = 'reader-background-image'
+/** 阅读页专属背景图: 与桌面背景图分开, 互不覆盖。 */
+const READER_PAGE_BACKGROUND_IMAGE_KEY = 'reader-page-background-image'
 const SERVER_PROGRESS_SCALE = 10000
 // 目录自动检查: 打开书后台静默检查的节流间隔 / 读到末章再翻页触发的检查节流间隔
 const TOC_OPEN_CHECK_INTERVAL_MS = 30 * 60 * 1000
@@ -79,6 +92,12 @@ export interface ReadConfig {
   backgroundImage: string
   backgroundOpacity: number
   applyBackgroundToReader: boolean
+  /** 阅读页背景色, '' 表示跟随主题。 */
+  readerBackgroundColor: string
+  /** 阅读页专属背景图(dataURL), 与桌面背景图相互独立。 */
+  readerBackgroundImage: string
+  /** 阅读页背景图透明度。 */
+  readerImageOpacity: number
 }
 
 const defaultConfig: ReadConfig = {
@@ -100,6 +119,9 @@ const defaultConfig: ReadConfig = {
   backgroundImage: '',
   backgroundOpacity: DEFAULT_READER_BACKGROUND_OPACITY,
   applyBackgroundToReader: true,
+  readerBackgroundColor: '',
+  readerBackgroundImage: '',
+  readerImageOpacity: DEFAULT_READER_BACKGROUND_OPACITY,
 }
 
 function loadConfig(): ReadConfig {
@@ -136,6 +158,13 @@ function loadConfig(): ReadConfig {
         applyBackgroundToReader: typeof savedConfig.applyBackgroundToReader === 'boolean'
           ? savedConfig.applyBackgroundToReader
           : true,
+        // 自定义配色来自 localStorage, 必须收紧为合法色值再进 style。
+        fontColor: normalizeReaderColor(savedConfig.fontColor),
+        readerBackgroundColor: normalizeReaderColor(savedConfig.readerBackgroundColor),
+        // 阅读页专属背景图与桌面背景图分开存(都是 dataURL, 不进 readConfig)。
+        readerBackgroundImage: localStorage.getItem(READER_PAGE_BACKGROUND_IMAGE_KEY)
+          || (typeof savedConfig.readerBackgroundImage === 'string' ? savedConfig.readerBackgroundImage : ''),
+        readerImageOpacity: normalizeReaderBackgroundOpacity(savedConfig.readerImageOpacity),
       }
     }
   } catch { /* ignore */ }
@@ -288,6 +317,9 @@ export const useReaderStore = defineStore('reader', () => {
   const preloadingContent = new Map<number, Promise<string | null>>()
   let chapterPreloadGeneration = 0
   const isAutoScrolling = ref(false)
+  /** 阅读页上/下工具栏是否呼出。由 ReaderView 维护, 标题栏据此决定是否实色
+   *  —— 阅读时标题栏透明(沉浸), 呼出工具栏时转为实色(清晰)。 */
+  const readerControlsVisible = ref(false)
   const chapterScrollProgress = ref(0)
   const readChapterKeys = ref<Set<string>>(new Set())
   const progressDirty = ref(false)
@@ -389,7 +421,9 @@ export const useReaderStore = defineStore('reader', () => {
 
   function saveConfig() {
     const persistedConfig: Partial<ReadConfig> = { ...config }
+    // 两张背景图都是 dataURL, 各自存在独立的 localStorage key 里, 不进 readConfig。
     delete persistedConfig.backgroundImage
+    delete persistedConfig.readerBackgroundImage
     localStorage.setItem('readConfig', JSON.stringify(persistedConfig))
   }
 
@@ -404,15 +438,69 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function resetConfig() {
+    // 这些是「阅读页外观」偏好: 与背景图同等对待, 重置排版参数时一并保留,
+    // 否则用户调一次字号就会把刚配好的阅读配色清掉。
     const backgroundPreferences = {
       backgroundImage: config.backgroundImage,
       backgroundOpacity: config.backgroundOpacity,
       applyBackgroundToReader: config.applyBackgroundToReader,
+      readerBackgroundColor: config.readerBackgroundColor,
+      readerBackgroundImage: config.readerBackgroundImage,
+      readerImageOpacity: config.readerImageOpacity,
+      fontColor: config.fontColor,
     }
     Object.assign(config, defaultConfig)
     Object.assign(config, backgroundPreferences)
     saveConfig()
   }
+
+  /* ─── Hotkeys ─── */
+  const HOTKEY_BINDINGS_KEY = 'reader-hotkeys'
+  const hotkeyBindings = ref<HotkeyBindings>(normalizeHotkeyBindings(readStoredHotkeys()))
+
+  function readStoredHotkeys(): unknown {
+    try {
+      const saved = localStorage.getItem(HOTKEY_BINDINGS_KEY)
+      return saved ? JSON.parse(saved) : null
+    } catch {
+      return null
+    }
+  }
+
+  function saveHotkeyBindings() {
+    localStorage.setItem(HOTKEY_BINDINGS_KEY, JSON.stringify(hotkeyBindings.value))
+  }
+
+  /** 覆写某个按键的绑定(空数组表示该键不执行任何动作)。 */
+  function setHotkeyBinding(keyId: string, actions: HotkeyActionId[]) {
+    const normalized = normalizeHotkeyBindings({ ...hotkeyBindings.value, [keyId]: actions })
+    hotkeyBindings.value = normalized
+    saveHotkeyBindings()
+  }
+
+  /** 「功能→按键」界面的绑定入口: 追加到末尾, 保留已有功能的优先次序。 */
+  function bindHotkeyKey(keyId: string, actionId: HotkeyActionId) {
+    hotkeyBindings.value = bindActionToKey(hotkeyBindings.value, keyId, actionId)
+    saveHotkeyBindings()
+  }
+
+  function unbindHotkeyKey(keyId: string, actionId: HotkeyActionId) {
+    hotkeyBindings.value = unbindActionFromKey(hotkeyBindings.value, keyId, actionId)
+    saveHotkeyBindings()
+  }
+
+  /** 当前所有「同模式多动作」冲突, 供设置界面提示。 */
+  const hotkeyConflicts = computed(() => listHotkeyConflicts(hotkeyBindings.value))
+
+  function resetHotkeyBindings() {
+    hotkeyBindings.value = normalizeHotkeyBindings(null)
+    saveHotkeyBindings()
+  }
+
+  const hotkeysAreDefault = computed(() => isDefaultHotkeyBindings(hotkeyBindings.value))
+
+  /** 设置界面矩阵: 供 UI 直接读取动作元信息。 */
+  const hotkeyActions = HOTKEY_ACTION_MAP
 
   function setBackgroundImage(dataUrl: string) {
     try {
@@ -426,6 +514,20 @@ export const useReaderStore = defineStore('reader', () => {
   function clearBackgroundImage() {
     localStorage.removeItem(READER_BACKGROUND_IMAGE_KEY)
     config.backgroundImage = ''
+  }
+
+  function setReaderBackgroundImage(dataUrl: string) {
+    try {
+      localStorage.setItem(READER_PAGE_BACKGROUND_IMAGE_KEY, dataUrl)
+      config.readerBackgroundImage = dataUrl
+    } catch {
+      throw new Error('阅读页背景图片保存失败，请选择尺寸更小的图片')
+    }
+  }
+
+  function clearReaderBackgroundImage() {
+    localStorage.removeItem(READER_PAGE_BACKGROUND_IMAGE_KEY)
+    config.readerBackgroundImage = ''
   }
 
   const chineseConverter = ref<((text: string) => string) | null>(null)
@@ -461,6 +563,26 @@ export const useReaderStore = defineStore('reader', () => {
     if (isNight.value) return themePresets[nightThemeIndex]
     return themePresets[themeIndex.value] || themePresets[0]
   })
+  /** 阅读页实际使用的配色: 自定义色覆盖主题预设的同名字段。
+   *  只覆盖阅读页, 弹层等界面仍走 chromeTheme 的主题色。 */
+  const readerTheme = computed<ThemePreset>(() => {
+    const activeTheme = currentTheme.value
+    const backgroundColor = normalizeReaderColor(config.readerBackgroundColor)
+    const color = normalizeReaderColor(config.fontColor)
+    if (!backgroundColor && !color) return activeTheme
+    return {
+      ...activeTheme,
+      body: backgroundColor || activeTheme.body,
+      content: backgroundColor || activeTheme.content,
+      fontColor: color || activeTheme.fontColor,
+      // popup 也要跟着走: 它是阅读页顶栏与工具栏的**实色**背景。若仍用预设的
+      // popup, 设了自定义阅读背景色之后, 呼出工具栏会在正文底色上方贴一条
+      // 预设色的栏, 两截颜色对不上。(与 backgroundColor 同色, 拼成连续一条。)
+      popup: backgroundColor || activeTheme.popup,
+    }
+  })
+  /** 阅读页背景色(已归一化)。空串表示跟随主题 / 让位给桌面背景图。 */
+  const readerBackgroundColor = computed(() => normalizeReaderColor(config.readerBackgroundColor))
   const chromeTheme = computed<ThemePreset>(() => {
     const activeTheme = currentTheme.value
     if (!config.backgroundImage || !config.applyBackgroundToReader) return activeTheme
@@ -2246,8 +2368,9 @@ export const useReaderStore = defineStore('reader', () => {
       consumeLegadoPositionRestoreCompleted,
       persistProgress, flushProgressToServer, flushProgressToServerKeepalive,
       config, updateConfig, resetConfig, saveConfig, setBackgroundImage, clearBackgroundImage,
+      setReaderBackgroundImage, clearReaderBackgroundImage,
       customFonts, fetchCustomFonts, importCustomFont, removeCustomFont, customFontFamily,
-    themeIndex, isNight, currentTheme, chromeTheme, setThemeIndex, toggleNight,
+    themeIndex, isNight, currentTheme, chromeTheme, readerTheme, readerBackgroundColor, setThemeIndex, toggleNight,
     autoReading, autoReadingTimer, toggleAutoReading, stopAutoReading,
     activePanel, openPanel, togglePanel, backPanel, closePanel,
     bookmarks, fetchBookmarks, addBookmark, removeBookmark, removeBookmarks,
@@ -2262,5 +2385,8 @@ export const useReaderStore = defineStore('reader', () => {
     setOpenAISpeechSource, setSpeechApiFormat, setOpenAISpeechBaseUrl, setSpeechProxyUrl, setOpenAISpeechApiKey, setOpenAISpeechModel, setOpenAISpeechVoice, setOpenAISpeechFormat, setOpenAISpeechRequestMode, preloadOpenAITTS,
     displayContent, processContentForDisplay,
     isAutoScrolling,
+    readerControlsVisible,
+    hotkeyBindings, hotkeyActions, hotkeysAreDefault, setHotkeyBinding, resetHotkeyBindings,
+    bindHotkeyKey, unbindHotkeyKey, hotkeyConflicts,
   }
 })

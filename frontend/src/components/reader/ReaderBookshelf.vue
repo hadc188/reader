@@ -15,7 +15,7 @@
         :class="{ current: book.bookUrl === readerStore.book?.bookUrl }"
         @click="openBook(book)"
       >
-        <img v-if="getCoverUrl(book.coverUrl)" :src="getCoverUrl(book.coverUrl)" class="book-cover" />
+        <img v-if="shelfCover(book)" :src="shelfCover(book)" class="book-cover" />
         <div v-else class="book-cover placeholder">无封面</div>
         
         <div class="book-info">
@@ -42,6 +42,11 @@ const theme = computed(() => readerStore.chromeTheme)
 
 if (!store.books.length) {
   store.fetchBooks()
+}
+
+/** 书架项的封面: 自定义封面优先于书源自带封面, 与书架页 BookCard 保持一致。 */
+function shelfCover(book: Book) {
+  return getCoverUrl(book.customCoverUrl || book.coverUrl)
 }
 
 async function openBook(book: Book) {

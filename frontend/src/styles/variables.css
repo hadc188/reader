@@ -25,6 +25,12 @@
   --color-primary-rgb: 197, 111, 53;
   --color-primary-bg: rgba(197, 111, 53, 0.09);
   --color-primary-border: rgba(197, 111, 53, 0.28);
+  /* 选中态: 淡色底 + 主色文字/描边, 取代整块纯主色填充。
+     纯色块在浅色主题里过重, 一片橙会盖掉层次; 淡底既能表达选中,
+     又能保留文字的可读性与界面的通透感。主色实心只留给主操作按钮。 */
+  --color-selected-bg: color-mix(in srgb, var(--color-primary) 13%, transparent);
+  --color-selected-bg-hover: color-mix(in srgb, var(--color-primary) 19%, transparent);
+  --color-selected-border: color-mix(in srgb, var(--color-primary) 42%, transparent);
 
   /* Accent */
   --color-accent: #347f92;
@@ -126,6 +132,19 @@
   --color-primary-rgb: 223, 154, 105;
   --color-primary-bg: rgba(223, 154, 105, 0.11);
   --color-primary-border: rgba(223, 154, 105, 0.3);
+  /* 暗色选中态: 底色用**中性提亮**, 而非主色半透明。
+     暗色卡片底是冷蓝灰(#1e2124, 色相 210°), 主色色相 25° —— 两者相距 175°,
+     接近互补。接近互补的色相按 16% 大面积混合会互相抵消饱和度, 得到 #3D342F
+     这种"浑浊褐灰": 既不是干净的灰, 也不是明确的橙, 和周围冷灰调不到一起。
+     浅色主题不存在这个问题(底色 #ffffff 是无彩色, 没有色相可冲突), 所以只在
+     暗色下改动 —— 橙色改由描边与文字承载, 细线条不会被色相冲突拖浑。 */
+  --color-selected-bg: rgba(255, 255, 255, 0.07);
+  --color-selected-bg-hover: rgba(255, 255, 255, 0.11);
+  /* 描边浓度对齐浅色主题: 浅色是主色 42%(在白底上 1.65:1), 用户认可那个强度。
+     暗色底更暗, 同样的 1.65:1 只需要 26% —— 早先写 55%(3.05:1) 在深底上像一圈
+     亮橙环, 还会和行内满强度的橙色复选框抢注意力。选中信号由 复选框 + 文字色
+     共同承担, 描边只需给出轮廓。 */
+  --color-selected-border: color-mix(in srgb, var(--color-primary) 26%, transparent);
 
   --color-bg: #151719;
   --color-bg-elevated: #1e2124;

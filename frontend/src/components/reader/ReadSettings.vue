@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div
     class="read-settings"
     :class="{ 'is-dark': isDarkSettings }"
@@ -11,7 +11,11 @@
   >
     <div class="settings-header">
       <h3 class="settings-title">设置</h3>
-      <button class="reset-btn" @click="store.resetConfig()">重置为默认配置</button>
+      <button
+        class="reset-btn"
+        title="重置排版参数；阅读配色与背景图会保留"
+        @click="store.resetConfig()"
+      >重置为默认配置</button>
     </div>
     <div class="settings-sep"></div>
 
@@ -41,6 +45,109 @@
           >
             <svg v-if="isThemeActive(i)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6 9 17l-5-5" /></svg>
           </button>
+        </div>
+      </div>
+
+      <!-- 自定义阅读配色 -->
+      <div class="setting-block">
+        <div class="setting-block-head">
+          <label>阅读配色</label>
+          <button
+            v-if="config.readerBackgroundColor || config.fontColor"
+            class="link-btn"
+            @click="resetReaderColors"
+          >还原默认</button>
+        </div>
+        <div class="color-grid">
+          <div class="color-card" :class="{ customized: config.readerBackgroundColor }">
+            <span class="color-card-label">背景</span>
+            <label class="color-swatch" :style="{ background: config.readerBackgroundColor || theme.body }">
+              <input
+                class="color-input"
+                type="color"
+                :value="config.readerBackgroundColor || theme.body"
+                @input="store.updateConfig('readerBackgroundColor', ($event.target as HTMLInputElement).value)"
+              >
+            </label>
+            <span class="color-card-value">{{ config.readerBackgroundColor || '跟随主题' }}</span>
+            <button
+              v-if="config.readerBackgroundColor"
+              class="icon-btn"
+              title="还原为跟随主题"
+              @click="store.updateConfig('readerBackgroundColor', '')"
+            >×</button>
+          </div>
+          <div class="color-card" :class="{ customized: config.fontColor }">
+            <span class="color-card-label">文字</span>
+            <label class="color-swatch" :style="{ background: config.fontColor || theme.fontColor }">
+              <input
+                class="color-input"
+                type="color"
+                :value="config.fontColor || theme.fontColor"
+                @input="store.updateConfig('fontColor', ($event.target as HTMLInputElement).value)"
+              >
+            </label>
+            <span class="color-card-value">{{ config.fontColor || '跟随主题' }}</span>
+            <button
+              v-if="config.fontColor"
+              class="icon-btn"
+              title="还原为跟随主题"
+              @click="store.updateConfig('fontColor', '')"
+            >×</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 阅读页背景图 -->
+      <div class="setting-block">
+        <div class="setting-block-head">
+          <label>阅读页背景图</label>
+          <button
+            v-if="config.readerBackgroundImage"
+            class="link-btn danger"
+            @click="removeReaderBackgroundImage"
+          >移除</button>
+        </div>
+        <div class="image-picker-row">
+          <button
+            class="image-thumb"
+            :class="{ empty: !config.readerBackgroundImage }"
+            type="button"
+            :disabled="processingReaderImage"
+            :style="config.readerBackgroundImage
+              ? { backgroundImage: `url(${config.readerBackgroundImage})` }
+              : undefined"
+            @click="readerImageInputRef?.click()"
+          >
+            <span v-if="!config.readerBackgroundImage">点击选择图片</span>
+          </button>
+          <div class="image-picker-meta">
+            <button class="opt-btn" type="button" :disabled="processingReaderImage" @click="readerImageInputRef?.click()">
+              {{ processingReaderImage ? '正在处理…' : (config.readerBackgroundImage ? '更换图片' : '选择图片') }}
+            </button>
+            <span class="image-picker-note">仅用于阅读页，与桌面背景图互不影响</span>
+          </div>
+          <input
+            ref="readerImageInputRef"
+            class="hidden-input"
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/bmp"
+            hidden
+            @change="handleReaderImageChange"
+          >
+        </div>
+        <div v-if="config.readerBackgroundImage" class="inline-slider">
+          <label for="reader-image-opacity">透明度</label>
+          <input
+            id="reader-image-opacity"
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            :value="config.readerImageOpacity"
+            @input="store.updateConfig('readerImageOpacity', Number(($event.target as HTMLInputElement).value))"
+          >
+          <output>{{ Math.round(config.readerImageOpacity * 100) }}%</output>
         </div>
       </div>
 
@@ -167,13 +274,11 @@
       <div class="setting-row">
         <label>页面宽度</label>
         <div class="stepper">
-          <button class="step-btn" @click="step('pageWidth', -50, 400, 1200)">目-</button>
+          <button class="step-btn" @click="step('pageWidth', -50, 400, 1200)" title="减小页面宽度">−</button>
           <span class="step-val">{{ config.pageWidth }}</span>
-          <button class="step-btn" @click="step('pageWidth', 50, 400, 1200)">目+</button>
+          <button class="step-btn" @click="step('pageWidth', 50, 400, 1200)" title="增大页面宽度">+</button>
         </div>
       </div>
-
-      <div class="setting-hint shortcut-hint">按住 Ctrl 并滚动鼠标滚轮，也可以快速调整字体大小。</div>
       </section>
 
       <section v-show="activeSettingsTab === 'paging'" class="settings-group">
@@ -384,10 +489,6 @@
             </button>
           </div>
         </div>
-
-        <div class="setting-hint">
-          请按服务商文档填写地址、模型和音色。网络无法直连时可填写本机 HTTP 代理。服务地址、代理和密钥仅保存在当前设备。
-        </div>
       </template>
 
       <div class="setting-row setting-row-top">
@@ -422,6 +523,64 @@
 
       <section v-show="activeSettingsTab === 'more'" class="settings-group">
 
+      <!-- 快捷键: 以「功能」为主轴, 一个功能可绑多个按键 -->
+      <div class="setting-block">
+        <div class="setting-block-head">
+          <label>快捷键</label>
+          <div class="hotkey-head-actions">
+            <span class="block-tag">{{ store.hotkeysAreDefault ? '默认方案' : '自定义' }}</span>
+            <button class="link-btn" type="button" @click="store.resetHotkeyBindings()">恢复默认</button>
+          </div>
+        </div>
+        <div class="function-list">
+          <div v-for="action in bindableActions" :key="action.id" class="function-item">
+            <div class="function-name">
+              <span>{{ action.label }}</span>
+              <span v-if="action.scope !== 'both'" class="function-scope">
+                {{ action.scope === 'paged' ? '分页' : '滚动' }}
+              </span>
+            </div>
+            <div class="function-keys">
+              <span v-if="!keysForAction(action.id).length" class="function-empty">未绑定</span>
+              <button
+                v-for="keyId in keysForAction(action.id)"
+                :key="keyId"
+                type="button"
+                class="key-chip"
+                :class="{ conflict: keyHasConflict(keyId) }"
+                :title="keyHasConflict(keyId) ? keyConflictTitle(keyId) : '点击解除绑定'"
+                @click="unbindKey(action.id, keyId)"
+              >
+                {{ hotkeyLabel(keyId) }}
+                <span v-if="keyHasConflict(keyId)" class="key-chip-warn">!</span>
+                <span class="key-chip-remove">×</span>
+              </button>
+              <!-- 录入按键: 点开后直接按键盘, 任意键都能绑。
+                   平时只留一个「＋」, 悬停或键盘聚焦到该行才显形 —— 十四个功能
+                   各挂一个虚线框会连成一片噪音。 -->
+              <button
+                v-if="capturingAction !== action.id"
+                type="button"
+                class="key-capture"
+                :title="`按下任意键为「${action.label}」绑定快捷键`"
+                :aria-label="`为「${action.label}」录入快捷键`"
+                @click="startCapture(action.id)"
+              >＋</button>
+              <span v-else class="key-capturing">
+                请按键…
+                <button type="button" class="key-capture-cancel" @click="cancelCapture">取消</button>
+              </span>
+            </div>
+          </div>
+        </div>
+        <div v-if="conflictNotices.length" class="conflict-notice">
+          <div v-for="notice in conflictNotices" :key="`${notice.key}-${notice.mode}`" class="conflict-line">
+            <span class="conflict-key">{{ keyLabel(notice.key) }}</span>
+            在{{ notice.mode }}模式下只会执行「{{ notice.winner }}」，「{{ notice.ignored }}」不会触发
+          </div>
+        </div>
+      </div>
+
       <!-- 更多操作 -->
       <div class="setting-row">
         <label>离线缓存</label>
@@ -438,7 +597,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useReaderStore, themePresets, nightThemeIndex, fontPresets } from '../../stores/reader'
 import { useAppStore } from '../../stores/app'
 import {
@@ -448,6 +607,15 @@ import {
   type SpeechAudioFormat,
 } from '../../utils/openaiSpeech'
 import { READER_FONT_SIZE_MAX, READER_FONT_SIZE_MIN } from '../../utils/readerFontSize'
+import { prepareReaderBackgroundImage } from '../../utils/readerBackground'
+import {
+  HOTKEY_ACTIONS,
+  HOTKEY_ACTION_MAP,
+  HOTKEY_KEYS,
+  hotkeyIdFromEvent,
+  hotkeyLabel,
+  type HotkeyActionId,
+} from '../../utils/readerHotkeys'
 
 const store = useReaderStore()
 const appStore = useAppStore()
@@ -492,6 +660,140 @@ const config = computed(() => store.config)
 const theme = computed(() => store.chromeTheme)
 const isDarkSettings = computed(() => store.isNight || theme.value.name === '暗灰')
 const selectedSpeechApiFormat = computed(() => getSpeechApiFormatOption(store.speechConfig.apiFormat))
+
+/* ─── 阅读页背景图 ─── */
+const readerImageInputRef = ref<HTMLInputElement | null>(null)
+const processingReaderImage = ref(false)
+
+async function handleReaderImageChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  processingReaderImage.value = true
+  try {
+    store.setReaderBackgroundImage(await prepareReaderBackgroundImage(file))
+    appStore.showToast('阅读页背景图已更新', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '背景图片处理失败', 'error')
+  } finally {
+    processingReaderImage.value = false
+    input.value = ''
+  }
+}
+
+function removeReaderBackgroundImage() {
+  store.clearReaderBackgroundImage()
+  appStore.showToast('已移除阅读页背景图', 'success')
+}
+
+/** 一键把背景色与文字色都还原为跟随主题。 */
+function resetReaderColors() {
+  store.updateConfig('readerBackgroundColor', '')
+  store.updateConfig('fontColor', '')
+}
+
+/* ─── Hotkeys ─── */
+/** 可绑定的功能列表。排除「不操作」: 它是某个按键的行为(解除该键的一切动作),
+ *  不是一条可以分配按键的「功能」, 列在这里会让语义混乱。 */
+const bindableActions = computed(() => HOTKEY_ACTIONS.filter((action) => action.id !== 'none'))
+
+/** 正在等待录入的「功能」。非 null 时监听键盘, 按下任意键即绑定。 */
+const capturingAction = ref<HotkeyActionId | null>(null)
+
+/** 该功能已绑定的按键 id(按当前绑定里的顺序, 保持录入顺序稳定)。 */
+function keysForAction(actionId: HotkeyActionId): string[] {
+  return Object.keys(store.hotkeyBindings)
+    .filter((keyId) => (store.hotkeyBindings[keyId] || []).includes(actionId))
+    // 内置预设键排前面(按预设顺序), 用户自建的组合键排后面。
+    .sort((a, b) => {
+      const ia = HOTKEY_KEYS.findIndex((key) => key.id === a)
+      const ib = HOTKEY_KEYS.findIndex((key) => key.id === b)
+      if (ia >= 0 && ib >= 0) return ia - ib
+      if (ia >= 0) return -1
+      if (ib >= 0) return 1
+      return a.localeCompare(b)
+    })
+}
+
+/** 录入按键: 按下任意键即绑到当前功能。
+ *
+ *  用捕获阶段监听, 并 stopPropagation, 否则同一次按键会先被阅读页的
+ *  handleKeydown 处理(比如按「↓」直接翻页), 设置面板反而收不到。 */
+function handleCaptureKeydown(event: KeyboardEvent) {
+  if (!capturingAction.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (event.key === 'Escape' && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    // Esc 是「取消录入」的约定键, 不能既当取消又当绑定目标。
+    cancelCapture()
+    return
+  }
+  const keyId = hotkeyIdFromEvent(event)
+  if (!keyId) return
+  const actionId = capturingAction.value
+  capturingAction.value = null
+  store.bindHotkeyKey(keyId, actionId)
+  appStore.showToast(`已绑定「${hotkeyLabel(keyId)}」`, 'success')
+}
+
+function startCapture(actionId: HotkeyActionId) {
+  capturingAction.value = actionId
+}
+
+function cancelCapture() {
+  capturingAction.value = null
+}
+
+watch(capturingAction, (active) => {
+  if (typeof window === 'undefined') return
+  if (active) window.addEventListener('keydown', handleCaptureKeydown, true)
+  else window.removeEventListener('keydown', handleCaptureKeydown, true)
+})
+
+onBeforeUnmount(() => {
+  if (typeof window === 'undefined') return
+  window.removeEventListener('keydown', handleCaptureKeydown, true)
+})
+
+function unbindKey(actionId: HotkeyActionId, keyId: string) {
+  store.unbindHotkeyKey(keyId, actionId)
+}
+
+/** 该按键上是否存在「同模式多动作」冲突; 有则给标签加警示样式。
+ *  运行时只执行第一个适用的动作, 后面的会静默失效, 必须让用户看见。 */
+function keyHasConflict(keyId: string): boolean {
+  return store.hotkeyConflicts.some((conflict) => conflict.keyId === keyId)
+}
+
+function keyConflictTitle(keyId: string): string {
+  const details = store.hotkeyConflicts
+    .filter((conflict) => conflict.keyId === keyId)
+    .map((conflict) => {
+      const mode = conflict.mode === 'paged' ? '分页' : '滚动'
+      const first = HOTKEY_ACTION_MAP[conflict.actions[0]]?.label || conflict.actions[0]
+      const ignored = conflict.actions
+        .slice(1)
+        .map((id) => HOTKEY_ACTION_MAP[id]?.label || id)
+        .join('、')
+      return `${mode}模式：只有「${first}」生效，「${ignored}」不会触发`
+    })
+  return details.join('；')
+}
+
+/** 冲突提示文案(只在实际存在冲突时展示)。 */
+const conflictNotices = computed(() => store.hotkeyConflicts.map((conflict) => ({
+  key: conflict.keyId,
+  mode: conflict.mode === 'paged' ? '分页' : '滚动',
+  winner: HOTKEY_ACTION_MAP[conflict.actions[0]]?.label || conflict.actions[0],
+  ignored: conflict.actions
+    .slice(1)
+    .map((id) => HOTKEY_ACTION_MAP[id]?.label || id)
+    .join('、'),
+})))
+
+function keyLabel(keyId: string): string {
+  return hotkeyLabel(keyId)
+}
 
 function isThemeActive(index: number) {
   return index === nightThemeIndex
@@ -571,6 +873,9 @@ onMounted(async () => {
   --settings-field-placeholder: rgba(55, 42, 31, 0.46);
   width: 100%;
   height: 100%;
+  /* 必须 border-box: width:100% + padding 若按 content-box 计算, 面板会比
+   * 抽屉宽出两倍 padding(原先 48px), 右侧内容(滑块数值等)被挤出可视区。 */
+  box-sizing: border-box;
   overflow-y: auto;
   padding: 24px;
   transition: background 0.3s, color 0.3s;
@@ -623,8 +928,8 @@ onMounted(async () => {
 }
 
 .reset-btn:hover {
-  background: var(--color-primary, #c97f3a);
-  color: white;
+  background: var(--color-selected-bg);
+  border-color: var(--color-selected-border);
 }
 
 .settings-body {
@@ -637,7 +942,8 @@ onMounted(async () => {
   top: -24px;
   z-index: 2;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* 列数跟随页签数量, 加/减页签时不会被压扁。 */
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 3px;
   margin-bottom: 20px;
   padding: 3px;
@@ -697,6 +1003,404 @@ onMounted(async () => {
   font-weight: 500;
   opacity: 0.7;
   flex-shrink: 0;
+}
+
+/* ─── 阅读配色 / 背景图 ─── */
+/* 整行块: label 独占一行, 内容不再被挤在固定宽度的右侧列里。 */
+.setting-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.setting-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.setting-block-head label {
+  font-size: 14px;
+  font-weight: 500;
+  opacity: 0.7;
+}
+
+.link-btn {
+  padding: 2px 8px;
+  border: none;
+  background: transparent;
+  color: var(--color-primary, #c97f3a);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.link-btn:hover {
+  background: color-mix(in srgb, var(--color-primary, #c97f3a) 12%, transparent);
+}
+
+.link-btn.danger {
+  color: #c43f3a;
+}
+
+.link-btn.danger:hover {
+  background: color-mix(in srgb, #d14b45 12%, transparent);
+}
+
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.color-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  min-width: 0;
+}
+
+.color-card.customized {
+  border-color: var(--color-primary, #c97f3a);
+}
+
+.color-card-label {
+  font-size: 13px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+/* 色块本身是 label, 点击即打开系统取色器; 原生 color input 藏在其中。 */
+.color-swatch {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.color-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.color-card-value {
+  font-size: 12px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.icon-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.06);
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.icon-btn:hover {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.image-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.image-thumb {
+  width: 84px;
+  height: 56px;
+  border-radius: 10px;
+  border: 1px dashed rgba(0, 0, 0, 0.2);
+  background-color: transparent;
+  background-size: cover;
+  background-position: center;
+  color: inherit;
+  font-size: 11px;
+  opacity: 0.85;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.image-thumb.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-picker-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.image-picker-note {
+  font-size: 11px;
+  opacity: 0.55;
+}
+
+.hidden-input {
+  display: none;
+}
+
+.inline-slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.inline-slider label {
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.inline-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.inline-slider output {
+  font-size: 12px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+  min-width: 40px;
+  text-align: right;
+}
+
+/* ─── 快捷键: 以功能为主轴 ───
+ * 这个面板跟随**阅读主题**(不是应用主题), 所以颜色一律走本组件的 --settings-*
+ * 令牌与 --settings-font 的 color-mix。早先这里写死了 rgba(0,0,0,.05) 这类
+ * 绝对黑与兜底橙 #c97f3a: 在暗色阅读主题下, 绝对黑的分隔线/label 几乎不可见,
+ * 而兜底橙又与面板主色对不上, 整块区域像是从别处搬来的。 */
+.block-tag {
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  background: color-mix(in srgb, var(--settings-font, currentColor) 8%, transparent);
+  opacity: 0.75;
+}
+
+.hotkey-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.function-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.function-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  margin: 0 -6px;
+  border-radius: 8px;
+  transition: background 0.16s;
+}
+
+/* 用悬停底色区分行, 而不是给每一行都画一条分隔线 —— 分隔线 + 常驻按钮
+   会把这块变成一张表格。 */
+.function-item:hover,
+.function-item:focus-within {
+  background: color-mix(in srgb, var(--settings-font, currentColor) 6%, transparent);
+}
+
+.function-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 78px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.function-scope {
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  opacity: 0.6;
+  background: color-mix(in srgb, var(--settings-font, currentColor) 10%, transparent);
+}
+
+.function-keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+
+.function-empty {
+  font-size: 12px;
+  opacity: 0.35;
+}
+
+/* 键位胶囊: 用中性描边承载, 主色留给真正的选中/告警状态。
+   十来个胶囊全用主色描边会连成一片橙色, 反而看不出哪个键有冲突。 */
+.key-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--settings-field-border);
+  background: var(--settings-field-bg);
+  color: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: border-color 0.16s, background 0.16s, color 0.16s;
+}
+
+/* 悬停 = 即将解除绑定, 用危险色提示这一步是破坏性的。 */
+.key-chip:hover {
+  border-color: color-mix(in srgb, var(--color-danger, #d14949) 55%, transparent);
+  background: color-mix(in srgb, var(--color-danger, #d14949) 12%, transparent);
+  color: var(--color-danger, #d14949);
+}
+
+.key-chip-remove {
+  font-size: 12px;
+  opacity: 0.4;
+}
+
+.key-chip:hover .key-chip-remove {
+  opacity: 1;
+}
+
+/* 冲突标记: 该键在当前模式下有多个动作, 只有第一个会执行。 */
+.key-chip.conflict {
+  border-color: color-mix(in srgb, var(--color-warning, #d4972d) 62%, transparent);
+  background: color-mix(in srgb, var(--color-warning, #d4972d) 15%, transparent);
+}
+
+.key-chip-warn {
+  display: inline-block;
+  min-width: 12px;
+  border-radius: 6px;
+  background: var(--color-warning, #d4972d);
+  color: var(--color-text-inverse, #fff);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 12px;
+  text-align: center;
+}
+
+.conflict-notice {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-warning, #d4972d) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning, #d4972d) 34%, transparent);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.conflict-line + .conflict-line {
+  margin-top: 3px;
+}
+
+.conflict-key {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--settings-font, currentColor) 12%, transparent);
+  font-weight: 600;
+}
+
+/* 录入按键: 点开后按任意键即可绑定。
+   始终可见 —— 未绑定的功能全靠它作为入口, 藏起来会让那些行变成死角;
+   但默认不画虚线框、只用低透明度, 因此不会像十四个虚线框那样连成噪音。 */
+.key-capture {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 7px;
+  border: 1px dashed transparent;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.42;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.16s, border-color 0.16s, background 0.16s;
+}
+
+.function-item:hover .key-capture,
+.function-item:focus-within .key-capture {
+  opacity: 0.75;
+}
+
+.key-capture:hover,
+.key-capture:focus-visible {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--color-primary, #c97f3a) 50%, transparent);
+  background: color-mix(in srgb, var(--color-primary, #c97f3a) 10%, transparent);
+}
+
+.key-capturing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--color-primary, #c97f3a) 55%, transparent);
+  background: color-mix(in srgb, var(--color-primary, #c97f3a) 12%, transparent);
+  font-size: 12px;
+  animation: capture-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes capture-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.62; }
+}
+
+.key-capture-cancel {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  opacity: 0.6;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.key-capture-cancel:hover {
+  opacity: 1;
 }
 
 .voice-select {
@@ -836,10 +1540,17 @@ onMounted(async () => {
   opacity: 0.45;
 }
 
+/* 选中态用淡主色底 + 主色文字与描边, 而不是整块纯橙 —— 纯色块在设置面板
+   里一屏会出现十来处, 连成一片非常刺眼, 也压掉了文字的层次。 */
 .opt-btn.active {
-  background: var(--color-primary, #c97f3a);
-  color: white;
-  border-color: var(--color-primary, #c97f3a);
+  background: var(--color-selected-bg);
+  color: var(--color-primary, #c97f3a);
+  border-color: var(--color-selected-border);
+  font-weight: 600;
+}
+
+.opt-btn.active:hover {
+  background: var(--color-selected-bg-hover);
 }
 
 /* Steppers */

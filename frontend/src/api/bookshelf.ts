@@ -113,8 +113,23 @@ export function saveBookGroup(group: BookGroup) {
   return post<string>('/saveBookGroup', group).then((r) => r.data)
 }
 
+/** 整表覆盖分组列表。
+ *
+ *  与 `saveBookGroup` 的区别很重要: 后者是 upsert —— `groupId` 为 0 时后端会
+ *  分配一个新 id 再 push, 逐个写入既可能凭空多出分组, 也无法表达「以这份列表
+ *  为准」。恢复备份时必须用这个, 才能保证分组 id 与备份里一致
+ *  (书架的 `group` 位域引用的是这些 id)。 */
+export function saveBookGroupOrder(groups: BookGroup[]) {
+  return post<string>('/saveBookGroupOrder', groups).then((r) => r.data)
+}
+
 export function deleteBookGroup(groupId: number) {
   return post<string>('/deleteBookGroup', { groupId }).then((r) => r.data)
+}
+
+/** 批量删除分组。一次 IPC 完成, 避免逐个删除时的 N 次全量重写。 */
+export function deleteBookGroups(groupIds: number[]) {
+  return post<{ removed: number }>('/deleteBookGroups', { groupIds }).then((r) => r.data)
 }
 
 export function saveBookGroupId(bookUrl: string, groupId: number) {
@@ -148,6 +163,12 @@ export function getCoverUrl(coverUrl?: string) {
     const bookUrl = params.get('bookUrl') ?? ''
     const path = params.get('path') ?? ''
     return `${readerOrigin}/epub?bookUrl=${encodeURIComponent(bookUrl)}&path=${encodeURIComponent(path)}`
+  }
+  // 本应用自己存的文件(自定义封面)已经是可直接访问的 reader 协议地址,
+  // 必须原样返回 —— 下面那条分支会把它当成远端地址再包一层 /cover,
+  // 结果必然 404(封面显示不出来)。
+  if (coverUrl.startsWith(`${readerOrigin}/`)) {
+    return coverUrl
   }
   if (coverUrl.startsWith('http') || coverUrl.startsWith('/')) {
     return `${readerOrigin}/cover?path=${encodeURIComponent(coverUrl)}`

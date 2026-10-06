@@ -35,7 +35,7 @@ const MAX_PUNCTUATION_BACKTRACK = 12
 
 export function useHorizontalPaging(
   store: ReaderStore,
-  config: ComputedRef<{ fontSize: number; fontWeight: number; lineHeight: number }>,
+  config: ComputedRef<{ fontSize: number; fontWeight: number; lineHeight: number; pageWidth: number }>,
   currentFontFamily: ComputedRef<string>,
   formattedContent: ComputedRef<string>,
   isHorizontalPageMode: ComputedRef<boolean>,
@@ -196,7 +196,14 @@ export function useHorizontalPaging(
   function updateHorizontalMetrics() {
     const container = scrollContainerRef.value
     if (!container || !isHorizontalPageMode.value) return
-    horizontalPageStep.value = Math.max(1, container.clientWidth)
+    // 页宽取「容器宽」与「设置里的页面宽度」的较小者 —— 左右分页此前直接用容器
+    // 全宽, 于是「页面宽度」在这个模式下完全失效(页宽恒等于窗口宽度)。
+    // 取较小者既让设置生效, 也保证窗口比 pageWidth 窄时不会溢出。
+    const pageWidth = config.value.pageWidth
+    const usable = Number.isFinite(pageWidth) && pageWidth > 0
+      ? Math.min(container.clientWidth, pageWidth)
+      : container.clientWidth
+    horizontalPageStep.value = Math.max(1, usable)
   }
 
   function getHorizontalPageMeasure(container: HTMLElement) {

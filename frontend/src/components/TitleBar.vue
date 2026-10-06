@@ -4,6 +4,7 @@
     :class="{
       'reader-titlebar': isReader,
       'has-custom-background': hasCustomBackground,
+      'solid-chrome': needsSolidChrome,
       'surface-open': surface !== null,
       'settings-surface-open': surface === 'settings',
       'reader-surface-open': surface === 'reader-panel',
@@ -61,23 +62,40 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 const appWindow = isTauri ? getCurrentWindow() : null
 const isMaximized = ref(false)
 const isReader = computed(() => route.name === 'reader')
-const hasCustomBackground = computed(() => Boolean(readerStore.config.backgroundImage) && (
-  !isReader.value || readerStore.config.applyBackgroundToReader
+/** 阅读页是否有背景图(专属图或桌面图)。有图时标题栏才能「透出背景」。 */
+const hasCustomBackground = computed(() => {
+  if (isReader.value) {
+    return Boolean(
+      readerStore.config.readerBackgroundImage
+      || (readerStore.config.backgroundImage && readerStore.config.applyBackgroundToReader),
+    )
+  }
+  return Boolean(readerStore.config.backgroundImage)
+})
+/** 标题栏是否需要实色: 呼出工具栏/弹层时, 顶部多条栏叠在一起, 必须统一底色
+ *  才清晰; 纯阅读时则透明, 让背景图与正文连成一片。 */
+const needsSolidChrome = computed(() => (
+  surface !== null || readerStore.readerControlsVisible
 ))
 const titlebarStyle = computed(() => {
   const surfaceBackground = surface === 'reader-panel'
-    ? readerStore.currentTheme.popup
+    ? readerStore.readerTheme.popup
     : 'var(--color-bg-elevated)'
 
   if (isReader.value) {
     return {
       '--titlebar-surface-background': surfaceBackground,
-      background: surface !== null
-        ? surfaceBackground
+      // 阅读中(工具栏收起): 透明 —— 有背景图时透出图, 无图时透出主题底色。
+      // 呼出工具栏后: 与工具栏同为实色, 顶部拼成一条连续的栏。
+      // 一律用 readerTheme 而非 currentTheme: 后者是主题预设, 不含用户在
+      // 「阅读配色」里设的自定义色 —— 用了它, 设了自定义阅读背景色之后标题栏
+      // 与工具栏/toolbar 仍停在预设色上, 和正文底色对不上。
+      background: needsSolidChrome.value
+        ? readerStore.readerTheme.popup
         : hasCustomBackground.value
-        ? `color-mix(in srgb, ${readerStore.currentTheme.body} 24%, transparent)`
-        : readerStore.currentTheme.body,
-      color: readerStore.currentTheme.fontColor,
+        ? 'transparent'
+        : readerStore.readerTheme.body,
+      color: readerStore.readerTheme.fontColor,
     }
   }
   return {
@@ -85,7 +103,7 @@ const titlebarStyle = computed(() => {
     background: surface !== null
       ? surfaceBackground
       : hasCustomBackground.value
-      ? 'color-mix(in srgb, var(--color-bg-elevated) 30%, transparent)'
+      ? 'transparent'
       : 'var(--color-bg-elevated)',
     color: 'var(--color-text-secondary)',
   }
@@ -152,10 +170,28 @@ onBeforeUnmount(() => cleanup())
   border-bottom-color: transparent;
 }
 
+/* 阅读页标题栏: 与工具栏同为实色时不能有描边/毛玻璃/文字阴影, 否则接缝可见。 */
+.titlebar.reader-titlebar.solid-chrome {
+  border-bottom-color: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  text-shadow: none;
+}
+
+/* 透明态且底下是背景图时: 只加文字阴影保证标题与窗口按钮可读,
+   不加任何底色或描边 —— 那会在顶部压出一条带子。 */
+.titlebar.reader-titlebar.has-custom-background:not(.solid-chrome) {
+  border-bottom-color: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
 .titlebar.has-custom-background {
   border-bottom-color: color-mix(in srgb, currentColor 10%, transparent);
-  backdrop-filter: blur(4px) saturate(115%);
-  -webkit-backdrop-filter: blur(4px) saturate(115%);
+  /* 背景图铺在外壳最底层, 标题栏叠在其上并做毛玻璃, 图才能连续地穿过顶部。 */
+  backdrop-filter: blur(10px) saturate(130%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
 }
 

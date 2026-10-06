@@ -14,6 +14,14 @@ pub struct Book {
     pub toc_url: Option<String>,
     pub charset: Option<String>,
     pub custom_cover_url: Option<String>,
+    /// 用户自定义书名/作者/简介之前的原始值, 用于「还原」。
+    ///
+    /// 只在**首次**保存自定义内容时写入, 之后不再变动 —— 这样无论用户改过多少轮,
+    /// 都能一键回到最初始(书源/导入时)的样子。三个字段都是 Option: 从未自定义过
+    /// 的书它们是 None, 此时「还原」无内容可回退。
+    pub original_name: Option<String>,
+    pub original_author: Option<String>,
+    pub original_intro: Option<String>,
     pub can_update: Option<bool>,
     pub dur_chapter_index: Option<i32>,
     pub dur_chapter_pos: Option<i32>,

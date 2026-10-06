@@ -3,7 +3,7 @@
     class="reader-view"
     :class="{ 'disable-system-callout': disableSystemCallout }"
     :style="{
-      background: config.backgroundImage && config.applyBackgroundToReader ? 'transparent' : theme.body,
+      background: shellPaintsBackground ? 'transparent' : theme.body,
       color: theme.fontColor,
       colorScheme: readerColorScheme,
       fontFamily: currentFontFamily,
@@ -14,6 +14,7 @@
     @click="handleBackgroundClick"
     @contextmenu.prevent="handleContextMenu"
   >
+
     <!-- 章节加载阶段：Teleport 到 body，避免被阅读容器的层叠/定位影响 -->
     <Teleport to="body">
       <Transition name="fade">
@@ -37,7 +38,10 @@
         <div
           v-if="store.activePanel"
           class="reader-drawer"
-          :class="{ 'with-custom-background': hasReaderBackground }"
+          :class="{
+            'with-custom-background': hasReaderBackground,
+            'drawer-wide': store.activePanel === 'settings',
+          }"
           :style="{ background: chromeTheme.popup, colorScheme: readerColorScheme }"
         >
           <ReaderCatalog
@@ -135,8 +139,8 @@
       :class="{ 'horizontal-page-mode': isHorizontalPageMode }"
       ref="scrollContainerRef"
       @scroll="handleScroll"
-      @mousedown="pauseAutoScrollForManualInput"
-      @wheel="pauseAutoScrollForManualInput"
+      @mousedown="handleManualReadingInput"
+      @wheel="handleManualReadingInput"
       @touchstart="handleTouchStart"
       @touchmove="handleTouchMove"
       @touchend="handleTouchEnd"
@@ -363,6 +367,20 @@ import { isLocalBook } from '../utils/localBook'
 import { processSourceImageOptions } from '../utils/sourceImageOptions'
 import { handleReaderFontSizeWheel } from '../utils/readerFontSize'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
+import {
+  animatePageScrollBy,
+  animatePageScrollTo,
+  cancelPageScrollAnimation,
+  getReaderPageStep,
+} from '../utils/readerPaging'
+import { splitBrParagraphs } from '../utils/readerParagraph'
+import { resolveReaderBackground } from '../utils/readerColor'
+import {
+  hotkeyIdFromEvent,
+  isActionAllowedWhilePanelOpen,
+  resolveHotkeyAction,
+  type HotkeyActionId,
+} from '../utils/readerHotkeys'
 import type { Book } from '../types'
 
 import ReaderMobileControls from '../components/reader/ReaderMobileControls.vue'
@@ -423,14 +441,32 @@ const loadStageText = computed(() => {
       return ''
   }
 })
-const theme = computed(() => store.currentTheme)
+const theme = computed(() => store.readerTheme)
 const chromeTheme = computed(() => store.chromeTheme)
-const hasReaderBackground = computed(() => Boolean(config.value.backgroundImage) && config.value.applyBackgroundToReader)
+/** 阅读页背景来源: 专属图 > 自定义色 > 桌面图 > 主题。 */
+const readerBackgroundSource = computed(() => resolveReaderBackground({
+  customBackgroundColor: store.readerBackgroundColor,
+  readerBackgroundImage: config.value.readerBackgroundImage,
+  backgroundImage: config.value.backgroundImage,
+  applyBackgroundToReader: config.value.applyBackgroundToReader,
+}))
+/** 背景图由 App 外壳在最底层统一铺(标题栏也在其内), 这里只要让开位置。
+ *  阅读页自己再铺一层会导致同一张图叠两次、透明度相乘。 */
+const shellPaintsBackground = computed(() => (
+  readerBackgroundSource.value === 'readerImage' || readerBackgroundSource.value === 'desktopImage'
+))
+/** 工具栏等界面元素的「有背景图」判断, 供毛玻璃样式使用。 */
+const hasReaderBackground = computed(() => shellPaintsBackground.value)
 const readerColorScheme = computed(() => store.isNight || theme.value.name === '暗灰' ? 'dark' : 'light')
 
 const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
-const showControls = ref(false)
+/** 上/下工具栏是否呼出。代理到 store, 让标题栏(在 App 顶层渲染)也能读到,
+ *  以便在呼出工具栏时从透明转为实色。 */
+const showControls = computed({
+  get: () => store.readerControlsVisible,
+  set: (value: boolean) => { store.readerControlsVisible = value },
+})
 const isMobile = ref(false)
 let speechTimerTicker: number | null = null
 let readerViewUnmounted = false
@@ -662,6 +698,37 @@ const currentFontFamily = computed(() => {
   return ''
 })
 
+/** 给「有 HTML 但没有 <p>」的正文补上段落间距与首行缩进。
+ *
+ *  书源正文常见两种形态:
+ *  1. <br> 分段的纯文本流 —— 按 <br> 拆成独立 <p>, 间距与缩进才能逐段生效
+ *     (与纯文本分支一致)。拆段规则见 utils/readerParagraph(已单测覆盖),
+ *     它在「含结构化标签」或「标签跨 <br>」时返回 null, 此时不做重组。
+ *  2. <div>/<section> 等块级分段 —— 已有天然分段, 只需补 margin。 */
+function applyParagraphSpacingToBlockChildren(wrapper: HTMLElement) {
+  const spacing = `${config.value.paragraphSpacing}em`
+
+  if (wrapper.querySelector('br')) {
+    const split = splitBrParagraphs(wrapper.innerHTML, {
+      spacingEm: config.value.paragraphSpacing,
+      firstLineIndent: config.value.firstLineIndent,
+    })
+    if (split !== null) {
+      wrapper.innerHTML = split
+      return
+    }
+  }
+
+  // 块级分段(或不能安全重组): 只补间距, 不动结构。
+  const blocks = Array.from(wrapper.children) as HTMLElement[]
+  blocks.forEach((block) => {
+    if (block.tagName === 'BR') return
+    if (!(block.textContent || '').trim()) return
+    block.style.marginTop = '0'
+    block.style.marginBottom = spacing
+  })
+}
+
 function formatChapterHtml(rawText: string) {
   if (!rawText) return ''
   const text = rawText
@@ -685,6 +752,10 @@ function formatChapterHtml(rawText: string) {
         paragraph.style.marginBottom = `${config.value.paragraphSpacing}em`
         paragraph.classList.toggle('reader-indent', config.value.firstLineIndent)
       })
+    } else {
+      // 有 HTML 但没有 <p>: 书源常用 <br> 或 <div> 分段, 这时上面的段落处理
+      // 一个都不命中, 「段落间距」就完全没作用。按同样规则补一遍间距。
+      applyParagraphSpacingToBlockChildren(wrapper)
     }
   } else {
     wrapper.innerHTML = text
@@ -830,6 +901,7 @@ const {
     fontSize: config.value.fontSize,
     fontWeight: config.value.fontWeight,
     lineHeight: config.value.lineHeight,
+    pageWidth: config.value.pageWidth,
   })),
   currentFontFamily,
   formattedContent,
@@ -899,12 +971,12 @@ function pageForward() {
     syncHorizontalPageState()
     return
   }
-  const step = container.clientHeight * 0.88
+  const step = getPageStep(container)
   if (container.scrollTop + container.clientHeight >= container.scrollHeight - 10) {
     nextChapter()
     return
   }
-  container.scrollBy({ top: step, behavior: 'smooth' })
+  scrollPageBy(container, step)
 }
 
 function pageBackward() {
@@ -920,12 +992,12 @@ function pageBackward() {
     syncHorizontalPageState()
     return
   }
-  const step = container.clientHeight * 0.88
+  const step = getPageStep(container)
   if (container.scrollTop <= 10) {
     prevChapter()
     return
   }
-  container.scrollBy({ top: -step, behavior: 'smooth' })
+  scrollPageBy(container, -step)
 }
 
 // Navigation
@@ -1099,20 +1171,39 @@ async function rebuildContinuousAtChapter(targetIndex: number) {
   await initializeContinuousChapters(targetIndex, false, true)
 }
 
+/** 跳到章节顶部。'instant' 用于切章(必须瞬时, 否则新章内容会滚动着出现),
+ *  默认的平滑分支走「动画时长」设置。 */
 function scrollToTop(behavior: ScrollBehavior = 'smooth') {
-  if (scrollContainerRef.value) {
-    if (isHorizontalPageMode.value) {
-      scrollContainerRef.value.scrollTo({ left: 0, behavior })
-    } else {
-      scrollContainerRef.value.scrollTo({ top: 0, behavior })
-    }
+  const container = scrollContainerRef.value
+  if (!container) return
+  if (isHorizontalPageMode.value) {
+    // 分页模式的内容位移由 horizontalPageIndex 驱动(见 horizontalPageTransform),
+    // 容器并不靠 scrollLeft 定位 —— 只调 scrollTo({left:0}) 视觉上会滑回首页,
+    // 但索引没变, 再翻一页就会跳回原处, 进度与预加载判断也还是旧值。
+    // 这里不做「已在首页就返回」的短路: 换章后分页是异步重建的, 此刻索引可能还是
+    // 上一章的旧值, 短路会漏掉这次状态同步。
+    horizontalPageIndex.value = 0
+    syncHorizontalPageState()
+    return
   }
+  if (behavior === 'smooth') {
+    animatePageScrollTo(container, 0, config.value.animateDuration)
+    return
+  }
+  container.scrollTo({ top: 0, behavior })
 }
 
 function scrollToBottom() {
-  if (scrollContainerRef.value) {
-    scrollContainerRef.value.scrollTo({ top: scrollContainerRef.value.scrollHeight, behavior: 'smooth' })
+  const container = scrollContainerRef.value
+  if (!container) return
+  if (isHorizontalPageMode.value) {
+    // 尾页 = 最后一页(不是容器的 scrollHeight, 那只在纵向滚动模式里成立)。
+    const maxPage = Math.max(0, horizontalPages.value.length - 1)
+    horizontalPageIndex.value = maxPage
+    syncHorizontalPageState()
+    return
   }
+  animatePageScrollTo(container, container.scrollHeight, config.value.animateDuration)
 }
 
 function getPositionStorageKey() {
@@ -1732,6 +1823,26 @@ const {
   prevChapter,
 )
 
+/** 手动输入(滚轮/触摸/点击/按键)时中断翻页补间并暂停自动滚动。
+ *  补间每帧直接写 scrollTop, 不中断会与用户自己的滚动互相抢位置。 */
+function handleManualReadingInput() {
+  cancelPageScrollAnimation(scrollContainerRef.value)
+  pauseAutoScrollForManualInput()
+}
+
+/** 翻页步长: 按正文行高取整, 翻页后视口顶部落在行首。
+ *  原先固定用视口高度的 0.88/0.8, 每页都会把上一页末尾几行重复显示一遍。
+ *  滚动模式下「下一页」即整页滚动 —— 不再有半页动作。 */
+function getPageStep(container: HTMLElement) {
+  return getReaderPageStep(container.clientHeight, config.value.fontSize * config.value.lineHeight)
+}
+
+/** 按「动画时长」设置滚动: 0 为瞬时, 其余走补间。
+ *  容器 CSS scroll-behavior 已改为 auto, 平滑只能由此处显式提供。 */
+function scrollPageBy(container: HTMLElement, delta: number) {
+  animatePageScrollBy(container, delta, config.value.animateDuration)
+}
+
 // Click behavior
 function handleBackgroundClick(e: Event) {
   // If clicked directly on the reader-view wrapper, toggle controls
@@ -1878,8 +1989,8 @@ function clickZoneAction(zone: 'prev' | 'menu' | 'next') {
   const container = scrollContainerRef.value
   if (!container) return
 
-  // 自动滚动时点击翻页区: 先暂停让本次翻页/滚动生效, 静止后自动恢复。
-  pauseAutoScrollForManualInput()
+  // 自动滚动时点击翻页区: 先中断补间并暂停自动滚动, 静止后自动恢复。
+  handleManualReadingInput()
 
   if (isHorizontalPageMode.value) {
     if (zone === 'next') pageForward()
@@ -1888,7 +1999,7 @@ function clickZoneAction(zone: 'prev' | 'menu' | 'next') {
   }
 
   const h = container.clientHeight
-  const delta = h * 0.8 // Page scroll amount
+  const delta = getPageStep(container) // Page scroll amount
 
   if (config.value.clickAction === 'next') {
     pageForward()
@@ -1899,13 +2010,13 @@ function clickZoneAction(zone: 'prev' | 'menu' | 'next') {
     if (container.scrollTop + h >= container.scrollHeight - 10) {
       if (config.value.clickAction === 'auto') nextChapter()
     } else {
-      container.scrollBy({ top: delta, behavior: 'smooth' })
+      scrollPageBy(container, delta)
     }
   } else {
     if (container.scrollTop === 0) {
       if (config.value.clickAction === 'auto') prevChapter()
     } else {
-      container.scrollBy({ top: -delta, behavior: 'smooth' })
+      scrollPageBy(container, -delta)
     }
   }
 }
@@ -2004,7 +2115,7 @@ function handleScroll() {
 }
 
 function handleTouchStart(event: TouchEvent) {
-  pauseAutoScrollForManualInput()
+  handleManualReadingInput()
   hideSelectionMenu()
   const touch = event.touches[0]
   if (!touch) return
@@ -2105,6 +2216,114 @@ function openCachePanel() {
 }
 
 // Keyboard shortcuts
+/** 当前阅读模式大类: 左右分页 vs 上下滚动(含连续阅读)。 */
+const readingModeKind = computed<'paged' | 'scroll'>(() => (
+  isHorizontalPageMode.value ? 'paged' : 'scroll'
+))
+
+function toggleFullscreen() {
+  if (document.fullscreenElement) {
+    void document.exitFullscreen().catch(() => undefined)
+  } else {
+    void document.documentElement.requestFullscreen().catch(() => undefined)
+  }
+}
+
+/** 「返回」: 按弹层 → 选区菜单 → 搜索 → 朗读面板 → 书详情的顺序逐层退出,
+ *  都没有时回书架(与原 Esc 的级联一致)。 */
+function handleReaderBack() {
+  if (store.activePanel) {
+    store.closePanel()
+    return
+  }
+  if (selectionMenu.value.visible) {
+    hideSelectionMenu()
+    return
+  }
+  if (showSearch.value) {
+    closeSearch()
+    return
+  }
+  if (showTTSPanel.value) {
+    closeTTSPanel()
+    return
+  }
+  if (showBookInfo.value) {
+    showBookInfo.value = false
+    return
+  }
+  if (showControls.value) {
+    showControls.value = false
+    return
+  }
+  goHome()
+}
+
+/** 执行快捷键动作。返回 true 表示已处理(调用方据此决定是否 preventDefault)。
+ *
+ *  不依赖滚动容器的动作先处理: 章节加载的短暂窗口内容器为空, 「返回」这类
+ *  动作必须仍然可用(旧实现里 Esc / F11 / Ctrl+F 也都位于容器检查之前)。 */
+function runHotkeyAction(action: HotkeyActionId): boolean {
+  switch (action) {
+    case 'none':
+      return false
+    case 'back':
+      handleReaderBack()
+      return true
+    case 'fullscreen':
+      toggleFullscreen()
+      return true
+    case 'nightMode':
+      store.toggleNight()
+      return true
+    case 'catalog':
+      store.togglePanel('catalog')
+      return true
+    case 'settings':
+      store.togglePanel('settings')
+      return true
+    case 'search':
+      openSearch()
+      return true
+    case 'autoScroll':
+      store.isAutoScrolling = !store.isAutoScrolling
+      return true
+    case 'speech':
+      if (store.isSpeaking) store.stopTTS()
+      else startSpeech()
+      return true
+    default:
+      break
+  }
+
+  // 以下动作都需要滚动容器。
+  const container = scrollContainerRef.value
+  if (!container) return false
+
+  switch (action) {
+    case 'prevPage':
+      pageBackward()
+      return true
+    case 'nextPage':
+      pageForward()
+      return true
+    case 'prevChapter':
+      void prevChapter()
+      return true
+    case 'nextChapter':
+      void nextChapter()
+      return true
+    case 'chapterStart':
+      scrollToTop()
+      return true
+    case 'chapterEnd':
+      scrollToBottom()
+      return true
+    default:
+      return false
+  }
+}
+
 function handleKeydown(e: KeyboardEvent) {
   const activeElement = document.activeElement as HTMLElement | null
   const tagName = activeElement?.tagName?.toLowerCase()
@@ -2112,109 +2331,35 @@ function handleKeydown(e: KeyboardEvent) {
     return
   }
 
-  // F11: toggle fullscreen
-  if (e.key === 'F11') {
+  // 矩阵里没有换绑的按键不拦截: 用户在设置里把某键设为「不操作」后,
+  // 该键应彻底交还浏览器, 而不是被静默吞掉。
+  const keyId = hotkeyIdFromEvent(e)
+  if (!keyId) return
+  const action = resolveHotkeyAction(store.hotkeyBindings, keyId, readingModeKind.value)
+  if (!action) return
+
+  // 「返回」优先于弹层拦截: 否则 Esc 在弹层打开时会被下面的 return 吃掉。
+  if (action === 'back') {
     e.preventDefault()
-    if (document.fullscreenElement) {
-      void document.exitFullscreen().catch(() => undefined)
-    } else {
-      void document.documentElement.requestFullscreen().catch(() => undefined)
+    runHotkeyAction(action)
+    return
+  }
+
+  // 全屏/搜索是界面级动作, 面板开关是 toggle 语义 —— 弹层打开时都要放行,
+  // 否则「打开目录」的键无法再关掉目录。其余按键在弹层打开时不生效, 避免误触翻页。
+  if (store.activePanel) {
+    if (isActionAllowedWhilePanelOpen(action)) {
+      if (runHotkeyAction(action)) e.preventDefault()
     }
     return
   }
 
-  // Ctrl+F / Cmd+F: open in-page search
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
-    e.preventDefault()
-    openSearch()
-    return
+  // 自动滚动期间的导航按键先中断翻页补间并暂停, 静止后自动恢复。
+  if (['prevPage', 'nextPage', 'chapterStart', 'chapterEnd'].includes(action)) {
+    handleManualReadingInput()
   }
 
-  // Handle Escape key first - close panels or go home
-  if (e.key === 'Escape') {
-    if (store.activePanel) {
-      store.closePanel()
-      return
-    }
-    if (selectionMenu.value.visible) {
-      hideSelectionMenu()
-      return
-    }
-    if (showSearch.value) {
-      closeSearch()
-      return
-    }
-    if (showTTSPanel.value) {
-      closeTTSPanel()
-      return
-    }
-    if (showBookInfo.value) {
-      showBookInfo.value = false
-      return
-    }
-    if (showControls.value) {
-      showControls.value = false
-      return
-    }
-    // If nothing is open, go home
-    goHome()
-    return
-  }
-
-  // Don't process other keys when panels are open
-  if (store.activePanel) return
-
-  const container = scrollContainerRef.value
-  if (!container) return
-
-  const h = container.clientHeight
-
-  // 自动滚动期间的导航按键同样先暂停, 静止后自动恢复。
-  if ([' ', 'Space', 'ArrowDown', 'PageDown', 'ArrowUp', 'PageUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) {
-    pauseAutoScrollForManualInput()
-  }
-
-  switch (e.key) {
-    case ' ':
-    case 'Space':
-      e.preventDefault()
-      pageForward()
-      break
-    case 'ArrowDown':
-    case 'PageDown':
-      e.preventDefault()
-      if (isHorizontalPageMode.value) {
-        pageForward()
-      } else {
-        container.scrollBy({ top: h * 0.8, behavior: 'smooth' })
-      }
-      break
-    case 'ArrowUp':
-    case 'PageUp':
-      e.preventDefault()
-      if (isHorizontalPageMode.value) {
-        pageBackward()
-      } else {
-        container.scrollBy({ top: -(h * 0.8), behavior: 'smooth' })
-      }
-      break
-    case 'ArrowRight':
-      e.preventDefault()
-      nextChapter()
-      break
-    case 'ArrowLeft':
-      e.preventDefault()
-      prevChapter()
-      break
-    case 'Home':
-      e.preventDefault()
-      scrollToTop()
-      break
-    case 'End':
-      e.preventDefault()
-      scrollToBottom()
-      break
-  }
+  if (runHotkeyAction(action)) e.preventDefault()
 }
 
 // Toolbar actions
@@ -2255,8 +2400,14 @@ function handleStopTTS() {
 
 watch(() => store.isAutoScrolling, (val) => {
   store.autoReading = val
-  if (val) startAutoScroll()
-  else stopAutoScroll()
+  if (val) {
+    // 自动阅读与翻页补间都写 scrollTop。常规翻页会先中断补间, 但工具栏的
+    // 「自动阅读」按钮在滚动容器之外, 不经过手动输入拦截, 这里补一次。
+    cancelPageScrollAnimation(scrollContainerRef.value)
+    startAutoScroll()
+  } else {
+    stopAutoScroll()
+  }
 })
 
 watch(showTTSPanel, (visible) => {
@@ -2332,14 +2483,29 @@ onBeforeRouteLeave(() => {
   return true
 })
 
+/** 等目录加载完再恢复位置/绑事件。
+ *
+ *  超时兜底是必需的: 详情页点章节现在是「先跳转、后加载」, 阅读页挂载时目录往往
+ *  还在拉取。若书源请求长挂不返回, 没有超时就会一直卡在这里, 后面的键盘/滚轮监听、
+ *  TTS 计时器、事件注册全都不执行 —— 页面停在半初始化状态。到点后先按现有状态
+ *  继续初始化, 目录回来后 store 的响应式仍会驱动正文渲染。 */
+const CHAPTER_LIST_WAIT_TIMEOUT_MS = 5000
+
 async function waitForChapterListReady() {
   if (!store.chaptersLoading) return
   await new Promise<void>((resolve) => {
-    const stop = watch(() => store.chaptersLoading, (loading) => {
-      if (loading) return
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
       stop()
+      clearTimeout(timer)
       resolve()
+    }
+    const stop = watch(() => store.chaptersLoading, (loading) => {
+      if (!loading) finish()
     }, { flush: 'sync' })
+    const timer = setTimeout(finish, CHAPTER_LIST_WAIT_TIMEOUT_MS)
   })
 }
 
@@ -2433,6 +2599,7 @@ onUnmounted(() => {
     readerViewUnmounted = true
     persistReadingProgressKeepalive()
     appStore.stopReadingSession()
+  cancelPageScrollAnimation(scrollContainerRef.value)
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('wheel', handleReaderWheel)
   window.removeEventListener('click', closeReaderContextMenu)
@@ -2461,6 +2628,9 @@ onUnmounted(() => {
   }
   applySystemTheme(appStore.theme)
   store.closePanel()
+  // 工具栏可见性是持久化的 store 状态: 不清掉的话, 在「工具栏已呼出」的状态下
+  // 退出阅读页, 下次进来工具栏会默认展开, 而不是干净的全屏阅读态。
+  store.readerControlsVisible = false
 })
 
 watch(() => config.value.readMethod, async () => {
@@ -2489,13 +2659,33 @@ watch(() => store.currentIndex, () => {
   updateHorizontalEndState()
 })
 
+// 排版参数变化(字号/行高/段距/页宽/首行缩进)会重新分页, 页数与页边界都变了。
+// 按**阅读进度比例**把位置映射到新分页, 而不是一律回到第一页 —— 否则在设置里
+// 拖一下字号或页宽就会跳回本章开头, 还会把这个 0 进度写回书架。
 watch(
-  [() => store.content, () => config.value.fontSize, () => config.value.fontWeight, () => config.value.lineHeight, () => config.value.paragraphSpacing, () => config.value.firstLineIndent, showSearch, searchQuery],
+  [() => config.value.fontSize, () => config.value.fontWeight, () => config.value.lineHeight, () => config.value.paragraphSpacing, () => config.value.firstLineIndent, () => config.value.pageWidth],
   () => {
-    if (isHorizontalPageMode.value) {
-      if (!pendingLegadoPageRestore.value) horizontalPageIndex.value = 0
-      rebuildHorizontalPages()
-    }
+    if (!isHorizontalPageMode.value) return
+    const previousMax = Math.max(0, horizontalPages.value.length - 1)
+    const progress = previousMax > 0 ? horizontalPageIndex.value / previousMax : 0
+    void rebuildHorizontalPages().then(() => {
+      if (!isHorizontalPageMode.value) return
+      // 远端进度正在精确恢复时不要抢位置, 交给那套机制。
+      if (pendingLegadoPageRestore.value) return
+      const maxPage = Math.max(0, horizontalPages.value.length - 1)
+      horizontalPageIndex.value = Math.max(0, Math.min(maxPage, Math.round(progress * maxPage)))
+      syncHorizontalPageState()
+    })
+  },
+)
+
+// 正文或页内搜索变化: 内容换了, 从第一页重新开始。
+watch(
+  [() => store.content, showSearch, searchQuery],
+  () => {
+    if (!isHorizontalPageMode.value) return
+    if (!pendingLegadoPageRestore.value) horizontalPageIndex.value = 0
+    rebuildHorizontalPages()
   },
 )
 
@@ -2748,7 +2938,10 @@ watch(
   overflow-y: auto;
   overflow-anchor: none;
   position: relative;
-  scroll-behavior: smooth;
+  /* 必须是 auto: 平滑由 utils/readerPaging 的显式补间提供, 时长受「动画时长」
+   * 设置控制。若这里保留 smooth, 赋 scrollTop 会被浏览器转成时长不可控的
+   * 原生平滑动画, 设置项就永远不起作用(自动滚动当初也是为此显式传 instant)。 */
+  scroll-behavior: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
@@ -3064,6 +3257,12 @@ watch(
   z-index: 50;
   box-shadow: 4px 0 24px rgba(0,0,0,0.15);
   transition: background 0.3s;
+}
+
+/* 设置面板内容较宽(配色卡片 / 快捷键列表), 单独放宽抽屉;
+ * 目录、书架等窄面板保持原宽度。 */
+.reader-drawer.drawer-wide {
+  width: min(520px, 94vw);
 }
 
 .selection-menu {

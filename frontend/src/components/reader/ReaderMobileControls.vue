@@ -179,7 +179,10 @@ import {
 } from '../../utils/readerFontSize'
 
 const store = useReaderStore()
-const theme = computed(() => store.chromeTheme)
+/** 用 currentTheme 而非 chromeTheme: 后者在「有背景图」时会把 popup 调成 84%
+ *  半透明(那是给浮层用的), 工具栏再用它就会与标题栏出现两套材质、叠出分层。
+ *  工具栏要的是不透明的主题底色, 保证文字始终清晰。 */
+const theme = computed(() => store.currentTheme)
 
 /** 底部栏的章节位置提示, 取代原来写死的"第 1/1 页"。 */
 const chapterPositionText = computed(() => {
@@ -315,6 +318,8 @@ watch(() => props.show, (visible) => {
   left: 0;
   right: 0;
   min-height: 56px;
+  /* 不透明实色: 工具栏要始终看得清。与标题栏同取主题 popup 色, 两者拼成
+   * 顶部一条完整的栏, 中间不留色差。 */
   background: var(--popup-bg);
   display: flex;
   align-items: center;
@@ -357,6 +362,7 @@ watch(() => props.show, (visible) => {
   left: 0;
   right: 0;
   padding: 16px calc(16px + var(--safe-area-right)) calc(16px + var(--safe-area-bottom)) calc(16px + var(--safe-area-left));
+  /* 与顶栏一致的实色。 */
   background: var(--popup-bg);
   z-index: 20;
   box-shadow: 0 -2px 10px rgba(0,0,0,0.05);

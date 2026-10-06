@@ -1,12 +1,13 @@
 import { getBookmarks, deleteBookmarks, saveBookmarks } from '../api/bookmark'
 import {
-  deleteBookGroup,
+  deleteBookGroups,
   deleteBooks,
   getBookGroups,
   getBookshelf,
+  saveBookGroupOrder,
   saveBooks,
-  saveBookGroup,
 } from '../api/bookshelf'
+import { listCustomFonts, deleteCustomFont } from '../api/fonts'
 import { getReplaceRules, deleteReplaceRules, saveReplaceRules } from '../api/replaceRule'
 import { getRssSources, deleteRssSource, saveRssSources } from '../api/rss'
 import {
@@ -38,6 +39,9 @@ const LOCAL_STORAGE_KEYS = [
   'reader-themeIndex',
   'reader-isNight',
   'reader-background-image',
+  // 阅读页专属背景图与透明度: 存在独立的 key 里(不随 readConfig 走),
+  // 漏掉它会导致恢复备份后阅读页背景图丢失。
+  'reader-page-background-image',
   'reader-speechConfig',
   'reader-last-session',
   'reader-currentIndex',
@@ -48,6 +52,8 @@ const LOCAL_STORAGE_KEYS = [
   'reader-hidden-features',
   'reader-auto-check-update',
   'reader-toc-check-times',
+  // 自定义快捷键绑定。
+  'reader-hotkeys',
 ]
 
 export interface WebdavBackupPayload {
@@ -285,30 +291,98 @@ export function parseCompatibleBackupArchive(
   }
 }
 
-export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
-  const currentGroups = await getBookGroups().catch(() => [])
-  const currentBooks = await getBookshelf().catch(() => [])
-  const currentBookmarks = await getBookmarks().catch(() => [])
-  const currentReplaceRules = await getReplaceRules().catch(() => [])
-  const currentRssSources = await getRssSources().catch(() => [])
+/** 恢复前的清理: 把当前数据读出来再逐个删除。
+ *
+ *  这里**故意不吞异常**(此前的 `.catch(() => [])` 是错的): 一旦读取失败退回空数组,
+ *  后面的清理就会被 `length` 守卫整块跳过, 而写入侧的分组/书签/替换规则都是
+ *  **upsert 合并**语义(见 save_book_group / save_bookmarks / save_replace_rules),
+ *  于是旧数据原地残留、和新数据混在一起 —— 恢复出来的是两批数据的并集,
+ *  而且全程没有任何报错。宁可让恢复失败并报错, 也不要静默产生脏数据。 */
+async function clearCurrentData() {
+  const [groups, books, bookmarks, replaceRules, rssSources] = await Promise.all([
+    getBookGroups(),
+    getBookshelf(),
+    getBookmarks(),
+    getReplaceRules(),
+    getRssSources(),
+  ])
 
   await Promise.all([
-    currentGroups.length
-      ? Promise.all(currentGroups.map((group) => deleteBookGroup(group.groupId)))
+    // 必须一次批量删, 不能用 Promise.all(groups.map(deleteBookGroup)) 并发逐个删:
+    // 后端 delete_group 是「读列表 → 删一个 → 写回」, 并发时会交错
+    // (A 读 [1,2,3]、B 读 [1,2,3]、A 写 [2,3]、B 写 [1,3] → 分组 1 复活),
+    // 于是"恢复后旧分组残留"依然会出现 —— 这正是用户最初报的那个现象。
+    groups.length
+      ? deleteBookGroups(groups.map((group) => group.groupId))
       : Promise.resolve(),
-    currentBooks.length
-      ? deleteBooks(currentBooks.map((book) => ({ bookUrl: book.bookUrl, origin: book.origin })) as Book[])
+    books.length
+      ? deleteBooks(books.map((book) => ({ bookUrl: book.bookUrl, origin: book.origin })) as Book[])
       : Promise.resolve(),
-    currentBookmarks.length ? deleteBookmarks(currentBookmarks) : Promise.resolve(),
-    currentReplaceRules.length ? deleteReplaceRules(currentReplaceRules) : Promise.resolve(),
-    currentRssSources.length
-      ? Promise.all(currentRssSources.map((source) => deleteRssSource({
+    bookmarks.length ? deleteBookmarks(bookmarks) : Promise.resolve(),
+    replaceRules.length ? deleteReplaceRules(replaceRules) : Promise.resolve(),
+    rssSources.length
+      ? Promise.all(rssSources.map((source) => deleteRssSource({
           sourceUrl: source.sourceUrl,
           sourceName: source.sourceName,
         })))
       : Promise.resolve(),
-    deleteAllBookSources().catch(() => undefined),
+    // 书源没有「按列表删」的接口, 直接整表清空。
+    deleteAllBookSources(),
+    // 自定义字体此前完全没清: import_custom_fonts 只 fs::write, 不同名的旧字体会
+    // 一直留在字体目录里, 继续出现在字体列表里。
+    clearCustomFonts(),
   ])
+}
+
+/** 清空全部自定义字体文件。 */
+async function clearCustomFonts() {
+  const fonts = await listCustomFonts()
+  if (!fonts.length) return
+  await Promise.all(fonts.map((font) => deleteCustomFont(font.id)))
+}
+
+/** 补齐 id 为 0 的分组。
+ *
+ *  注意: 正常路径下这里收不到 groupId 为 0 的分组 —— `toBookGroup` 会把
+ *  「groupId 为 0 / 缺失」的条目当成无效数据剔除(既有防呆, 位置见 normalizeList),
+ *  因为写进书架一个没有 id 的分组无法被任何书引用。本函数只作为防御: 若将来
+ *  有人放宽了解析层的校验, 这里保证不会把 0 原样写进存储。
+ *
+ *  只动 0, 其余一律原样保留 —— 尤其是**负数**: Legado 用一批负值作保留/虚拟分组
+ *  (IdRoot=-100, IdAll=-1, IdLocal=-2, IdAudio=-3, IdNetNone=-4, IdLocalNone=-5,
+ *  IdVideo=-6, IdError=-11), 它们是合法且有语义的。用 `groupId > 0` 当判据会把
+ *  这些负数当成「缺 id」改写掉, 破坏从 Legado 导入的分组语义。 */
+function normalizeGroupIds(groups: BookGroup[]): BookGroup[] {
+  const used = new Set(groups.map((g) => g.groupId).filter((id) => id !== 0))
+  let next = 1
+  return groups.map((group) => {
+    if (group.groupId !== 0) return group
+    while (used.has(next)) next += 1
+    used.add(next)
+    return { ...group, groupId: next }
+  })
+}
+
+/** 恢复过程所处的阶段, 用于给用户准确的失败提示。
+ *
+ *  `clear` 阶段已经在删旧数据(所以失败后数据可能不完整), 但还**一个字都没写入**;
+ *  `write` 阶段则是真的写了一半。两者的提示语不该相同 —— 早先调用方只有一个
+ *  `writing` 布尔量, 在调用前就置位, 于是清理阶段失败也会报"已开始写入"。 */
+export type RestorePhase = 'clear' | 'write'
+
+export interface RestoreOptions {
+  /** 每次进入新阶段时回调, 让调用方把提示文案对齐到真实进度。 */
+  onPhase?: (phase: RestorePhase) => void
+}
+
+export async function restoreWebdavBackup(
+  payload: WebdavBackupPayload,
+  options: RestoreOptions = {},
+) {
+  options.onPhase?.('clear')
+  await clearCurrentData()
+
+  options.onPhase?.('write')
 
   if (payload.app !== 'legado' && payload.localBooks?.length) {
     // 本地书内容文件先落盘, 再写书架记录, 保证记录指向的文件已存在。
@@ -321,8 +395,10 @@ export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
   if (payload.rssSources.length) {
     await saveRssSources(payload.rssSources)
   }
-  for (const group of payload.bookshelf.groups) {
-    await saveBookGroup(group)
+  // 分组用「整表覆盖」写入, 而不是逐个 saveBookGroup: 后者是 upsert, groupId 为 0
+  // 时后端会另分配一个新 id 再 push —— 备份里的 id 与书架 group 位域就对不上了。
+  if (payload.bookshelf.groups.length) {
+    await saveBookGroupOrder(normalizeGroupIds(payload.bookshelf.groups))
   }
   if (payload.bookshelf.books.length) {
     await saveBooks(payload.bookshelf.books)

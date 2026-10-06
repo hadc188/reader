@@ -7,10 +7,11 @@ import {
   deleteBooks as apiDeleteBooks,
   saveBookGroupId as apiSaveBookGroupId,
   saveBookGroup as apiSaveBookGroup,
-  deleteBookGroup as apiDeleteBookGroup,
+  deleteBookGroups as apiDeleteBookGroups,
   saveBooks as apiSaveBooks,
 } from '../api/bookshelf'
 import type { Book, BookGroup, SearchBook } from '../types'
+import { clearGroupsFromBook } from '../utils/bookGroupBits'
 import { clearRecentReadBooks, getRecentReadBookKey, loadRecentReadBooks, removeRecentReadBook } from '../utils/recentBooks'
 
 export const useBookshelfStore = defineStore('bookshelf', () => {
@@ -112,15 +113,41 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   async function removeGroup(groupId: number) {
-    await apiDeleteBookGroup(groupId)
-    groups.value = groups.value.filter((group) => group.groupId !== groupId)
-    activeGroupId.value = -1
+    await removeGroups([groupId])
+  }
+
+  /** 批量删除分组。
+   *
+   *  除了删分组本身, 还要把书架上各书的 `group` 位域里对应的位清掉并把**这批书
+   *  写回后端** —— 原来的单删版本只改了内存, 下次 fetchBooks 会把旧位读回来,
+   *  书就继续挂在已删除的分组上。 */
+  async function removeGroups(groupIds: number[]) {
+    if (!groupIds.length) return
+    await apiDeleteBookGroups(groupIds)
+    const removed = new Set(groupIds)
+    groups.value = groups.value.filter((group) => !removed.has(group.groupId))
+    if (removed.has(activeGroupId.value)) activeGroupId.value = -1
+
+    // 位域清理: 只要有任何一本书的归属发生变化就整体写回一次。
+    const snapshot = books.value.slice()
+    let changed = false
     books.value = books.value.map((book) => {
-      if (book.group && (book.group & groupId) !== 0) {
-        return { ...book, group: book.group & ~groupId }
-      }
-      return book
+      const next = clearGroupsFromBook(book, groupIds)
+      if (next !== book) changed = true
+      return next
     })
+    if (!changed) return
+
+    try {
+      // save_books 是**整表覆盖**(不是合并), 所以写回的是内存快照。
+      await apiSaveBooks(books.value)
+    } catch (error) {
+      // 必须回滚内存: 否则随后任何一次 reorderBooks / moveBookToFront 也会调
+      // apiSaveBooks, 把这个没落盘的清位结果推给后端, 静默改掉书的归属。
+      // 分组本身已经删掉了, 所以回滚的只是位域 —— 比留下脏快照安全。
+      books.value = snapshot
+      throw error
+    }
   }
 
   // ─── Search ───
@@ -194,6 +221,22 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     clearSelection()
   }
 
+  /** 单本书移入分组(替换它原有的分组归属)。
+   *
+   *  与 `bulkSetGroup` 的区别: 批量走的是"编辑模式多选", 而右键菜单的单本操作
+   *  发生在**非编辑模式**, 此时 selectedBookUrls 一定是空的 —— 早先两者共用
+   *  批量路径, 导致右键「移入分组」什么也没移动, 还提示"成功将 0 本书移至新分组"。
+   *  这里用 saveBookGroupId(后端是赋值语义), 只动这一本书。 */
+  async function setBookGroup(bookUrl: string, groupId: number) {
+    if (!bookUrl) return
+    await apiSaveBookGroupId(bookUrl, groupId)
+    // 本地先改, 免得等一次全量刷新 —— fetchBooks 之后仍会覆盖为权威值。
+    books.value = books.value.map((book) => (
+      book.bookUrl === bookUrl ? { ...book, group: groupId } : book
+    ))
+    await fetchBooks()
+  }
+
   async function bulkSetGroup(groupId: number) {
     const urls = Array.from(selectedBookUrls.value)
     // 并发设置分组, 避免选中 50 本书时串行等 50 个往返
@@ -255,11 +298,11 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     fetchBooks, removeBook,
     refreshRecentBooks, removeRecentBook, clearAllRecentBooks,
     groups, activeGroupId, displayGroups, filteredBooks,
-    fetchGroups, saveGroup, removeGroup,
+    fetchGroups, saveGroup, removeGroup, removeGroups,
     searchResults, isSearching, searchKey,
     searchScope, searchGroup, searchSourceUrl, startSearch, clearSearch, isSearchMode,
     editMode,
     selectedBookUrls, toggleSelection, selectAll, clearSelection,
-    bulkDelete, bulkSetGroup, reorderBooks, moveBookToFront,
+    bulkDelete, bulkSetGroup, setBookGroup, reorderBooks, moveBookToFront,
   }
 })

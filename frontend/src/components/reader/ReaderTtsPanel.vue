@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <Transition name="slide-up">
     <div v-if="show" class="tts-controls" :style="{ background: theme.popup, color: theme.fontColor }">
       <div class="tts-head">
@@ -267,9 +267,10 @@ defineEmits<{
 }
 
 .tts-timer-actions button.active {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: #fff;
+  background: var(--color-selected-bg);
+  border-color: var(--color-selected-border);
+  color: var(--color-primary);
+  font-weight: 600;
 }
 
 .tts-timer-text {

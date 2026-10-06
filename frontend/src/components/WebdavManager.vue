@@ -238,6 +238,7 @@ import {
   createWebdavBackupPayload,
   parseWebdavBackup,
   restoreWebdavBackup,
+  type RestorePhase,
   type SkippedEntryReport,
 } from '../utils/webdavBackup'
 
@@ -392,8 +393,9 @@ async function restoreRemoteBackup(entry: LegadoWebdavBackupEntry) {
   if (!ok) return
   remoteWorking.value = true
   remoteAction.value = 'restore'
-  // 解析阶段失败时尚未触碰任何现有数据; 一旦开始写入, 失败就可能留下半套数据。
-  let writing = false
+  // 解析阶段失败时尚未触碰任何现有数据; 进入 clear 阶段就开始删旧数据了。
+  // 用阶段标记而不是单个布尔量 —— 清理阶段还一个字都没写入, 不该报"已开始写入"。
+  let phase: RestorePhase | null = null
   try {
     const contents = await getLegadoWebdavBackupArchive(remoteDraft.value, entry.name)
     const result = parseCompatibleBackupArchive(contents)
@@ -401,8 +403,7 @@ async function restoreRemoteBackup(entry: LegadoWebdavBackupEntry) {
     if (warning && !(await appStore.confirmDialog(warning, { title: '数据将被清空', danger: true }))) {
       return
     }
-    writing = true
-    await restoreWebdavBackup(result.payload)
+    await restoreWebdavBackup(result.payload, { onPhase: (p) => { phase = p } })
     const skipMessage = formatSkipReport(result.skipped, result.skippedLocalBooks)
     appStore.showToast(
       `恢复完成${skipMessage}，正在刷新页面`,
@@ -410,7 +411,7 @@ async function restoreRemoteBackup(entry: LegadoWebdavBackupEntry) {
     )
     window.setTimeout(() => window.location.reload(), 800)
   } catch (error) {
-    remoteError.value = restoreErrorMessage(error, writing)
+    remoteError.value = restoreErrorMessage(error, phase)
   } finally {
     remoteWorking.value = false
     remoteAction.value = ''
@@ -458,12 +459,21 @@ function formatSkipReport(skipped: SkippedEntryReport[], skippedLocalBooks: numb
 }
 
 /**
- * 恢复失败时的提示。写入阶段失败意味着现有数据可能已被部分覆盖, 必须
- * 明确告知, 否则用户会以为"什么都没发生"而不再重试。
+ * 恢复失败时的提示。按**阶段**给不同文案:
+ * - write: 已写了一半, 现有数据可能被部分覆盖, 必须明确告知(否则用户以为什么都没发生)。
+ * - clear: 旧数据已被删但尚未写入任何东西 —— 同样是不完整状态, 但它不是"写入失败",
+ *   说成"已开始写入"会让用户误判问题性质。
+ * - null (解析/下载阶段): 还没碰过任何数据, 原样报错即可。
  */
-function restoreErrorMessage(error: unknown, writing: boolean) {
+function restoreErrorMessage(error: unknown, phase: RestorePhase | null) {
   const message = (error as Error)?.message || '恢复失败'
-  return writing ? `${message}（已开始写入，当前数据可能不完整，请重新恢复）` : message
+  if (phase === 'write') {
+    return `${message}（写入过程中断，当前数据可能不完整，请重新恢复）`
+  }
+  if (phase === 'clear') {
+    return `${message}（旧数据已清除但新数据尚未写入，请重新恢复）`
+  }
+  return message
 }
 
 function formatSize(size: number) {
@@ -638,8 +648,8 @@ async function restoreBackup(entry: EntryRow) {
   }
 
   working.value = true
-  // 解析阶段失败时尚未触碰任何现有数据; 一旦开始写入, 失败就可能留下半套数据。
-  let writing = false
+  // 同上: 用阶段标记区分「已删尚未写」与「写了一半」。
+  let phase: RestorePhase | null = null
   try {
     const result = entry.name.toLowerCase().endsWith('.zip')
       ? parseCompatibleBackupArchive(await getWebdavBackupArchive(entry.path))
@@ -654,8 +664,7 @@ async function restoreBackup(entry: EntryRow) {
       working.value = false
       return
     }
-    writing = true
-    await restoreWebdavBackup(result.payload)
+    await restoreWebdavBackup(result.payload, { onPhase: (p) => { phase = p } })
     const skipMessage = formatSkipReport(result.skipped, result.skippedLocalBooks)
     appStore.showToast(
       `恢复完成${skipMessage}，正在刷新页面`,
@@ -665,7 +674,7 @@ async function restoreBackup(entry: EntryRow) {
       window.location.reload()
     }, 800)
   } catch (error) {
-    appStore.showToast(restoreErrorMessage(error, writing), 'error')
+    appStore.showToast(restoreErrorMessage(error, phase), 'error')
     working.value = false
   }
 }

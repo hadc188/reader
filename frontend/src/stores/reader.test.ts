@@ -1007,3 +1007,297 @@ describe('reader in-place chapter refresh', () => {
     expect(readerStore.refreshing).toBe(false)
   })
 })
+
+describe('reader custom colors', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+      clear: vi.fn(() => storage.clear()),
+    })
+  })
+
+  it('overrides only the reader page colors, leaving the theme presets untouched', () => {
+    const readerStore = useReaderStore()
+    readerStore.setThemeIndex(2)
+
+    expect(readerStore.readerTheme).toEqual(readerStore.currentTheme)
+
+    readerStore.updateConfig('readerBackgroundColor', '#112233')
+    readerStore.updateConfig('fontColor', '#aabbcc')
+
+    expect(readerStore.readerTheme.body).toBe('#112233')
+    expect(readerStore.readerTheme.content).toBe('#112233')
+    expect(readerStore.readerTheme.fontColor).toBe('#aabbcc')
+    // 主题预设本身不受影响, 便于随时还原。
+    expect(readerStore.currentTheme.body).toBe('#f5e6ce')
+    expect(readerStore.currentTheme.fontColor).toBe('#5b4636')
+  })
+
+  it('falls back to the theme when a custom color is cleared', () => {
+    const readerStore = useReaderStore()
+    readerStore.setThemeIndex(1)
+
+    readerStore.updateConfig('readerBackgroundColor', '#112233')
+    readerStore.updateConfig('readerBackgroundColor', '')
+
+    expect(readerStore.readerTheme.body).toBe('#ffffff')
+  })
+
+  it('ignores values that are not plain hex colors', () => {
+    const readerStore = useReaderStore()
+    readerStore.setThemeIndex(0)
+
+    readerStore.updateConfig('readerBackgroundColor', 'url(evil.png)')
+    readerStore.updateConfig('fontColor', 'expression(alert(1))')
+
+    expect(readerStore.readerTheme.body).toBe('#f5ede4')
+    expect(readerStore.readerTheme.fontColor).toBe('#333')
+  })
+
+  it('keeps custom colors across a config reset, like the background image', () => {
+    const readerStore = useReaderStore()
+
+    readerStore.updateConfig('readerBackgroundColor', '#112233')
+    readerStore.updateConfig('fontSize', 30)
+    readerStore.resetConfig()
+
+    expect(readerStore.config.fontSize).toBe(18)
+    expect(readerStore.config.readerBackgroundColor).toBe('#112233')
+  })
+})
+
+describe('reader hotkeys', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+      clear: vi.fn(() => storage.clear()),
+    })
+  })
+
+  it('starts from the built-in default table', () => {
+    const readerStore = useReaderStore()
+
+    expect(readerStore.hotkeysAreDefault).toBe(true)
+    expect(readerStore.hotkeyBindings.ArrowDown).toEqual(['nextPage'])
+    expect(readerStore.hotkeyBindings.Escape).toEqual(['back'])
+  })
+
+  it('rebinds a single key and persists it', () => {
+    const readerStore = useReaderStore()
+
+    readerStore.setHotkeyBinding('ArrowDown', ['nextChapter'])
+
+    expect(readerStore.hotkeyBindings.ArrowDown).toEqual(['nextChapter'])
+    expect(readerStore.hotkeysAreDefault).toBe(false)
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'reader-hotkeys',
+      JSON.stringify(readerStore.hotkeyBindings),
+    )
+  })
+
+  it('accepts multiple actions for one key and keeps their order', () => {
+    const readerStore = useReaderStore()
+
+    readerStore.setHotkeyBinding('Space', ['nextPage', 'chapterEnd'])
+
+    expect(readerStore.hotkeyBindings.Space).toEqual(['nextPage', 'chapterEnd'])
+  })
+
+  it('lets a key be unbound entirely', () => {
+    const readerStore = useReaderStore()
+
+    readerStore.setHotkeyBinding('Home', [])
+
+    expect(readerStore.hotkeyBindings.Home).toEqual([])
+    expect(readerStore.hotkeysAreDefault).toBe(false)
+  })
+
+  it('drops unknown actions instead of storing them', () => {
+    const readerStore = useReaderStore()
+
+    readerStore.setHotkeyBinding('Home', ['chapterEnd', 'notAnAction' as never])
+
+    expect(readerStore.hotkeyBindings.Home).toEqual(['chapterEnd'])
+  })
+
+  it('restores every default after a reset', () => {
+    const readerStore = useReaderStore()
+    readerStore.setHotkeyBinding('ArrowDown', [])
+    readerStore.setHotkeyBinding('F11', ['nightMode'])
+
+    readerStore.resetHotkeyBindings()
+
+    expect(readerStore.hotkeysAreDefault).toBe(true)
+    expect(readerStore.hotkeyBindings.ArrowDown).toEqual(['nextPage'])
+    expect(readerStore.hotkeyBindings.F11).toEqual(['fullscreen'])
+  })
+
+  it('survives a corrupted storage payload', () => {
+    localStorage.setItem('reader-hotkeys', '{not json')
+    const readerStore = useReaderStore()
+
+    expect(readerStore.hotkeysAreDefault).toBe(true)
+  })
+
+  it('only touches the key being rebound', () => {
+    const readerStore = useReaderStore()
+
+    readerStore.setHotkeyBinding('ArrowDown', ['nextChapter'])
+
+    expect(readerStore.hotkeyBindings.ArrowUp).toEqual(['prevPage'])
+    expect(readerStore.hotkeyBindings.Escape).toEqual(['back'])
+    expect(readerStore.hotkeyBindings.F11).toEqual(['fullscreen'])
+  })
+})
+
+describe('reader config storage hardening', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function stubStorage(seed: Record<string, string> = {}) {
+    const storage = new Map<string, string>(Object.entries(seed))
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+      clear: vi.fn(() => storage.clear()),
+    })
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('drops an injected non-hex reader colour from storage', () => {
+    // readConfig 来自 localStorage, 收紧必须在进 style 之前完成。
+    stubStorage({
+      readConfig: JSON.stringify({
+        fontSize: 20,
+        readerBackgroundColor: 'url(javascript:alert(1))',
+        fontColor: 'red',
+      }),
+    })
+    const readerStore = useReaderStore()
+
+    expect(readerStore.config.fontSize).toBe(20)
+    expect(readerStore.config.readerBackgroundColor).toBe('')
+    expect(readerStore.config.fontColor).toBe('')
+    expect(readerStore.readerTheme.body).toBe('#f5ede4')
+  })
+
+  it('expands valid shorthand hex colours from storage', () => {
+    stubStorage({
+      readConfig: JSON.stringify({ readerBackgroundColor: '#ABC', fontColor: '#123456' }),
+    })
+    const readerStore = useReaderStore()
+
+    expect(readerStore.config.readerBackgroundColor).toBe('#aabbcc')
+    expect(readerStore.config.fontColor).toBe('#123456')
+    expect(readerStore.readerTheme.body).toBe('#aabbcc')
+    expect(readerStore.readerTheme.fontColor).toBe('#123456')
+  })
+})
+
+describe('reader page background image', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function stubStorage(seed: Record<string, string> = {}) {
+    const storage = new Map<string, string>(Object.entries(seed))
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+      clear: vi.fn(() => storage.clear()),
+    })
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    stubStorage()
+  })
+
+  it('stores the reader image separately from the desktop image', () => {
+    const readerStore = useReaderStore()
+    const desktop = 'data:image/webp;base64,ZGVza3RvcA=='
+    const reader = 'data:image/webp;base64,cmVhZGVy'
+
+    readerStore.setBackgroundImage(desktop)
+    readerStore.setReaderBackgroundImage(reader)
+
+    expect(readerStore.config.backgroundImage).toBe(desktop)
+    expect(readerStore.config.readerBackgroundImage).toBe(reader)
+    // 两个 key 各自独立, 互不覆盖。
+    expect(localStorage.setItem).toHaveBeenCalledWith('reader-background-image', desktop)
+    expect(localStorage.setItem).toHaveBeenCalledWith('reader-page-background-image', reader)
+  })
+
+  it('clears only the reader image', () => {
+    const readerStore = useReaderStore()
+    const desktop = 'data:image/webp;base64,ZGVza3RvcA=='
+
+    readerStore.setBackgroundImage(desktop)
+    readerStore.setReaderBackgroundImage('data:image/webp;base64,cmVhZGVy')
+    readerStore.clearReaderBackgroundImage()
+
+    expect(readerStore.config.readerBackgroundImage).toBe('')
+    expect(readerStore.config.backgroundImage).toBe(desktop)
+    expect(localStorage.removeItem).toHaveBeenCalledWith('reader-page-background-image')
+  })
+
+  it('keeps both images out of the persisted readConfig payload', () => {
+    const readerStore = useReaderStore()
+    const image = 'data:image/webp;base64,dGVzdA=='
+
+    readerStore.setBackgroundImage(image)
+    readerStore.setReaderBackgroundImage(image)
+    // 两张图各自存独立 key; saveConfig 是排版参数的持久化入口。
+    readerStore.updateConfig('fontSize', 20)
+
+    const payloads = vi.mocked(localStorage.setItem).mock.calls
+      .filter(([key]) => key === 'readConfig')
+      .map(([, value]) => JSON.parse(value as string) as Record<string, unknown>)
+
+    expect(payloads.length).toBeGreaterThan(0)
+    payloads.forEach((payload) => {
+      expect(payload).not.toHaveProperty('backgroundImage')
+      expect(payload).not.toHaveProperty('readerBackgroundImage')
+    })
+  })
+
+  it('normalises an out-of-range opacity from storage', () => {
+    stubStorage({ readConfig: JSON.stringify({ readerImageOpacity: 42 }) })
+    const readerStore = useReaderStore()
+
+    expect(readerStore.config.readerImageOpacity).toBe(1)
+  })
+
+  it('keeps the reader image across a config reset', () => {
+    const readerStore = useReaderStore()
+
+    readerStore.setReaderBackgroundImage('data:image/webp;base64,dGVzdA==')
+    readerStore.updateConfig('fontSize', 30)
+    readerStore.resetConfig()
+
+    expect(readerStore.config.fontSize).toBe(18)
+    expect(readerStore.config.readerBackgroundImage).toBe('data:image/webp;base64,dGVzdA==')
+  })
+})

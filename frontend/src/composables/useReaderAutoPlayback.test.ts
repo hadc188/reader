@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { findParagraphPageIndex, getSpeechProgressItemIndex } from './useReaderAutoPlayback'
+import {
+  findParagraphPageIndex,
+  getSpeechProgressItemIndex,
+  shouldFollowChapterJump,
+} from './useReaderAutoPlayback'
 
 describe('merged speech paragraph progress', () => {
   it('moves the active paragraph according to each paragraph text length', () => {
@@ -33,5 +37,35 @@ describe('horizontal page lookup for speech following', () => {
     expect(findParagraphPageIndex([fakePage({ text: '正文' })], detached)).toBe(-1)
     expect(findParagraphPageIndex([], detached)).toBe(-1)
     expect(findParagraphPageIndex([fakePage({ text: '正文' })], null)).toBe(-1)
+  })
+})
+
+describe('manual chapter jump following', () => {
+  /** 用户手动跳章、朗读进行中、没有过渡、TTS 也没有刚自己滚过正文。 */
+  const userJump = {
+    speechDriven: false,
+    hasSpeechSession: true,
+    transitioning: false,
+    msSinceSpeechScroll: 5000,
+  }
+
+  it('用户跳章且朗读进行中时跟随', () => {
+    expect(shouldFollowChapterJump(userJump)).toBe(true)
+  })
+
+  it('TTS 自己切章时不跟随（否则会自己打断自己）', () => {
+    expect(shouldFollowChapterJump({ ...userJump, speechDriven: true })).toBe(false)
+  })
+
+  it('没有朗读会话时不跟随（纯阅读换章）', () => {
+    expect(shouldFollowChapterJump({ ...userJump, hasSpeechSession: false })).toBe(false)
+  })
+
+  it('正在切段/切章过渡时不跟随', () => {
+    expect(shouldFollowChapterJump({ ...userJump, transitioning: true })).toBe(false)
+  })
+
+  it('TTS 刚自己滚过正文时不跟随（连续模式下滚动到章边界也会改索引）', () => {
+    expect(shouldFollowChapterJump({ ...userJump, msSinceSpeechScroll: 200 })).toBe(false)
   })
 })

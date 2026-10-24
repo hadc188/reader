@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { splitSpeechSegments } from './speechSegments'
+import { splitSpeechSegments, splitSpeechSegmentsDetailed } from './speechSegments'
 
 describe('splitSpeechSegments', () => {
   it('returns a single narration segment when there are no quotes', () => {
@@ -93,5 +93,91 @@ describe('splitSpeechSegments', () => {
     expect(splitSpeechSegments('“他说「走」')).toEqual([
       { type: 'dialogue', text: '“他说「走」' },
     ])
+  })
+})
+
+describe('splitSpeechSegments：说话人冒号', () => {
+  it('把「短前缀 + 冒号」后的句子切成对话，冒号本身留在旁白里', () => {
+    expect(splitSpeechSegments('张三：你好啊。李四：我也好。')).toEqual([
+      { type: 'narration', text: '张三：' },
+      { type: 'dialogue', text: '你好啊。' },
+      { type: 'narration', text: '李四：' },
+      { type: 'dialogue', text: '我也好。' },
+    ])
+  })
+
+  it('带逗号的说话人标签也认', () => {
+    expect(splitSpeechSegments('老道士叹了口气，说：走吧。')).toEqual([
+      { type: 'narration', text: '老道士叹了口气，说：' },
+      { type: 'dialogue', text: '走吧。' },
+    ])
+  })
+
+  it('冒号后紧跟引号时交给引号规则，不把说话人标签读成对话', () => {
+    expect(splitSpeechSegments('张三：“你好。”')).toEqual([
+      { type: 'narration', text: '张三：' },
+      { type: 'dialogue', text: '“你好。”' },
+    ])
+  })
+
+  it('前缀过长时不当说话人（普通叙述里的冒号）', () => {
+    const text = '他站在门口想了很久很久很久才终于明白了一件事：原来如此。'
+    expect(splitSpeechSegments(text)).toEqual([{ type: 'narration', text }])
+  })
+
+  it('数字开头与常见标签词后面的冒号不算说话人', () => {
+    for (const text of ['时间：2024年。', '价格：5元。', '注意：请勿模仿。', '规则如下：第一，别跑。']) {
+      expect(splitSpeechSegments(text), text).toEqual([{ type: 'narration', text }])
+    }
+  })
+
+  it('冒号对话在句末结束，后面的叙述回到旁白', () => {
+    expect(splitSpeechSegments('他笑道：明天见。然后转身走了。')).toEqual([
+      { type: 'narration', text: '他笑道：' },
+      { type: 'dialogue', text: '明天见。' },
+      { type: 'narration', text: '然后转身走了。' },
+    ])
+  })
+
+  it('冒号对话里仍能嵌套引号', () => {
+    expect(splitSpeechSegments('他说：快走，别管我“那件事”了。')).toEqual([
+      { type: 'narration', text: '他说：' },
+      { type: 'dialogue', text: '快走，别管我“那件事”了。' },
+    ])
+  })
+
+  it('关掉冒号规则时只认引号', () => {
+    expect(
+      splitSpeechSegmentsDetailed('张三：你好啊。', { detectSpeakerColon: false }).segments,
+    ).toEqual([{ type: 'narration', text: '张三：你好啊。' }])
+  })
+})
+
+describe('splitSpeechSegmentsDetailed：跨段对话', () => {
+  it('上一段只有开引号时，把未闭合的闭符交给下一段', () => {
+    const first = splitSpeechSegmentsDetailed('他说：“今天')
+    expect(first.segments).toEqual([
+      { type: 'narration', text: '他说：' },
+      { type: 'dialogue', text: '“今天' },
+    ])
+    expect(first.openCloser).toBe('”')
+  })
+
+  it('下一段从对话续读，闭符之后回到旁白', () => {
+    const second = splitSpeechSegmentsDetailed('不走了。”然后他走了。', { openCloser: '”' })
+    expect(second.segments).toEqual([
+      { type: 'dialogue', text: '不走了。”' },
+      { type: 'narration', text: '然后他走了。' },
+    ])
+    expect(second.openCloser).toBeNull()
+  })
+
+  it('冒号对话只到句末，不跨段', () => {
+    const result = splitSpeechSegmentsDetailed('张三：今天不走了')
+    expect(result.segments).toEqual([
+      { type: 'narration', text: '张三：' },
+      { type: 'dialogue', text: '今天不走了' },
+    ])
+    expect(result.openCloser).toBeNull()
   })
 })

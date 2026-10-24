@@ -397,4 +397,139 @@ describe('useReaderAutoPlayback buffered speech stream', () => {
     expect(appStore.toasts.at(-1)?.message).toContain('已跳过朗读失败的片段')
     store.stopTTS()
   })
+
+  it('双音色下说话人冒号后的句子走对话音色', async () => {
+    const { store, playback } = setupDualVoiceEdge()
+
+    paragraphs = [new FakeParagraph('他笑道：明天见。')]
+    chapterParagraphs.set(0, paragraphs)
+
+    playback.startSpeech(paragraphs[0] as unknown as HTMLElement)
+
+    await vi.waitFor(() => expect(chapterSpeechCalls().length).toBeGreaterThanOrEqual(2))
+    const calls = chapterSpeechCalls()
+    // 「他笑道：」是旁白（说话人标签），冒号后的台词才是对话。
+    expect(calls.filter((call) => call.voice === NARRATION_VOICE).map((call) => call.text))
+      .toEqual(['他笑道：'])
+    expect(calls.filter((call) => call.voice === DIALOGUE_VOICE).map((call) => call.text))
+      .toEqual(['明天见。'])
+    store.stopTTS()
+  })
+
+  it('双音色下一句长对话被切成多块时，每一块都还是对话音色', async () => {
+    const { store, playback } = setupDualVoiceEdge()
+
+    // 用户报的原始形态：一整段长对话（不是跨段），前半截对话音色、后半截变旁白。
+    const body = '这是一句很长的话。'.repeat(8)
+    paragraphs = [new FakeParagraph(`张三：“${body}”`)]
+    chapterParagraphs.set(0, paragraphs)
+
+    playback.startSpeech(paragraphs[0] as unknown as HTMLElement)
+
+    // 长对话按 ≤70 字切成多块，等至少两块对话块出现。
+    await vi.waitFor(() => {
+      expect(chapterSpeechCalls().filter((call) => call.voice === DIALOGUE_VOICE).length)
+        .toBeGreaterThanOrEqual(2)
+    })
+    const calls = chapterSpeechCalls()
+    expect(calls.filter((call) => call.voice === NARRATION_VOICE).map((call) => call.text))
+      .toEqual(['张三：'])
+    expect(calls.filter((call) => call.voice === DIALOGUE_VOICE).map((call) => call.text).join(''))
+      .toBe(`“${body}”`)
+    store.stopTTS()
+  })
+
+  it('用户手动跳章时朗读跟到新章开头（不是继续播旧章）', async () => {
+    const { store, playback } = setupComposable()
+    const calls: Array<{ text: string; at: number }> = []
+    vi.mocked(synthesizeHttpTts).mockImplementation(async ({ text }) => {
+      calls.push({ text, at: Date.now() })
+      return new Blob(['audio'], { type: 'audio/wav' })
+    })
+
+    playback.startSpeech(paragraphs[0] as unknown as HTMLElement)
+    await vi.waitFor(() => expect(store.isSpeaking).toBe(true))
+    // 先等跨章预取自己把「下一章正文。」合成掉，这样后面同名的请求就只能是跟随重启发出的。
+    await vi.waitFor(
+      () => expect(calls.some((call) => call.text === '下一章正文。')).toBe(true),
+      { timeout: 3000 },
+    )
+
+    const jumpAt = Date.now()
+    // 模拟目录/进度条跳章：只改索引与正文 DOM，不经过朗读自己的切章流程。
+    store.currentIndex = 1
+    paragraphs = chapterParagraphs.get(1) || []
+
+    await vi.waitFor(
+      () => expect(calls.some((call) => call.text === '下一章正文。' && call.at >= jumpAt)).toBe(true),
+      { timeout: 4000 },
+    )
+    await vi.waitFor(() => expect(store.isSpeaking).toBe(true), { timeout: 4000 })
+    await vi.waitFor(() => expect(paragraphs[0].classList.contains('reading')).toBe(true), { timeout: 4000 })
+    store.stopTTS()
+  })
+
+  it('暂停中手动跳章只丢弃旧位置，不自动出声', async () => {
+    const { store, playback } = setupComposable()
+
+    playback.startSpeech(paragraphs[0] as unknown as HTMLElement)
+    await vi.waitFor(() => expect(store.isSpeaking).toBe(true))
+    store.pauseTTS()
+    expect(store.isPaused).toBe(true)
+
+    store.currentIndex = 1
+    paragraphs = chapterParagraphs.get(1) || []
+
+    // 等过防抖窗口：跟随只停流，不应把暂停态变成自动播放。
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    expect(store.isPaused).toBe(false)
+    expect(store.isSpeaking).toBe(false)
+    expect(audioInstances.every((audio) => audio.paused)).toBe(true)
+  })
+
+  it('跳章跟随还没落地时按停止，不会过一会儿自己开始朗读', async () => {
+    const { store, playback } = setupComposable()
+    const calls: string[] = []
+    vi.mocked(synthesizeHttpTts).mockImplementation(async ({ text }) => {
+      calls.push(text)
+      return new Blob(['audio'], { type: 'audio/wav' })
+    })
+
+    playback.startSpeech(paragraphs[0] as unknown as HTMLElement)
+    await vi.waitFor(() => expect(store.isSpeaking).toBe(true))
+
+    store.currentIndex = 1
+    paragraphs = chapterParagraphs.get(1) || []
+    // 用户跳章后立刻点停止/关闭听书：挂起的跟随必须作废。
+    playback.cancelPendingChapterFollow()
+    store.stopTTS()
+    const countAfterStop = calls.length
+
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    expect(calls.length).toBe(countAfterStop)
+    expect(store.isSpeaking).toBe(false)
+  })
 })
+
+/* ─── 双音色 + edge 的运行时脚手架（上面的用例共用） ─── */
+
+const NARRATION_VOICE = 'zh-CN-YunxiNeural'
+const DIALOGUE_VOICE = 'zh-CN-XiaoxiaoNeural'
+
+/** 切到 edge + 双音色，旁白与对话各用一套可区分的音色。 */
+function setupDualVoiceEdge() {
+  const result = setupComposable()
+  result.store.setSpeechProvider('edge')
+  result.store.setEdgeVoice(NARRATION_VOICE)
+  result.store.setEdgeDialogueVoice(DIALOGUE_VOICE)
+  result.store.setDualVoiceEnabled(true)
+  vi.mocked(synthesizeEdgeTts).mockResolvedValue(new Blob(['audio'], { type: 'audio/mpeg' }))
+  return result
+}
+
+/** 本章的 edge 合成请求（排除跨章预取的那一条）。 */
+function chapterSpeechCalls() {
+  return vi.mocked(synthesizeEdgeTts).mock.calls
+    .map(([params]) => params)
+    .filter((params) => params.text !== '下一章正文。')
+}

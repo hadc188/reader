@@ -107,7 +107,8 @@
 
     <ReaderTtsPanel
       :show="showTTSPanel"
-      :state="ttsPanelState"
+      :state="ttsPanelDisplayState"
+      :mini="appStore.miniMode"
       :theme="chromeTheme"
       :chapter-title="store.currentChapter?.title"
       :provider="store.speechConfig.provider"
@@ -851,6 +852,15 @@ function setTtsPanelState(value: TtsPanelState) {
 }
 
 /**
+ * 听书面板实际渲染的形态：迷你窗口里一律用圆形气泡（现有最小形态）。
+ * 只是显示层覆盖，不动用户保存的偏好（ttsPanelState）—— 退出迷你模式后
+ * 用户原来选的展开/单行会自动回来。
+ */
+const ttsPanelDisplayState = computed<TtsPanelState>(() =>
+  appStore.miniMode ? 'bubble' : ttsPanelState.value,
+)
+
+/**
  * 听书面板浮层给正文让出的底部空间。
  *
  * 面板是 fixed 浮层、不参与滚动: 分页模式下页高恒等于容器高, 被它盖住的行永远
@@ -868,7 +878,9 @@ let ttsPanelMeasureAttempts = 0
 
 function measureTtsPanelInset() {
   // 圆形气泡几乎不挡正文, 让空间反而白亏一块; 只有条形/展开态才收缩。
-  if (!showTTSPanel.value || ttsPanelState.value === 'bubble') {
+  // 这里必须看实际渲染的形态: 迷你模式把面板压成了气泡, 若仍按用户偏好
+  // (可能是 expanded) 判断, 正文会白白少一条。
+  if (!showTTSPanel.value || ttsPanelDisplayState.value === 'bubble') {
     ttsPanelMeasureAttempts = 0
     ttsPanelOpen.value = false
     ttsPanelInset.value = 0
@@ -2613,6 +2625,7 @@ const {
   speechNext,
   restartSpeechFromCurrentParagraph,
   cancelSpeechTransition,
+  cancelPendingChapterFollow,
   disposeAutoPlayback,
 } = useReaderAutoPlayback(
   store,
@@ -3409,6 +3422,7 @@ function handleTTS() {
 function closeTTSPanel() {
   showTTSPanel.value = false
   ttsPanelDismissed.value = true
+  cancelPendingChapterFollow()
   cancelSpeechTransition()
   store.stopTTS()
 }
@@ -3430,6 +3444,7 @@ function toggleSpeechFromPanel() {
 }
 
 function handleStopTTS() {
+  cancelPendingChapterFollow()
   cancelSpeechTransition()
   store.stopTTS()
 }
@@ -3451,8 +3466,10 @@ watch(showTTSPanel, (visible) => {
 })
 
 /** 面板显隐/形态变化都会改变它占的高度, 量完必须重新分页:
- *  分页按容器高度切页, 容器没变高就还是旧页边界, 底部照样被遮。 */
-watch([showTTSPanel, ttsPanelState], async () => {
+ *  分页按容器高度切页, 容器没变高就还是旧页边界, 底部照样被遮。
+ *  监听渲染形态而不是偏好值: 进出迷你模式时形态会被覆盖成气泡,
+ *  只看 ttsPanelState 会漏掉这次变化, 高度与分页都停在旧值。 */
+watch([showTTSPanel, ttsPanelDisplayState], async () => {
   await nextTick()
   measureTtsPanelInset()
   await nextTick()

@@ -4,6 +4,7 @@
     <div
       v-if="show && state === 'bubble'"
       class="tts-bubble"
+      :class="{ mini }"
       :style="{ background: theme.popup, color: theme.fontColor }"
     >
       <button class="tts-bubble-play" :aria-label="isPaused ? '继续' : '暂停'" @click="$emit('toggle-play')">
@@ -20,7 +21,12 @@
           <path d="M18 6 6 18M6 6l12 12" />
         </svg>
       </button>
-      <button class="tts-bubble-expand" aria-label="展开听书面板" @click="setState('bar')">
+      <!--
+        迷你窗口只有 320×240, 展开出去的大面板会占满整窗、且形态由 ReaderView
+        强制成气泡(点展开也展不开), 所以索性不渲染这个角标 —— 留个点了没反应的
+        按钮比没有更糟。关闭角标保留, 否则迷你模式下关不掉听书。
+      -->
+      <button v-if="!mini" class="tts-bubble-expand" aria-label="展开听书面板" @click="setState('bar')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <path d="m6 15 6-6 6 6" />
         </svg>
@@ -155,7 +161,7 @@ import type { ThemePreset } from '../../stores/reader'
 /** 听书面板的三种形态, 由宽到窄: 展开设置 → 单行控制条 → 圆形气泡。 */
 type TtsPanelState = 'expanded' | 'bar' | 'bubble'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   show: boolean
   theme: ThemePreset | { popup: string; fontColor: string }
   chapterTitle?: string
@@ -177,7 +183,14 @@ const props = defineProps<{
   timerText: string
   /** 当前形态。默认 'bar': 展开态会挡住约三分之一的正文。 */
   state: TtsPanelState
-}>()
+  /**
+   * 迷你窗口(最小 240×180)里不摆得下面板: 调用方会把 state 压成 'bubble',
+   * 这里再收一圈尺寸。默认为 false, 宽屏与手机端不受影响。
+   */
+  mini?: boolean
+}>(), {
+  mini: false,
+})
 
 const progressPercent = computed(() => Math.round(Math.max(0, Math.min(1, props.progress)) * 100))
 
@@ -310,6 +323,34 @@ function setState(next: TtsPanelState) {
 .tts-bubble-expand {
   bottom: -4px;
   right: -4px;
+}
+
+/* 迷你窗口: 气泡整体收一圈, 免得 40px 的圆在 320×240 里也显眼。
+ * 桌角留白同时从 20/28 收到 8 —— 迷你窗的标题栏之外几乎没有可让的空间。 */
+.tts-bubble.mini {
+  width: 40px;
+  height: 40px;
+  right: calc(8px + var(--safe-area-right, 0px));
+  bottom: calc(8px + var(--safe-area-bottom));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+.tts-bubble.mini .tts-bubble-play svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* 角标跟着缩: 22px 的圆挂在 40px 的气泡上会盖掉小半个播放键。 */
+.tts-bubble.mini .tts-bubble-close {
+  width: 16px;
+  height: 16px;
+  top: -3px;
+  right: -3px;
+}
+
+.tts-bubble.mini .tts-bubble-close svg {
+  width: 10px;
+  height: 10px;
 }
 
 .tts-icon-danger {

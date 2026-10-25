@@ -1544,6 +1544,32 @@ export const useReaderStore = defineStore('reader', () => {
    */
   let speechStreamControls: SpeechStreamControls | null = null
 
+  /**
+   * 「朗读被停止」的监听器。
+   *
+   * 停止入口不止一个：听书面板的停止按钮、快捷键、定时停止、关闭面板、卸载页面。
+   * 自动朗读需要在这些入口都取消「跳章后从头续读」的挂起任务，否则用户按了停止，
+   * 几秒后正文加载完又会自己开始朗读。挂在 store 的停止路径上是唯一不漏的做法。
+   */
+  const speechStopListeners = new Set<() => void>()
+
+  function addSpeechStopListener(listener: () => void) {
+    speechStopListeners.add(listener)
+    return () => {
+      speechStopListeners.delete(listener)
+    }
+  }
+
+  function notifySpeechStopped() {
+    for (const listener of speechStopListeners) {
+      try {
+        listener()
+      } catch {
+        // 监听器只做清理，抛错不该反过来影响停止朗读。
+      }
+    }
+  }
+
   function attachSpeechStreamControls(controls: SpeechStreamControls | null) {
     speechStreamControls = controls
   }
@@ -3108,6 +3134,9 @@ export const useReaderStore = defineStore('reader', () => {
     speechProgress.value = 0
     if (resetCallbacks) {
       clearSpeechStopTimer()
+      // 真正的「用户停止」才会走到这里：内部重启用的是 stopTTS(false)，
+      // 不能通知，否则会把刚要续读的跳章跟随一起取消。
+      notifySpeechStopped()
     }
   }
 
@@ -4198,6 +4227,7 @@ export const useReaderStore = defineStore('reader', () => {
     switchSource, preloadNextChapter, preloadAroundChapter, isChapterReady,
     refreshChapters, refreshTocFromSource,
     isSpeaking, isSpeechLoading, isPaused, speechProgress, startTTS, pauseTTS, stopTTS,
+    addSpeechStopListener,
     voiceList, speechConfig, speechStopAt, speechProviderLabel, openAISpeechConfigured, httpSpeechConfigured, edgeSpeechConfigured, msSpeechConfigured,
     systemTtsNativeEventsReliable, systemSpeechSupported,
     fetchVoices, setVoiceName, setSpeechProvider, setHttpTtsId, setSpeechRate, setSpeechPitch, setSpeechStopTimer, clearSpeechStopTimer,

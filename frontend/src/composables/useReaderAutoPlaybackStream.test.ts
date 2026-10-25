@@ -104,6 +104,8 @@ class FakeParagraph {
   isConnected = true
   offsetTop = 0
   offsetHeight = 20
+  /** 连续阅读的段落属于哪一章（`paragraphChapterIndex` 靠 closest 取 dataset）。 */
+  chapterIndex: number | null
   private classes = new Set<string>()
   classList = {
     add: (name: string) => {
@@ -115,12 +117,14 @@ class FakeParagraph {
     contains: (name: string) => this.classes.has(name),
   }
 
-  constructor(text: string) {
+  constructor(text: string, chapterIndex: number | null = null) {
     this.innerText = text
+    this.chapterIndex = chapterIndex
   }
 
-  closest() {
-    return null
+  closest(selector: string) {
+    if (selector !== '.continuous-chapter' || this.chapterIndex === null) return null
+    return { dataset: { chapterIndex: String(this.chapterIndex) } }
   }
 }
 
@@ -158,7 +162,7 @@ function stubGlobals() {
   vi.stubGlobal('cancelAnimationFrame', vi.fn())
 }
 
-function setupComposable() {
+function setupComposable(options: { continuous?: boolean } = {}) {
   const store = useReaderStore()
   store.setSpeechProvider('http')
   store.setHttpTtsId(7, 'audio/wav')
@@ -178,7 +182,12 @@ function setupComposable() {
     querySelectorAll: (selector: string) => (selector === 'p' ? paragraphs : []),
   } as unknown as HTMLElement)
   const scrollContainer = ref<HTMLElement | undefined>({
-    querySelectorAll: () => [],
+    querySelectorAll: (selector: string) => (
+      options.continuous && selector.includes('continuous')
+        // 连续阅读：容器里是若干 .chapter-text 根节点，段落挂在根节点下。
+        ? [{ querySelectorAll: () => paragraphs }]
+        : []
+    ),
     scrollTo: vi.fn(),
     scrollTop: 0,
     clientHeight: 600,
@@ -193,7 +202,7 @@ function setupComposable() {
   const playback = useReaderAutoPlayback(
     store,
     ref({ clickAction: 'next', autoScrollSpeed: 30 }) as never,
-    ref(false) as never,
+    ref(Boolean(options.continuous)) as never,
     scrollContainer,
     chapterText,
     nextChapterMock,
@@ -508,6 +517,132 @@ describe('useReaderAutoPlayback buffered speech stream', () => {
     await new Promise((resolve) => setTimeout(resolve, 900))
     expect(calls.length).toBe(countAfterStop)
     expect(store.isSpeaking).toBe(false)
+  })
+
+  it('只调 store.stopTTS()（快捷键/定时停止）也会取消挂起的跳章跟随', async () => {
+    const { store, playback } = setupComposable()
+    const calls: string[] = []
+    vi.mocked(synthesizeHttpTts).mockImplementation(async ({ text }) => {
+      calls.push(text)
+      return new Blob(['audio'], { type: 'audio/wav' })
+    })
+
+    playback.startSpeech(paragraphs[0] as unknown as HTMLElement)
+    await vi.waitFor(() => expect(store.isSpeaking).toBe(true))
+
+    // 用户跳章 → 正文还没回来时用快捷键停止朗读（不经过面板的停止按钮）。
+    store.currentIndex = 1
+    paragraphs = chapterParagraphs.get(1) || []
+    store.stopTTS()
+    const countAfterStop = calls.length
+
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    expect(calls.length).toBe(countAfterStop)
+    expect(store.isSpeaking).toBe(false)
+  })
+
+  it('连续阅读跳章从目标章第一段开始，而不是 DOM 里上一章的第一段', async () => {
+    const { store, playback } = setupComposable({ continuous: true })
+    const calls: string[] = []
+    vi.mocked(synthesizeHttpTts).mockImplementation(async ({ text }) => {
+      calls.push(text)
+      return new Blob(['audio'], { type: 'audio/wav' })
+    })
+
+    // 上一章给足长度：起点选错时，跟随会逐段「跳过」上一章（每段约 120ms），
+    // 40 段就是好几秒 —— 与用户实际遇到的「跳章后半天不出声」一致。
+    const previousChapter = Array.from(
+      { length: 40 },
+      (_, index) => new FakeParagraph(`上一章第${index + 1}段。`, 0),
+    )
+    paragraphs = previousChapter
+    chapterParagraphs.set(0, previousChapter)
+    chapterParagraphs.set(1, [
+      new FakeParagraph('新章第一段。', 1),
+      new FakeParagraph('新章第二段。', 1),
+    ])
+
+    playback.startSpeech(previousChapter[0] as unknown as HTMLElement)
+    await vi.waitFor(() => expect(store.isSpeaking).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    // 连续阅读切章后，DOM 里同时挂着上一章与目标章。
+    const targetChapter = chapterParagraphs.get(1) || []
+    paragraphs = [...previousChapter, ...targetChapter]
+    const countBeforeJump = calls.length
+    store.currentIndex = 1
+
+    await vi.waitFor(
+      () => expect(calls.slice(countBeforeJump)).toContain('新章第一段。'),
+      { timeout: 2500, interval: 50 },
+    )
+    // 起点必须是目标章：bug 版本会先把上一章整章「空跳」一遍。
+    expect(calls.slice(countBeforeJump)).not.toContain('上一章第1段。')
+    store.stopTTS()
+  })
+
+  it('TTS 自己滚到章边界引起索引变化时不重启朗读', async () => {
+    const { store, playback } = setupComposable({ continuous: true })
+    const calls: string[] = []
+    vi.mocked(synthesizeHttpTts).mockImplementation(async ({ text }) => {
+      calls.push(text)
+      return new Blob(['audio'], { type: 'audio/wav' })
+    })
+
+    paragraphs = [
+      new FakeParagraph('本章第一段。', 0),
+      new FakeParagraph('本章第二段。', 0),
+    ]
+    chapterParagraphs.set(0, paragraphs)
+    chapterParagraphs.set(1, [new FakeParagraph('下一章第一段。', 1)])
+
+    playback.startSpeech(paragraphs[0] as unknown as HTMLElement)
+    await vi.waitFor(() => expect(store.isSpeaking).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const countBeforeScroll = calls.length
+
+    // 模拟 handleScroll 反推索引：TTS 自己滚过章边界。
+    playback.markChapterChangeFromScroll()
+    store.currentIndex = 1
+
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    // 没有重启：不会重新合成新章；旧流仍在播。
+    expect(calls.length).toBe(countBeforeScroll)
+    expect(store.isSpeaking).toBe(true)
+    store.stopTTS()
+  })
+
+  it('用户滚轮/触摸之后的自滚窗口内跳章，仍然跟随', async () => {
+    const { store, playback } = setupComposable({ continuous: true })
+    const calls: string[] = []
+    vi.mocked(synthesizeHttpTts).mockImplementation(async ({ text }) => {
+      calls.push(text)
+      return new Blob(['audio'], { type: 'audio/wav' })
+    })
+
+    paragraphs = [new FakeParagraph('本章第一段。', 0)]
+    chapterParagraphs.set(0, paragraphs)
+    chapterParagraphs.set(1, [new FakeParagraph('新章第一段。', 1)])
+
+    playback.startSpeech(paragraphs[0] as unknown as HTMLElement)
+    await vi.waitFor(() => expect(store.isSpeaking).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const countBeforeJump = calls.length
+
+    // 用户在 TTS 刚滚过（1.5 秒保护窗口内）自己跳章：必须是真实跟随。
+    paragraphs = [
+      new FakeParagraph('本章第一段。', 0),
+      new FakeParagraph('新章第一段。', 1),
+    ]
+    playback.markChapterChangeFromScroll()
+    playback.markManualReadingInput()
+    store.currentIndex = 1
+
+    await vi.waitFor(
+      () => expect(calls.slice(countBeforeJump)).toContain('新章第一段。'),
+      { timeout: 4000 },
+    )
+    store.stopTTS()
   })
 })
 

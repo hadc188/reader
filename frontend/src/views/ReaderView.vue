@@ -2626,6 +2626,8 @@ const {
   restartSpeechFromCurrentParagraph,
   cancelSpeechTransition,
   cancelPendingChapterFollow,
+  markChapterChangeFromScroll,
+  markManualReadingInput,
   disposeAutoPlayback,
 } = useReaderAutoPlayback(
   store,
@@ -2647,6 +2649,8 @@ const {
 function handleManualReadingInput() {
   cancelPageScrollAnimation(scrollContainerRef.value)
   pauseAutoScrollForManualInput()
+  // 让朗读的「自滚保护窗口」知道这是用户在滚：此后反推出的索引变化按用户跳章处理。
+  markManualReadingInput()
 }
 
 /** 翻页步长: 按正文行高取整, 翻页后视口顶部落在行首。
@@ -2950,6 +2954,9 @@ function handleScroll() {
           // watcher, 标记无人消费会成为残留。
           if (store.currentIndex !== activeIndex) {
             markSkipPositionRestore(activeIndex)
+            // 告诉朗读：这次索引变化是滚动反推出来的（可能是 TTS 自己的自动滚动，
+            // 也可能是用户滚动 —— 由上手输入时刻区分，见 isSpeechSelfScroll）。
+            markChapterChangeFromScroll()
           }
           setContinuousActiveChapter(activeIndex, activeChapter.content, progress)
         } else {

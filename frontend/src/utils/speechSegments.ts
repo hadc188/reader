@@ -32,8 +32,16 @@ const QUOTE_PAIRS: Record<string, string> = {
   '\u300e': '\u300f', // 『 』
 }
 
-/** 句末标点：说话人冒号切出来的对话在句末回到旁白。 */
-const SENTENCE_ENDINGS = new Set(['。', '！', '？', '!', '?', '；', ';', '…'])
+/**
+ * 冒号对话真正的句末标点。
+ *
+ * 只认句号/问号/叹号：分号与省略号在台词中间很常见（`先别走；我还有话说`、
+ * `等等……我还有话说`），把它们当句末会把一句台词从中间劈成「对话 + 旁白」。
+ */
+const COLON_DIALOGUE_ENDINGS = new Set(['。', '！', '？', '!', '?'])
+
+/** 找「本句前缀」时的断句边界：分号/省略号也算，避免把上一句并进说话人标签。 */
+const SENTENCE_BOUNDARIES = new Set(['。', '！', '？', '!', '?', '；', ';', '…'])
 
 /**
  * 说话人前缀上限。
@@ -47,14 +55,67 @@ const SPEAKER_PREFIX_MAX_CHARS = 20
  * 冒号前面不该算「说话人」的常见标签。
  *
  * 这些词后面跟冒号通常是解释/列举（`注意：请勿模仿`、`时间：2024年`），用对话
- * 音色读会很怪。词表刻意短：漏掉的宁可当对话（用户要的就是「冒号后算对话」），
- * 误伤的却是明显不对的叙述，所以只收高频标签词。
+ * 音色读会很怪。词表刻意短：漏掉的宁可当旁白（保守优先），误伤的却是明显不对
+ * 的叙述，所以只收高频标签词。
  */
 const NON_SPEAKER_LABELS = new Set([
   '时间', '地点', '地址', '网址', '价格', '作者', '简介', '备注', '注意', '说明',
   '规则', '规则如下', '例如', '比如', '如下', '步骤', '提示', '答案', '来源',
   '日期', '电话', '邮箱', '原因', '结果', '条件', '示例', '参考', '目录', '正文',
+  '系统', '公告', '通知', '警告', '任务', '奖励', '恭喜',
 ])
+
+/**
+ * 说话动作词：前缀里出现这些，才按「有人在说话」处理。
+ *
+ * 只靠「短前缀」判定的误伤太广：`他明白了：这一切都是骗局。`、`他只有一个
+ * 念头：活下去。` 都会被当成台词。网文里真正的说话标签几乎都带这类动作词。
+ * 单字的 `念`/`笑`/`叹` 不收（`念头`、`笑话` 会误伤），只用它们的双字形态。
+ */
+const SPEECH_MARKERS = [
+  '说', '道', '问', '答', '喊', '叫', '吼', '嚷', '骂',
+  '嘟囔', '嘀咕', '喃喃', '低语', '自语', '开口', '出声', '应声', '接口',
+  '回答', '反问', '追问', '插嘴', '接话', '补充', '强调', '解释', '介绍',
+  '招呼', '提醒', '嘱咐', '叮嘱', '吩咐', '命令', '宣布', '报告', '汇报',
+  '表示', '回复', '写道', '咬牙', '点头', '摇头',
+  '笑道', '冷笑', '嗤笑', '大笑', '苦笑', '微笑', '讥笑', '嘲弄',
+  '叹道', '骂道', '吼道', '叫道', '喊道', '问道', '答道', '应道',
+  '沉声', '低声', '冷声', '厉声', '柔声', '颤声', '嘶哑', '冷哼', '轻哼',
+]
+
+/**
+ * 叙述/解释性短语：句子里带这些就不是「谁在说话」。
+ *
+ * `道` / `说` 这类单字也会出现在 `知道`、`据说` 里，先把这些短语排除掉；
+ * 后半段是「短前缀 + 冒号」里常见的解释性名词（`根据规则：`、`他决定：`），
+ * 只靠长度限制挡不住。
+ */
+const NON_SPEAKER_PATTERNS = new RegExp([
+  '明白', '知道', '觉得', '清楚', '发现', '想到', '看到', '听到', '意识', '认为',
+  '仿佛', '似乎', '原来', '结论', '念头', '道理', '难道', '味道', '街道',
+  '根据', '按照', '依据', '规则', '规定', '标准', '要求', '方法', '步骤',
+  '原因', '理由', '目的', '目标', '条件', '前提', '关键', '重点', '问题', '答案',
+  '意思', '内容', '结果', '后果', '真相', '事实', '秘密', '计划', '办法', '选择',
+  '决定', '据说', '听说', '虽说', '也就是说', '可以说', '应该说', '换句话说',
+  '简单来说', '具体来说', '总的来说',
+  // 系统流/游戏化网文的提示框：`系统提示：`、`任务奖励：` 后面不是台词。
+  '系统', '提示', '公告', '警告', '任务', '奖励', '恭喜', '通知',
+].join('|'))
+
+/** 不含说话动作词时，只接受 4 字内、且不带叙述虚词的名字/称呼（`张三：`）。 */
+const SPEAKER_NAME_MAX_CHARS = 4
+
+/** 名字里几乎不会出现的叙述虚词。 */
+const NARRATIVE_PARTICLES = /[了着过得很太更最没不]/
+
+/**
+ * 时间/顺序开头的前缀基本不是说话人（`第二天：`、`半小时后：`、`最后：`）。
+ *
+ * 用整词而不是单字：单字 `明`/`后`/`上` 会把 `明明：`、`后羿：` 这类人名一起
+ * 挡掉；整词只命中真正的时间/顺序说法。
+ */
+const TIME_OR_ORDINAL_PREFIX = /^(今天|明天|昨天|后天|前天|上午|下午|晚上|早上|中午|半夜|凌晨|现在|当时|此时|此刻|次日|翌日|第二天|第二天早上|半小时|一会儿|片刻|随后|然后|接着|最后|首先|其次|同时|另外|总之|\d)/
+
 
 /**
  * 冒号对话的结束哨兵：栈里出现它表示「等句末标点」，而不是等某个引号闭符。
@@ -167,9 +228,9 @@ export function splitSpeechSegmentsDetailed(
     // ── 对话中 ──
     const top = closerStack.length ? closerStack[closerStack.length - 1] : null
 
-    // 冒号对话：等到句末标点才结束；期间出现的引号仍按引号规则嵌套配对。
+    // 冒号对话：等到真正的句末标点才结束；期间出现的引号仍按引号规则嵌套配对。
     if (top === SENTENCE_SENTINEL) {
-      if (SENTENCE_ENDINGS.has(char)) {
+      if (COLON_DIALOGUE_ENDINGS.has(char)) {
         closerStack.pop()
         buffer += char
         if (!closerStack.length) {
@@ -218,12 +279,15 @@ export function splitSpeechSegmentsDetailed(
 /**
  * 当前位置的冒号是否算「说话人冒号」。
  *
- * 保守判定的四个条件缺一不可：
+ * 五个条件缺一不可：
  * 1. 全角 `：`（半角会和 `12:30`、`http://` 打架，不认）；
  * 2. 冒号后还有内容，且第一个非空白字符不是引号开符（那种交给引号规则）；
  * 3. 冒号后的第一个字符不是数字（`时间：2024年`、`价格：5元` 这类标签）；
- * 4. 冒号前的「本句前缀」非空、不超过 `SPEAKER_PREFIX_MAX_CHARS`，且不在
- *    `NON_SPEAKER_LABELS` 里。
+ * 4. 冒号前的「本句前缀」非空、不超过 `SPEAKER_PREFIX_MAX_CHARS`，不在
+ *    `NON_SPEAKER_LABELS` 里，也不以时间/序数词开头；
+ * 5. 前缀要么带说话动词（`他笑道`），要么是 4 字内的名字/称呼（`张三`）。
+ *    只满足「短」是不够的 —— 那样 `他明白了：`、`结论只有一个：` 都会被读成
+ *    台词。
  */
 function isSpeakerColon(chars: string[], index: number, buffer: string): boolean {
   if (chars[index] !== '：') return false
@@ -239,11 +303,16 @@ function isSpeakerPrefix(buffer: string): boolean {
   let start = 0
   for (let index = 0; index < buffer.length; index += 1) {
     const char = buffer[index]
-    if (SENTENCE_ENDINGS.has(char) || char === '\n') start = index + 1
+    if (SENTENCE_BOUNDARIES.has(char) || char === '\n') start = index + 1
   }
   const prefix = buffer.slice(start).trim()
   if (!prefix || prefix.length > SPEAKER_PREFIX_MAX_CHARS) return false
-  return !NON_SPEAKER_LABELS.has(prefix)
+  if (NON_SPEAKER_LABELS.has(prefix)) return false
+  if (TIME_OR_ORDINAL_PREFIX.test(prefix)) return false
+  if (NON_SPEAKER_PATTERNS.test(prefix)) return false
+  if (SPEECH_MARKERS.some((marker) => prefix.includes(marker))) return true
+  // 没有说话动作词时只认极短的人名/称呼，且不能带叙述性虚词。
+  return prefix.length <= SPEAKER_NAME_MAX_CHARS && !NARRATIVE_PARTICLES.test(prefix)
 }
 
 function nextNonSpaceChar(chars: string[], from: number): string {

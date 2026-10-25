@@ -151,6 +151,44 @@ describe('splitSpeechSegments：说话人冒号', () => {
       splitSpeechSegmentsDetailed('张三：你好啊。', { detectSpeakerColon: false }).segments,
     ).toEqual([{ type: 'narration', text: '张三：你好啊。' }])
   })
+
+  it('台词里的分号与省略号不结束对话', () => {
+    // 分号/省略号在台词中间很常见，当成句末会把一句台词劈成「对话 + 旁白」。
+    expect(splitSpeechSegments('他笑道：先别走；我还有话说。')).toEqual([
+      { type: 'narration', text: '他笑道：' },
+      { type: 'dialogue', text: '先别走；我还有话说。' },
+    ])
+    expect(splitSpeechSegments('他说：等等……我还有话说。')).toEqual([
+      { type: 'narration', text: '他说：' },
+      { type: 'dialogue', text: '等等……我还有话说。' },
+    ])
+  })
+
+  it('叙述里的「短句 + 冒号」不当台词', () => {
+    // 只按「短前缀」判定会把心理活动/判断句读成对话音色。
+    for (const text of [
+      '他明白了：这一切都是骗局。',
+      '他只有一个念头：活下去。',
+      '他心里清楚：这次躲不过去了。',
+      '结论只有一个：撤退。',
+      '他想起一句话：时间会证明一切。',
+      '根据规则：每人只能带一件。',
+      '他决定：明天就走。',
+    ]) {
+      expect(splitSpeechSegments(text), text).toEqual([{ type: 'narration', text }])
+    }
+  })
+
+  it('带说话动作的标签仍照常切（包括不写「说」的动作）', () => {
+    expect(splitSpeechSegments('张三冷笑：你也有今天。')).toEqual([
+      { type: 'narration', text: '张三冷笑：' },
+      { type: 'dialogue', text: '你也有今天。' },
+    ])
+    expect(splitSpeechSegments('老道士淡淡道：随缘吧。')).toEqual([
+      { type: 'narration', text: '老道士淡淡道：' },
+      { type: 'dialogue', text: '随缘吧。' },
+    ])
+  })
 })
 
 describe('splitSpeechSegmentsDetailed：跨段对话', () => {

@@ -91,4 +91,27 @@ describe('buildSpeechChunkPieces', () => {
     // 纯引号内容在线服务不会返回音频，必须在这里就丢掉而不是发出去换错误。
     expect(buildSpeechChunkPieces('“……”。', onlineDual).pieces).toEqual([])
   })
+
+  it('不切块通道下，只有说话人标签的旁白并进前一段旁白（少一次请求）', () => {
+    // http 引擎一段一次请求：`张三：` 单独发出去等于白花一次合成。
+    const { pieces } = buildSpeechChunkPieces('他推门进来。张三：你好啊。', {
+      dualVoice: true,
+      sentenceChunked: false,
+    })
+    expect(pieces).toEqual([
+      { text: '他推门进来。张三：', type: 'narration' },
+      { text: '你好啊。', type: 'dialogue' },
+    ])
+  })
+
+  it('没有前一段旁白可并时，说话人标签仍单独成块', () => {
+    const { pieces } = buildSpeechChunkPieces('张三：你好啊。', {
+      dualVoice: true,
+      sentenceChunked: false,
+    })
+    expect(pieces).toEqual([
+      { text: '张三：', type: 'narration' },
+      { text: '你好啊。', type: 'dialogue' },
+    ])
+  })
 })

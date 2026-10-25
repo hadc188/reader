@@ -18,6 +18,14 @@ import {
 /** 单块字符上限。openai / edge / msdemo 都是「一次请求一段音频」，块小首播更快。 */
 export const SPEECH_CHUNK_CHAR_LIMIT = 70
 
+/**
+ * 「只说人名」的旁白标签上限（`张三：`、`老道士叹了口气，说：`）。
+ *
+ * 这类段落在双音色下会单独占一次合成请求，而它往往只有几个字。紧跟在一段旁白
+ * 之后时直接并进那段旁白：音色不变（都是旁白），请求数少一次。
+ */
+const SPEAKER_LABEL_MAX_CHARS = 24
+
 export interface SpeechChunkPiece {
   text: string
   type: SpeechSegmentType
@@ -83,12 +91,32 @@ export function buildSpeechChunkPieces(
       ? buildSpeechChunksFromText(segment.text)
       : [segment.text.trim()]
     for (const pieceText of texts) {
-      if (hasSpeakableContent(pieceText)) {
-        pieces.push({ text: pieceText, type: segment.type })
+      if (!hasSpeakableContent(pieceText)) continue
+      // 只有一个说话人标签的旁白段（`张三：`）紧跟在一段旁白后可并进去：
+      // 类型相同、朗读听感不变，但少一次合成请求。
+      const previous = pieces[pieces.length - 1]
+      if (
+        previous
+        && previous.type === 'narration'
+        && segment.type === 'narration'
+        && isSpeakerLabelOnly(pieceText)
+        && !options.sentenceChunked
+      ) {
+        previous.text += pieceText
+        continue
       }
+      pieces.push({ text: pieceText, type: segment.type })
     }
   }
   return { pieces, openCloser }
+}
+
+/** 这一段是不是「只有说话人标签、没有说话内容」（`张三：`、`他笑道：`）。 */
+function isSpeakerLabelOnly(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed || trimmed.length > SPEAKER_LABEL_MAX_CHARS) return false
+  if (!trimmed.endsWith('：')) return false
+  return !/[。！？!?；;…]/.test(trimmed.slice(0, -1))
 }
 
 /**

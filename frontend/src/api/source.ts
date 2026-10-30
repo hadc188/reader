@@ -11,7 +11,8 @@ export function getBookSources() {
 
 export interface SourceLoginField {
   name: string
-  type: 'text' | 'password' | 'button' | 'toggle' | 'select'
+  /** `label` 是纯展示控件（legado 的 `RowUi.Type` 之外的扩展类型，只当说明文字渲染）。 */
+  type: 'text' | 'password' | 'button' | 'toggle' | 'select' | 'label'
   action?: string | null
   viewName?: string | null
   placeholder?: string | null

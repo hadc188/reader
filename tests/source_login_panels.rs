@@ -135,3 +135,54 @@ async fn login_controls_keep_defaults_and_apply_resets_and_button_labels() {
     assert_eq!(view["fields"][2]["viewName"], "已更新");
     service.run_source_login(&source, Some("button:3".into()), None).await.unwrap();
 }
+
+/// 带 `type: "label"` 的登录面板必须能打开。
+///
+/// legado 的 `rowUiBuilder` 对 `RowUi.Type` 是**没有 else 的 `when`**：不认识的
+/// 类型既不渲染也不报错，其余控件照常。而 yckceo id 8033「西瓜书屋 v3」把最后
+/// 一项写成 `{"name":"⚠️ 站点限频3秒/次…","type":"label"}`，早先后端对未知类型
+/// 直接 `Err`，整个登录面板只显示「不支持的登录控件: label」。
+#[tokio::test]
+async fn label_controls_do_not_break_the_login_form() {
+    let (service, _) = service();
+    let source = book_source_from_value(json!({
+        "bookSourceUrl":format!("label测试{}", uuid::Uuid::new_v4()), "bookSourceName":"label",
+        "loginUi":r#"[
+            {"name":"状态栏","type":"button","action":"notice()","viewName":"'当前：'+(source.getVariable()||source.getKey())"},
+            {"name":"说明","type":"label"},
+            {"name":"⚠️ 站点限频3秒/次；主站搜索过一次CF盾长期有效。","type":"label"},
+            {"name":"账号","type":"text"}
+        ]"#,
+        "loginUrl":"function notice(){java.toast('ok')}"
+    })).unwrap();
+    let view = service.login_book_source(&source).await.unwrap();
+    let fields = view["fields"].as_array().unwrap();
+    assert_eq!(fields.len(), 4, "label 与其它控件都要保留: {fields:?}");
+    assert_eq!(fields[1]["type"], "label");
+    assert_eq!(fields[2]["type"], "label");
+    // label 不参与取值 map：否则展示文字会被写进 source.putLoginInfo。
+    assert!(view["values"].get("说明").is_none(), "label 不应进入 values: {}", view["values"]);
+    assert!(view["values"].get("⚠️ 站点限频3秒/次；主站搜索过一次CF盾长期有效。").is_none());
+    assert_eq!(view["values"]["账号"], "");
+    // 动态 viewName 要按 JS 求值（legado 的 evalUiJs 语义），不能把源码当文字显示。
+    assert_eq!(fields[0]["viewName"], format!("当前：{}", source.book_source_url));
+    // 点按钮仍然可用（label 的存在不该影响 action 的下标解析）。
+    let view = service.run_source_login(&source, Some("button:0".into()), None).await.unwrap();
+    assert_eq!(view["messages"][0], "ok");
+    assert_eq!(view["actionCompleted"], true);
+}
+
+/// 不认识的控件类型既不能整页失败，也不该混进取值 map。
+#[tokio::test]
+async fn unknown_control_types_are_skipped_instead_of_failing() {
+    let (service, _) = service();
+    let source = book_source_from_value(json!({
+        "bookSourceUrl":format!("未知控件{}", uuid::Uuid::new_v4()), "bookSourceName":"未知",
+        "loginUi":[{"name":"账号","type":"text"},{"name":"奇怪控件","type":"input"},{"name":"说明","type":"LABEL"}]
+    })).unwrap();
+    let view = service.login_book_source(&source).await.unwrap();
+    let fields = view["fields"].as_array().unwrap();
+    assert_eq!(fields.len(), 2, "未知类型应被跳过: {fields:?}");
+    assert_eq!(fields[1]["type"], "label", "类型名大小写不敏感");
+    assert!(view["values"].get("奇怪控件").is_none());
+}

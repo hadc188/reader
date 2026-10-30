@@ -16,7 +16,8 @@
             <template v-for="(field, index) in view.fields" :key="`${field.name}-${index}`">
             <div v-if="field.style?.layout_wrapBefore" class="login-wrap" aria-hidden="true"></div>
             <div class="login-field" :style="fieldStyle(field)">
-              <p v-if="field.type === 'button' && !field.action?.trim()" class="login-note">{{ field.viewName || field.name }}</p>
+              <p v-if="field.type === 'label'" class="login-note login-label">{{ field.viewName || field.name }}</p>
+              <p v-else-if="field.type === 'button' && !field.action?.trim()" class="login-note">{{ field.viewName || field.name }}</p>
               <button v-else-if="field.type === 'button'" type="button" class="login-button" :disabled="busy || savingCookie" @click="runAction(`button:${index}`)">
                 {{ field.viewName || field.name }}
               </button>
@@ -160,7 +161,9 @@ function showBrowser(request: ShowBrowserRequest, current: number) {
 }
 
 function updateLoginData(data: Record<string, unknown> | null) {
-  const updates = data || Object.fromEntries((view.value?.fields || []).filter((field) => field.type !== 'button').map((field) => [field.name, field.default ?? field.chars?.[0] ?? '']))
+  // `label` 是展示控件，不进 `values`（后端也不会为它建取值键）。
+  const editable = (view.value?.fields || []).filter((field) => field.type !== 'button' && field.type !== 'label')
+  const updates = data || Object.fromEntries(editable.map((field) => [field.name, field.default ?? field.chars?.[0] ?? '']))
   if (data === null) values.value = {}
   for (const [key, value] of Object.entries(updates)) {
     const field = view.value?.fields.find((field) => field.name === key)
@@ -291,6 +294,9 @@ function close() { ++generation; browser.value = null; emit('update:modelValue',
 .login-field { min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 .login-field > .login-button { height: 100%; text-align: var(--field-align, center); overflow-wrap: anywhere; }
 .login-note { margin: 4px 0; font-size: 13px; text-align: var(--field-align, center); color: var(--color-text-secondary); }
+/* `label` 控件是整行说明文字（书源用它写站点限频/使用提示），
+   不占输入框的宽度节奏，也不被按钮的 50% flex-basis 挤成半行。 */
+.login-label { flex: none; width: 100%; margin: 2px 0; line-height: 1.7; text-align: left; color: var(--color-text-tertiary); font-size: 12.5px; }
 .login-field label, .cookie-section > label { font-size: 13px; font-weight: 600; }
 .login-field input:not([type=checkbox]), .login-field select, .cookie-section textarea { box-sizing: border-box; width: 100%; border: 1px solid var(--color-border); border-radius: var(--radius-md, 8px); background: var(--color-bg-field, var(--color-bg)); color: var(--color-text); padding: 10px 12px; font: inherit; font-size: 13px; }
 .login-field input[type=checkbox] { align-self: flex-start; }

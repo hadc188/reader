@@ -105,16 +105,93 @@ fn parse_lenient_rows(json: &str) -> anyhow::Result<Vec<LoginField>> {
     }
 }
 
-fn fields(source: &BookSource, values: &Map<String, Value>) -> anyhow::Result<Vec<LoginField>> {
+/// 可编辑控件：参与 `values`（登录信息 map），名字是取值键。
+fn takes_value(kind: &str) -> bool {
+    matches!(kind, "text" | "password" | "toggle" | "select")
+}
+
+/// 认识的控件类型。`label` 是 legado 之外由部分分支客户端（含本项目前端）
+/// 支持的纯文字说明控件：不渲染输入，也不进 `values`。
+fn is_supported(kind: &str) -> bool {
+    takes_value(kind) || matches!(kind, "button" | "label")
+}
+
+fn parse_rows(source: &BookSource, values: &Map<String, Value>) -> anyhow::Result<Vec<LoginField>> {
     let Some(raw) = source.login_ui.as_deref().filter(|s| !s.trim().is_empty()) else { return Ok(Vec::new()) };
     let raw = raw.trim();
     let json = if raw.starts_with("@js:") || raw.starts_with("js:") || raw.starts_with("<js>") {
         evaluate(source, &format!("{}\n{}", script(source.login_url.as_deref().unwrap_or("")), script(raw)), values)?
     } else { raw.to_string() };
-    let rows = parse_lenient_rows(&json)?;
-    for row in &rows {
-        anyhow::ensure!(!row.name.trim().is_empty(), "登录表单字段名称不能为空");
-        anyhow::ensure!(["text", "password", "button", "toggle", "select"].contains(&row.kind.as_str()), "不支持的登录控件: {}", row.kind);
+    let mut rows = parse_lenient_rows(&json)?;
+
+    // legado 的 `rowUiBuilder` 是对 `RowUi.Type` 的 `when`，**没有 else 分支**：
+    // 不认识的类型既不报错也不渲染，其余控件照常显示。这里早先对未知类型直接
+    // `Err`，于是一个只在部分分支客户端（如带 `label` 的增强版）里合法的书源
+    // 会让整个登录面板打不开 —— 报「不支持的登录控件: label」。
+    // 因此改为：认识的照常，不认识的跳过并记日志，绝不整页失败。
+    rows.retain(|row| {
+        let kind = row.kind.trim().to_ascii_lowercase();
+        if is_supported(&kind) {
+            return true;
+        }
+        // 用 `tracing` 而不是 JS 日志：`take_js_logs()` 在本次求值结束后就被取走
+        // 当 toast 列表，这里的提示会混进用户可见的消息里。
+        tracing::warn!(
+            target: "reader::login",
+            "跳过不支持的登录控件类型: {}（{}）",
+            row.kind,
+            row.name
+        );
+        false
+    });
+    for row in &mut rows {
+        row.kind = row.kind.trim().to_ascii_lowercase();
+        // 展示控件的文字可以直接写在 `name` 里（书源常见写法），
+        // 因此只有可编辑控件要求 name 非空（它是取值键）。
+        anyhow::ensure!(
+            !takes_value(&row.kind) || !row.name.trim().is_empty(),
+            "登录表单字段名称不能为空"
+        );
+    }
+    Ok(rows)
+}
+
+/// `viewName` 的显示文本：`'字面量'` 直接取引号内文本，其余按 JS 表达式求值
+/// （legado `SourceLoginDialog.evalUiJs`，脚本前拼 `loginUrl`，`result` 绑定表单值）。
+///
+/// 求值失败不报错：legado 在 `.onError` 里把文字显示成 `err`，但整块面板照常
+/// 可用；这里回退成 `None`，前端用 `name` 兜底。
+fn eval_view_name(source: &BookSource, values: &Map<String, Value>, row: &LoginField) -> Option<String> {
+    let raw = row.view_name.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(literal) = crate::parser::js::literal_view_name(raw) {
+        return Some(literal);
+    }
+    let code = format!("{}\n{}", script(source.login_url.as_deref().unwrap_or("")), script(raw));
+    match evaluate(source, &code, values) {
+        Ok(text) => {
+            let text = text.trim().to_string();
+            (!text.is_empty() && !text.eq_ignore_ascii_case("null")).then_some(text)
+        }
+        Err(err) => {
+            // 每点一次按钮都会重算一遍，日志要能看出是哪个控件出的问题。
+            tracing::warn!(target: "reader::login", "登录控件 viewName 求值失败（{}）: {err}", row.name);
+            None
+        }
+    }
+}
+
+fn fields(source: &BookSource, values: &Map<String, Value>) -> anyhow::Result<Vec<LoginField>> {
+    let mut rows = parse_rows(source, values)?;
+    // 动态显示名：本源的「状态栏 / 切换网址」按钮把 `viewName` 写成
+    // `'🌐 当前：'+(source.getVariable()||source.getKey())`，不求值就会把整段
+    // JS 源码当按钮文字显示出来。
+    for row in &mut rows {
+        if let Some(text) = eval_view_name(source, values, row) {
+            row.view_name = Some(text);
+        }
     }
     Ok(rows)
 }
@@ -134,7 +211,7 @@ pub fn run(source: &BookSource, action: Option<&str>, supplied_values: Option<Ma
     let is_form = source.login_ui.as_deref().is_some_and(|s| !s.trim().is_empty());
     let mut rows = fields(source, &values)?;
     for row in &rows {
-        if row.kind != "button" { values.entry(row.name.clone()).or_insert_with(|| json!(default_value(row))); }
+        if takes_value(&row.kind) { values.entry(row.name.clone()).or_insert_with(|| json!(default_value(row))); }
     }
     let mut open_url = None;
     if let Some(action) = action {
@@ -165,7 +242,7 @@ pub fn run(source: &BookSource, action: Option<&str>, supplied_values: Option<Ma
     for row in &mut rows {
         if row.kind == "button" {
             if let Some(value) = values.get(&row.name) { row.view_name = Some(string(value)); }
-        } else {
+        } else if takes_value(&row.kind) {
             values.entry(row.name.clone()).or_insert_with(|| json!(default_value(row)));
         }
     }
@@ -215,7 +292,9 @@ fn default_value(row: &LoginField) -> String {
 fn apply_effects(rows: &[LoginField], values: &mut Map<String, Value>, effects: crate::parser::js::LoginEffects) {
     if effects.reset {
         values.clear();
-        for row in rows.iter().filter(|row| row.kind != "button") {
+        // `label` 不是取值键：`java.upLoginData(null)` 的重置只回填可编辑控件，
+        // 否则展示文字会混进登录信息 map 一起写进 `source.putLoginInfo`。
+        for row in rows.iter().filter(|row| takes_value(&row.kind)) {
             values.insert(row.name.clone(), json!(default_value(row)));
         }
     }

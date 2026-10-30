@@ -581,6 +581,28 @@ pub fn eval_explore_action(
     )
 }
 
+/// `viewName` 的 `'字面量'` 形式：整串就是一对单引号包起来的纯文本。
+///
+/// legado 在两处用同一条判定（`SourceLoginDialog.rowUiBuilder` 与
+/// `ExploreAdapter`）：长度落在 3..=19 且首尾都是单引号就取引号内文本，
+/// 否则当 JS 表达式求值。
+///
+/// 只判断首尾引号是不够的：`'选'+'源'` 同样首尾是单引号且长度落在区间内，
+/// 但它其实是一段 JS 表达式。因此额外要求**内部不再出现引号**。
+pub fn literal_view_name(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let len = raw.chars().count();
+    if !(3..=19).contains(&len) || !raw.starts_with('\'') || !raw.ends_with('\'') {
+        return None;
+    }
+    let inner = &raw[1..raw.len() - 1];
+    if inner.contains('\'') {
+        return None;
+    }
+    let inner = inner.trim();
+    (!inner.is_empty()).then(|| inner.to_string())
+}
+
 /// 解析发现页控件的显示名（legado `ExploreKind.viewName`）。
 ///
 /// legado `ExploreAdapter` 的规则：
@@ -600,20 +622,8 @@ pub fn eval_explore_view_name(
     if raw.is_empty() {
         return None;
     }
-    // `'字面量'` 形式：整串就是一对单引号包起来的纯文本。
-    //
-    // 只判断首尾引号是不够的：`'选'+'源'` 同样首尾是单引号且长度落在 legado
-    // 的 3..=19 区间内，但它其实是一段 JS 表达式。因此额外要求**内部不再出现
-    // 引号**，否则交给沙盒求值。
-    let len = raw.chars().count();
-    if (3..=19).contains(&len) && raw.starts_with('\'') && raw.ends_with('\'') {
-        let inner = &raw[1..raw.len() - 1];
-        if !inner.contains('\'') {
-            let inner = inner.trim();
-            if !inner.is_empty() {
-                return Some(inner.to_string());
-            }
-        }
+    if let Some(literal) = literal_view_name(raw) {
+        return Some(literal);
     }
 
     let mut bindings = HashMap::new();

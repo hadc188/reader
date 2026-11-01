@@ -20,7 +20,27 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6" /></svg>
           <span>首页</span>
         </div>
-        <div v-if="!mini" class="m-top-item" :class="{ active: store.activePanel === 'bookshelf' }" @click="store.togglePanel('bookshelf')">
+        <!--
+          顶栏的「书架」位在书**未加入书架**时变成「加入书架」——
+          从书源直接点进来阅读的人，在此之前没有任何入口能把书收进书架
+          （issue #28 第 1 点）。已上架 / 状态未知时保持原来的书架面板入口。
+        -->
+        <div
+          v-if="!mini && canAddToShelf"
+          class="m-top-item add-shelf"
+          :class="{ busy: addingToShelf }"
+          :title="addingToShelf ? '正在加入书架' : '把这本书加入书架'"
+          @click="$emit('addToShelf')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" /></svg>
+          <span>{{ addingToShelf ? '加入中' : '加入书架' }}</span>
+        </div>
+        <div
+          v-else-if="!mini"
+          class="m-top-item"
+          :class="{ active: store.activePanel === 'bookshelf' }"
+          @click="store.togglePanel('bookshelf')"
+        >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
           <span>书架</span>
         </div>
@@ -245,6 +265,10 @@ const props = defineProps<{
   isPaused?: boolean
   /** 迷你模式: 只保留上一章/下一章/目录。 */
   mini?: boolean
+  /** 当前书是否未加入书架 —— 决定顶栏「书架」位显示「加入书架」。 */
+  canAddToShelf?: boolean
+  /** 正在加入书架：按钮置灰防重复点击。 */
+  addingToShelf?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -258,6 +282,8 @@ const emit = defineEmits<{
   info: []
   tts: []
   progress: []
+  /** 顶栏「加入书架」被点击。 */
+  addToShelf: []
   /** 拖动进度条后请求跳到指定章节下标。 */
   seekChapter: [index: number]
 }>()
@@ -371,6 +397,23 @@ watch(() => props.show, (visible) => {
   flex: 1 1 0;
   justify-content: center;
   padding: 0 2px;
+}
+
+/* 「加入书架」是这篇 issue 里新加的动作入口, 用主色标出来 —— 它和旁边的
+   导航项性质不同(导航是"去哪", 它是一次写入), 长得一样容易被漏看。 */
+.m-top-item.add-shelf {
+  color: var(--color-primary, #c97f3a);
+  opacity: 0.95;
+  font-weight: 500;
+}
+
+.m-top-item.add-shelf:hover:not(.busy) {
+  opacity: 1;
+}
+
+.m-top-item.add-shelf.busy {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .m-top-item svg { width: 18px; height: 18px; }

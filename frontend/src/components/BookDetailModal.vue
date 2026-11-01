@@ -133,17 +133,22 @@
           <div v-if="!isLocal && !appStore.isWebMode" class="source-section">
             <div class="section-heading">
               <h3>{{ singleSourceOnly ? '书源' : '可读书源' }}</h3>
+              <!-- 有缓存时给一枚小角标, 说明列表不是刚搜的; 没缓存就什么都不显示,
+                   避免「未搜索」这类字样喧宾夺主。 -->
+              <span v-if="sourcesHaveCache && !sourcesLoading" class="section-hint" :title="sourcesCacheHint">
+                缓存结果
+              </span>
               <!-- 与手机端详情页的 menu_refresh 对齐：随时重搜可用书源。
-                   此前只有「部分书源访问失败」时才会冒出「重试」，正常结束
-                   （比如源站刚恢复、或用户刚登录）后没有任何刷新入口。
+                   **现在这是搜源的唯一入口** —— 打开弹窗不再自动并发搜索
+                   （书源清单变动除外，那种情况会自动重搜一次）。
                    搜索中则变成「停止」—— 与换源面板和手机端一致，
                    某个源卡住时不必等所有源都超时。 -->
               <button
                 v-if="!singleSourceOnly"
                 type="button"
                 class="section-refresh"
-                :title="sourcesLoading ? '停止搜索其他书源' : '重新搜索其他书源'"
-                :aria-label="sourcesLoading ? '停止搜索其他书源' : '重新搜索其他书源'"
+                :title="sourcesLoading ? '停止搜索其他书源' : '搜索其他书源，获取最新章节'"
+                :aria-label="sourcesLoading ? '停止搜索其他书源' : '搜索其他书源，获取最新章节'"
                 @click="sourcesLoading ? stopSourceCandidates() : refreshSourceCandidates()"
               >
                 <svg v-if="sourcesLoading" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -163,8 +168,10 @@
             <div v-else-if="!sourceCandidates.length && sourcesStopped" class="source-empty">
               已停止搜索
             </div>
+            <!-- 什么都没搜过 = 打开时没缓存。别写「未找到其他书源」，那是搜完才
+                 能下的结论，会让人以为这本书真的没有别的源。 -->
             <div v-else-if="!sourceCandidates.length && !sourcesIncomplete" class="source-empty">
-              未找到其他书源
+              尚未搜索其他书源，点右侧按钮开始
             </div>
             <div v-else class="source-list">
               <div
@@ -182,19 +189,28 @@
                 <span v-if="cand.lastChapter" class="source-latest">{{ cand.lastChapter }}</span>
               </div>
             </div>
-            <div v-if="sourcesLoading && sourceCandidates.length" class="source-loading">
+            <!-- 追加中 / 部分源失败的状态条放在列表**下方**，不占列表行位。
+                 之前塞在列表内部（sticky 页脚），等于从 5 行里再吃掉一行，
+                 用户看到的就只有 4 个书源了。 -->
+            <div v-if="sourcesLoading && sourceCandidates.length" class="source-foot">
               <div class="loading-spinner"></div>
               继续查找其他书源...
             </div>
             <!-- 单源模式下不提供「重试」：它的语义是"再并搜一遍其它源"，
                  而这时我们刻意不搜。 -->
-            <div v-if="!singleSourceOnly && sourcesIncomplete && !sourcesLoading" class="source-incomplete" role="status">
+            <div
+              v-else-if="!singleSourceOnly && (sourcesIncomplete || sourcesStopped) && sourceCandidates.length"
+              class="source-foot warn"
+              role="status"
+            >
               <svg class="incomplete-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
                 <circle cx="12" cy="12" r="9" />
                 <path d="M12 7.5v5.5M12 16.5h.01" />
               </svg>
-              <span class="incomplete-text">部分书源访问失败</span>
-              <button type="button" class="incomplete-retry" @click="loadSourceCandidates(detailLoadId, detailKey, true)">重试</button>
+              <span class="incomplete-text">{{ sourcesStopped ? '已停止搜索' : '部分书源访问失败' }}</span>
+              <button type="button" class="incomplete-retry" @click="loadSourceCandidates(detailLoadId, detailKey, true)">
+                {{ sourcesStopped ? '继续搜索' : '重试' }}
+              </button>
             </div>
           </div>
 
@@ -341,7 +357,13 @@ import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import type { Book, SearchBook, BookChapter } from '../types'
 import { isLocalBook } from '../utils/localBook'
-import { matchesSourceSwitchTitle, mergeSourceCandidates, normalizeSourceSwitchAuthor, searchMergeKey, sourceCandidateKey } from '../utils/searchRank'
+import {
+  getSourceCandidateCache,
+  mergeForCommit,
+  sourceCandidateBookKey,
+  sourceCatalogSignatureOf,
+} from '../utils/sourceCandidateCache'
+import { matchesSourceSwitchTitle, mergeSourceCandidates, normalizeSourceSwitchAuthor, shelfMatchKey, sourceCandidateKey } from '../utils/searchRank'
 import { deleteBookCover, uploadBookCover } from '../api/bookCover'
 import {
   canRevertToOrigin,
@@ -356,8 +378,25 @@ import {
   type BookEditDraft,
 } from '../utils/bookEdit'
 
-const SOURCE_CANDIDATES_CACHE_LIMIT = 20
-const sourceCandidatesCache = new Map<string, SearchBook[]>()
+/**
+ * 「可读书源」结果的会话内缓存（issue #28 第 2 点）。
+ *
+ * 之前每次打开详情弹窗都会自动并发搜 12 路书源 —— 用户只是想翻翻目录，也要
+ * 陪等一次全量搜索，还会反复打到各源站。现在打开弹窗**默认不搜**，只读这里
+ * 的缓存；要最新的自己点标题右侧的刷新按钮。
+ *
+ * 两条失效规则：
+ * - **书源清单变了**（增删/停启用）→ 缓存里的候选可能指向已被删掉的源，
+ *   打开详情时自动重搜一次。判断依据是缓存记录里的 `catalogSignature`。
+ * - 用户点刷新 → 强制重搜（不清旧缓存，见下）。
+ *
+ * 中断/失败的结果也要存：用户刷出 8 个源、中途点了停止，下次打开还得是这 8 个，
+ * 不能退回刷新前的 4 个。所以落库时用的是「旧缓存 ∪ 当前列表」的并集。
+ */
+const sourceCandidateCache = getSourceCandidateCache()
+/** 当前列表是否有缓存垫底（决定标题旁边显示「缓存结果」还是「未搜索」）。 */
+const sourcesCachedAt = ref(0)
+const sourcesHaveCache = computed(() => sourcesCachedAt.value > 0)
 
 const props = defineProps<{
   modelValue: boolean
@@ -409,7 +448,14 @@ const isLocal = computed(() => isLocalBook(props.book))
 const detailKey = computed(() => {
   const book = props.book
   if (!book) return ''
-  return `${book.name}::${book.author}::${book.bookUrl}::${book.origin}`
+  // 与阅读页换源面板共用同一个键生成函数: 两边各写一份格式，迟早会漂移成
+  // 互相看不见的两份缓存。
+  return sourceCandidateBookKey({
+    name: book.name,
+    author: book.author,
+    bookUrl: book.bookUrl,
+    origin: book.origin,
+  })
 })
 
 /** 保存成功后覆盖在本地的展示值。
@@ -492,6 +538,14 @@ const chapterSourceName = computed(() => {
   return source ? sourceNameByOrigin(source.origin) : ''
 })
 
+/** 「缓存结果」角标的悬停说明：告诉用户这份结果是什么时候的、怎么更新。 */
+const sourcesCacheHint = computed(() => {
+  if (!sourcesHaveCache.value) return '还没有搜索过其他书源，点右侧按钮开始搜索'
+  const minutes = Math.max(0, Math.floor((Date.now() - sourcesCachedAt.value) / 60000))
+  const when = minutes < 1 ? '刚刚' : `${minutes} 分钟前`
+  return `结果记于 ${when}，点右侧按钮获取最新`
+})
+
 const shownCatalogSourceName = computed(() => {
   const identity = loadedCatalogIdentity.value
   if (!identity) return ''
@@ -544,26 +598,9 @@ function catalogIdentityOrigin(identity: string): string {
   }
 }
 
+/** 当前启用书源的签名。算法在 utils 里与阅读页共用，保证两处判断一致。 */
 function sourceCatalogSignature(): string {
-  return sourceStore.sources
-    .filter((source) => source.enabled !== false)
-    .map((source) => sourceKey(source.bookSourceUrl))
-    .sort()
-    .join('\n')
-}
-
-function sourceCandidatesCacheKey(bookKey: string): string {
-  return `${bookKey}::${sourceCatalogSignature()}`
-}
-
-function storeSourceCandidatesCache(key: string, candidates: SearchBook[]) {
-  sourceCandidatesCache.delete(key)
-  sourceCandidatesCache.set(key, candidates)
-  while (sourceCandidatesCache.size > SOURCE_CANDIDATES_CACHE_LIMIT) {
-    const oldestKey = sourceCandidatesCache.keys().next().value
-    if (oldestKey === undefined) break
-    sourceCandidatesCache.delete(oldestKey)
-  }
+  return sourceCatalogSignatureOf(sourceStore.sources)
 }
 
 function canonicalSourceOrigin(origin: string): string {
@@ -583,6 +620,8 @@ function resetDetailState() {
   sourceCatalog.value = new Map()
   sourcesLoading.value = false
   sourcesStopped.value = false
+  sourcesIncomplete.value = false
+  sourcesCachedAt.value = 0
   catalogTarget.value = ''
   chapterError.value = ''
   loadedCatalogIdentity.value = ''
@@ -613,6 +652,30 @@ function closeSourceSSE() {
   sourceSSE = null
 }
 
+/** 把本轮结果写回缓存。
+ *
+ *  - 完整搜完 → 直接用这一轮的列表（它已经是权威结果）。
+ *  - 被打断/部分失败 → **与旧缓存合并**：用户刷新只是想补全，不是想丢掉
+ *    已经看到的那些源。之前这里直接覆盖，于是「刷新显示 8 个、中途停止、
+ *    再打开变回 4 个」。
+ * 合并后标记 `complete = false`，下次打开能如实提示「部分书源访问失败」。
+ */
+function commitSourceCandidates(
+  bookKey: string,
+  books: SearchBook[],
+  complete: boolean,
+  previous: SearchBook[] = [],
+) {
+  const merged = mergeForCommit(previous, books, complete, mergeSourceCandidates)
+  if (merged.length <= 1) return
+  sourceCandidateCache.set(bookKey, sourceCatalogSignature(), merged, complete)
+}
+
+/** 填充「可读书源」列表。
+ *
+ *  `refresh = false`（打开弹窗）：读缓存，不发请求；若书源清单变过则自动重搜。
+ *  `refresh = true`（用户点刷新 / 部分源失败后重试）：强制并发搜索。
+ */
 function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) {
   const b = props.book
   if (!b || !b.name) {
@@ -626,22 +689,46 @@ function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) 
     return
   }
   closeSourceSSE()
-  sourcesLoading.value = true
   sourcesIncomplete.value = false
   sourcesStopped.value = false
-  if (refresh) sourceCandidatesCache.delete(sourceCandidatesCacheKey(bookKey))
+
   const current = toSearchBook(b)
   const storedCandidates = b.sourceCandidates || []
   const initialCandidates = [current, ...storedCandidates]
-  const cachedCandidates = sourceCandidatesCache.get(sourceCandidatesCacheKey(bookKey))
-  if (cachedCandidates) {
-    if (!isCurrentDetail(loadId, bookKey)) return
-    setSourceCandidates([...initialCandidates, ...cachedCandidates])
+
+  // 缓存按「书」存一条，签名只是记录当时用的是哪份书源清单。
+  const cached = sourceCandidateCache.get(bookKey)
+  const signature = sourceCatalogSignature()
+  // 书源增删/停启用后，旧结果里可能有已删除源的条目，不可信 → 自动重搜。
+  const catalogChanged = !!cached && !sourceCandidateCache.matches(cached, signature)
+
+  if (!refresh && !catalogChanged) {
+    if (cached) {
+      if (!isCurrentDetail(loadId, bookKey)) return
+      sourcesCachedAt.value = cached.savedAt
+      // 旧缓存里的候选可能包含已禁用/已删除的源；`setSourceCandidates` 会按
+      // 当前 `sourceCatalog` 过滤，所以这里直接并进去即可。
+      setSourceCandidates([...initialCandidates, ...cached.books])
+      sourcesIncomplete.value = !cached.complete
+      sourcesLoading.value = false
+      return
+    }
+    // 没有缓存: 只摆出本书自己的源, 不发请求 —— 这正是 issue #28 第 2 点要的
+    // 「点进详情别自动刷新」。用户要别的源就点标题右边的刷新按钮。
+    sourcesCachedAt.value = 0
+    setSourceCandidates(initialCandidates)
     sourcesLoading.value = false
     return
   }
-  // 先显示当前书源和已经保存的候选，其他书源搜索完成后逐个追加。
-  setSourceCandidates(initialCandidates)
+
+  // 走到这里说明要真正发请求：用户点了刷新，或书源清单变了。
+  sourcesLoading.value = true
+  // 刷新时保留旧结果在界面上（下面 finish 时还会并进缓存），只是重新搜一遍；
+  // 清空列表会让用户以为「之前搜到的源丢了」。
+  const previousBooks = (cached?.books || []).filter((candidate) => (
+    sourceCatalog.value.has(sourceKey(candidate.origin))
+  ))
+  setSourceCandidates([...initialCandidates, ...previousBooks])
 
   const requestPage = (lastIndex: number) => {
     const stream = getAvailableBookSourceSSE({
@@ -651,6 +738,8 @@ function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) 
       origin: b.origin,
       lastIndex,
       concurrentCount: 12,
+      // 缓存命中（书源清单变了）时不必带 refresh=1：后端的源列表缓存仍然有效，
+      // 只是本地这份候选过期了，重跑一遍即可。
       refresh: refresh ? 1 : undefined,
     })
     sourceSSE = stream
@@ -661,12 +750,12 @@ function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) 
       if (!isActive()) return
       sourceSSE = null
       sourcesLoading.value = false
-      if (cacheResult) {
-        storeSourceCandidatesCache(
-          sourceCandidatesCacheKey(bookKey),
-          sourceCandidates.value.slice(),
-        )
-      }
+      commitSourceCandidates(
+        bookKey,
+        sourceCandidates.value.slice(),
+        cacheResult,
+        previousBooks,
+      )
     }
 
     stream.onmessage = (event) => {
@@ -809,8 +898,11 @@ function retryChapters() {
 
 /** 重搜「可读书源」列表（对齐手机端详情页的刷新）。
  *
+ *  现在打开详情页**不再自动搜源**（issue #28 第 2 点），这里是用户主动要最新
+ *  结果的唯一入口，也是「部分书源访问失败」时的重试入口。
+ *
  *  只重跑书源搜索，不动书籍详情与目录：
- *  - `refresh = true` 会清掉按书缓存的候选并带 `refresh: 1` 请求后端，
+ *  - `refresh = true` 会丢掉这本书记住的候选并带 `refresh: 1` 请求后端，
  *    否则后端直接把上次的结果原样吐回来，用户点了"刷新"看不出任何变化；
  *  - 列表会先回落到「当前源 + 书架已保存的候选」，再由新结果逐个追加 ——
  *    刷新本来就该丢掉上次那批可能已失效的源，留着它们等于没刷；
@@ -838,11 +930,32 @@ function stopSourceCandidates() {
   // 主动停止不等于"部分源访问失败"：别让底部弹出「重试」提示。
   sourcesIncomplete.value = false
   sourcesStopped.value = true
+  // **中断也要落缓存**：用户刷新到 8 个源、中途点停止，下次打开必须还是这 8 个。
+  // 之前这里什么都不写，缓存停留在刷新前的 4 个，于是「再打开变回 4 个」。
+  // `complete = false` 让下次打开仍能看到「部分书源访问失败 → 重试」。
+  const bookKey = detailKey.value
+  if (bookKey) {
+    commitSourceCandidates(
+      bookKey,
+      sourceCandidates.value.slice(),
+      false,
+      sourceCandidateCache.get(bookKey)?.books || [],
+    )
+    sourcesCachedAt.value = sourceCandidateCache.get(bookKey)?.savedAt || Date.now()
+  }
   // 搜索可能一个结果都还没回来，界面上原本只有一行转圈；给一个明确回执，
   // 否则用户分不清是"停了"还是"卡住没动"。
   const found = Math.max(0, sourceCandidates.value.length - 1)
   appStore.showToast(found > 0 ? `已停止搜索，保留 ${found} 个其他书源` : '已停止搜索书源', 'success')
 }
+
+/** 已经由「打开弹窗」这条路径处理过的书源版本号。
+ *
+ *  打开弹窗时会主动 `fetchSources()` 刷新清单，如果这期间书源状态确实变了，
+ *  store 会把 `availabilityVersion` 加一，从而又触发下面的 availabilityVersion
+ *  watch —— 两次都搜一遍就重复了。这里记下「我刚处理到的版本」，让那个 watch
+ *  跳过同一次变化。 */
+let handledAvailabilityVersion = -1
 
 watch([() => props.modelValue, detailKey], async ([visible, bookKey]) => {
   const loadId = ++detailLoadId
@@ -863,12 +976,14 @@ watch([() => props.modelValue, detailKey], async ([visible, bookKey]) => {
   // 详情页的简介比搜索结果的摘要完整，先补拉（不阻塞目录加载）。
   void loadDetailIntro(loadId, bookKey)
 
-  sourcesLoading.value = true
-  // The source manager force-refreshes this shared store after source changes.
-  // A detail view only needs to initialize it when no source list exists yet.
-  if (sourceStore.sources.length === 0) {
-    await sourceStore.fetchSources().catch(() => undefined)
-  }
+  // **每次打开都重新读一遍书源清单**，不能只在为空时读。
+  // 缓存是否可信是靠「书源清单签名」判断的，如果沿用一份过期的 store，
+  // 用户刚启用的新书源不会出现在签名里 → 被判成「书源没变」→ 不自动刷新。
+  // 这正是「启动新书源后打开详情页也不刷新」的原因。读的是本地库，开销可忽略。
+  await sourceStore.fetchSources().catch(() => undefined)
+  // 这次读清单引起的版本变化由本 watch 自己处理（下面 loadSourceCandidates
+  // 会按新签名判断要不要搜），别再让 availabilityVersion 的 watch 搜第二遍。
+  handledAvailabilityVersion = sourceStore.availabilityVersion
   if (!isCurrentDetail(loadId, bookKey)) return
 
   // 只认本书自身的书源：发现页的书只有聚合源认得，并发搜 12 路既慢又搜不到，
@@ -900,12 +1015,16 @@ watch([() => props.modelValue, detailKey], async ([visible, bookKey]) => {
 
 watch(() => sourceStore.availabilityVersion, async () => {
   if (!props.modelValue || !props.book || isLocal.value) return
-  sourceCandidatesCache.clear()
+  // 打开弹窗时自己读清单引起的那次版本变化，上面那个 watch 已经处理过了。
+  if (sourceStore.availabilityVersion === handledAvailabilityVersion) return
+  // 书源增删/停启用后：缓存里的候选可能属于已被删除（或禁用）的源，必须重搜。
+  // 注意**不要**在这里整份清空缓存 —— 清空等于把「用户刷出来但还没搜完」的
+  // 结果也一起丢掉。让签名对不上、走 `catalogChanged` 分支即可：那里会保留
+  // 旧结果（按当前清单过滤）并自动发一次请求。
   const loadId = ++detailLoadId
   chapterLoadId += 1
   const bookKey = detailKey.value
   resetDetailState()
-  sourcesLoading.value = true
   if (!isCurrentDetail(loadId, bookKey)) return
   sourceCatalog.value = new Map(
     sourceStore.sources
@@ -916,6 +1035,9 @@ watch(() => sourceStore.availabilityVersion, async () => {
   if (!sourceCatalog.value.has(sourceKey(b.origin))) {
     sourceCatalog.value.set(sourceKey(b.origin), b.originName || b.origin)
   }
+  // 这里传 `false`（不是 true）：让 `loadSourceCandidates` 自己根据签名判断
+  // 该不该搜、要不要带 `refresh: 1`。书源清单确实变了 → catalogChanged 为真
+  // → 自动重搜；否则就是一次普通打开，不该发请求。
   void loadSourceCandidates(loadId, bookKey)
   await loadChaptersFor(b.bookUrl, b.origin, loadId, bookKey)
 }, { flush: 'post' })
@@ -1121,9 +1243,11 @@ function isShelfBook(): boolean {
 function findShelfBook(): Book | undefined {
   const b = props.book
   if (!b) return undefined
-  const identity = searchMergeKey(b)
+  // shelfMatchKey 会区分本地书 / 网络书：本地导入的《遮天》不能让详情页里的
+  // 网络《遮天》被当成「已在书架」，否则会走换源持久化那条分支改错记录。
+  const identity = shelfMatchKey(b)
   return shelfStore.books.find((item) => (
-    item.bookUrl === b.bookUrl || searchMergeKey(item) === identity
+    item.bookUrl === b.bookUrl || shelfMatchKey(item) === identity
   ))
 }
 
@@ -1403,18 +1527,32 @@ async function removeFromShelf() {
   margin-bottom: var(--space-6);
 }
 
-.section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-}
-
 .source-section h3 {
   font-size: var(--text-base);
   font-weight: 600;
   margin: 0;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.section-heading h3 {
+  flex: 0 0 auto;
+}
+
+/* 「缓存结果 / 未搜索」角标：解释列表里为什么只有一条。 */
+.section-hint {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-sunken);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.6;
 }
 
 /* 「可读书源」标题右侧的刷新/停止按钮：与手机端详情页工具栏图标同一语义。
@@ -1423,13 +1561,17 @@ async function removeFromShelf() {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
+  gap: 4px;
+  min-width: 24px;
   height: 24px;
+  /* 现在打开详情不再自动搜源, 这个按钮是唯一入口, 所以靠右对齐、常驻可见。 */
+  margin-left: auto;
   padding: 0;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-secondary);
+  font-size: var(--text-xs);
   cursor: pointer;
   opacity: 0.65;
   transition: opacity 0.2s ease, background 0.2s ease;
@@ -1461,22 +1603,28 @@ async function removeFromShelf() {
   font-size: var(--text-sm);
 }
 
-/* 与阅读页「切换书源」面板的提示条同一套观感：图标 + 说明在左，重试跟在文字后。 */
-.source-incomplete {
+/* 列表下方的状态条（追加中 / 部分源失败 / 已停止）。
+   放在列表外面而不是里面: 塞进列表里会从「5 行」里再吃掉一行, 用户实际只
+   看到 4 个书源。放在外面时它只把下面的目录往下推 30px 左右, 列表本身仍
+   稳定显示 5 条。 */
+.source-foot {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 12px;
-  padding: 9px 10px 9px 12px;
-  border-radius: var(--radius-md);
+  margin-top: var(--space-2);
+  padding: 5px 6px 5px 10px;
+  border-radius: var(--radius-sm);
   background: var(--color-bg-sunken);
-  border: 1px solid var(--color-border-light);
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
   line-height: 1.4;
 }
 
-.source-incomplete .incomplete-icon {
+.source-foot.warn {
+  color: var(--color-text-secondary);
+}
+
+.source-foot .incomplete-icon {
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
@@ -1484,40 +1632,62 @@ async function removeFromShelf() {
   opacity: 0.85;
 }
 
-.source-incomplete .incomplete-text {
+.source-foot .incomplete-text {
   min-width: 0;
   flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.source-incomplete .incomplete-retry {
+.source-foot .incomplete-retry {
   flex: 0 0 auto;
-  padding: 4px 12px;
+  padding: 2px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-primary-border);
   background: var(--color-primary-bg);
   color: var(--color-text);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   font-weight: 500;
   cursor: pointer;
   transition: background 0.16s ease, border-color 0.16s ease;
 }
 
-.source-incomplete .incomplete-retry:hover {
+.source-foot .incomplete-retry:hover {
   background: var(--color-selected-bg-hover);
   border-color: var(--color-primary);
 }
 
+.source-foot .loading-spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+}
+
+/* 「可读书源」列表: 高度固定成正好 5 条, 源再多也在框内滚动（issue #28 第 3 点）。
+   之前列表随搜索逐条变高, 每多一个源就把下面的目录往下推一截, 想看目录得滚很久。
+   5 条是取舍: 再少就得多滚列表, 再多会把目录挤出可视区。
+
+   行高必须是确定的 —— 所以行用 `height` 而不是 padding 撑开, 并且作者名(小字)
+   从「第二行」改成跟在书名后面同一行, 否则一条书源会占两行高, 「5 条」就不再
+   是 5 条。`max-height` 而不是 `height`: 只有两三个源时不该留一块空白。 */
 .source-list {
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-md);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* +2px 是列表自身的上下边框 */
+  max-height: calc(var(--source-row-height, 38px) * 5 + 2px);
 }
 
 .source-item {
+  box-sizing: border-box;
+  height: var(--source-row-height, 38px);
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
+  padding: 0 var(--space-3);
   cursor: pointer;
   transition: background var(--duration-fast);
   font-size: var(--text-sm);
@@ -1574,9 +1744,7 @@ async function removeFromShelf() {
 }
 
 .source-author {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  margin-left: 4px;
   font-size: var(--text-xs);
   font-weight: 400;
   color: var(--color-text-tertiary);

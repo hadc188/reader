@@ -71,7 +71,10 @@
     <ReaderMobileControls
       :show="showControls || !!store.activePanel"
       :mini="appStore.miniMode"
+      :can-add-to-shelf="canAddToShelf"
+      :adding-to-shelf="addingToShelf"
       @goHome="goHome"
+      @addToShelf="addCurrentBookToShelf"
       @scrollTop="scrollToTop"
       @scrollBottom="scrollToBottom"
       @prev="prevChapter"
@@ -341,6 +344,11 @@
         <button v-if="readerContextMenu.text" @click="searchContextSelection">搜索选中内容</button>
         <button v-if="readerContextMenu.text" @click="replaceContextSelection">替换</button>
         <button @click="bookmarkContextSelection">加入书签</button>
+        <!-- 未加入书架时才出现（issue #28 第 1 点）。已上架时按需求直接隐藏，
+             不在菜单里留一条永远禁用的灰项。 -->
+        <button v-if="canAddToShelf" @click="addCurrentBookToShelf">
+          {{ addingToShelf ? '正在加入…' : '加入书架' }}
+        </button>
         <button :disabled="store.currentIndex <= 0 || store.loading" @click="prevChapterFromContextMenu">上一章</button>
         <button :disabled="!store.hasNext || store.loading" @click="nextChapterFromContextMenu">下一章</button>
         <button @click="openCatalogFromContextMenu">目录</button>
@@ -413,6 +421,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComp
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets, TOC_END_CHECK_INTERVAL_MS } from '../stores/reader'
 import { useAppStore } from '../stores/app'
+import { useBookshelfStore } from '../stores/bookshelf'
 import { isTauriRuntime } from '../api/transport'
 import { getBookInfo, getBookshelfWithCacheInfo } from '../api/bookshelf'
 import { evalSourceClick, openExternalWindow, type ShowBrowserRequest } from '../api/sourceClick'
@@ -446,6 +455,7 @@ import {
 } from '../utils/readerPageIndex'
 import { splitParagraphsAroundExisting } from '../utils/readerParagraph'
 import { resolveReaderBackground } from '../utils/readerColor'
+import { canAddCurrentBookToShelf, resolveShelfMembership } from '../utils/readerShelf'
 import {
   hotkeyIdFromEvent,
   hotkeyIdFromMouseEvent,
@@ -484,6 +494,7 @@ const ReaderSearchPanel = defineAsyncComponent(() => import('../components/reade
 const router = useRouter()
 const store = useReaderStore()
 const appStore = useAppStore()
+const shelfStore = useBookshelfStore()
 // 书源面板里点「一键导入」(yuedu:// / legado://) 时由这里完成入库。
 const { importFromLink } = useSourceImport()
 const READER_POSITION_PREFIX = 'reader-position:'
@@ -829,6 +840,27 @@ const touchState = ref({
 })
 const showBookInfo = ref(false)
 const bookInfoBook = ref<Book | null>(null)
+
+/* ─── 「加入书架」（issue #28 第 1 点）───
+ *  场景：从书源搜索/发现页直接点进来阅读，这本书并没有进书架。
+ *  在此之前只能去书架页或详情弹窗里加，阅读页里没有任何入口。
+ *
+ *  判定放在 utils/readerShelf 里（有单测）：它在书架没加载完时返回 `unknown`
+ *  而不是「未上架」—— 否则会把已在书架的书也显示成「加入书架」，点下去
+ *  是覆盖写。 */
+const addingToShelf = ref(false)
+
+const shelfMembership = computed(() => resolveShelfMembership(store.book, {
+  books: shelfStore.books,
+  loaded: shelfStore.loaded,
+  loading: shelfStore.loading,
+}))
+
+/** 是否该显示「加入书架」入口。已上架、状态未知、Web 端都不显示。 */
+const canAddToShelf = computed(() => canAddCurrentBookToShelf(shelfMembership.value, {
+  readonly: appStore.isWebMode || isLocalBook(store.book),
+  adding: addingToShelf.value,
+}))
 const showTTSPanel = ref(false)
 const ttsPanelDismissed = ref(false)
 /**
@@ -2685,7 +2717,14 @@ function handleContextMenu(event: MouseEvent) {
   event.preventDefault()
   const text = window.getSelection?.()?.toString().trim() || ''
   const width = 190
-  const height = 342
+  // 菜单项数按实际会渲染的数量算, 别再用固定 342 —— 多了「加入书架」这一项后
+  // 固定值会让贴底的菜单溢出窗口, 最后几项点不到。
+  // 36px/项 + 上下 padding, 与 .reader-context-menu 的样式保持一致。
+  const itemCount = 6
+    + (text ? 2 : 0)                       // 搜索选中内容 / 替换
+    + (canAddToShelf.value ? 1 : 0)        // 加入书架
+    + (isLocalBook(store.book) || appStore.isWebMode ? 0 : 1) // 换源
+  const height = itemCount * 36 + 16
   readerContextMenu.value = {
     visible: true,
     top: Math.min(event.clientY, Math.max(8, window.innerHeight - height - 8)),
@@ -3556,6 +3595,41 @@ async function openInfo() {
   }
 }
 
+/** 把当前阅读的书加入书架（issue #28 第 1 点）。
+ *
+ *  只提交书籍标识 + 阅读进度：`save_book` 在「本书已在书架」时会走覆盖分支，
+ *  所以这个动作只允许在**确定未上架**时触发（见 `canAddToShelf`）；万一用户
+ *  抢先加了（另一个窗口/另一台设备），提交的字段也都是这本书自己的真实值，
+ *  不会清掉别人的自定义封面或简介。
+ */
+async function addCurrentBookToShelf() {
+  const book = store.book
+  if (!book || addingToShelf.value) return
+  if (!canAddToShelf.value) {
+    closeReaderContextMenu()
+    return
+  }
+  // 先关菜单再等网络: 菜单浮在正文上, 留着它挡住「已加入书架」的提示。
+  closeReaderContextMenu()
+  addingToShelf.value = true
+  try {
+    const latest = await getBookInfo(book.bookUrl, book.origin).catch(() => null)
+    const merged: Book = latest ? { ...book, ...latest } : { ...book }
+    await shelfStore.addBook({
+      ...merged,
+      // 用当前阅读位置作为初始进度，而不是书里可能过期的 durChapter*。
+      durChapterIndex: store.currentIndex,
+      durChapterTitle: store.currentChapter?.title || merged.durChapterTitle,
+      durChapterTime: Date.now(),
+    })
+    appStore.showToast(`已将《${book.name}》加入书架`, 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '加入书架失败', 'error')
+  } finally {
+    addingToShelf.value = false
+  }
+}
+
 /** 离开阅读页: 同步写出本地位置, 后台再补服务端/WebDAV 两份。
  *
  *  这里**不能** await 进度写入 —— 那是 issue #19「有时候几秒才退出、有时候
@@ -3667,6 +3741,11 @@ onMounted(async () => {
   }
   appStore.startReadingSession(store.book?.bookUrl, store.book?.name, store.book?.author)
   void store.fetchCustomFonts().catch(() => undefined)
+  // 「加入书架」入口要判断这本书在不在书架。直接开书进来时书架可能还没拉过，
+  // 这里补一次；失败也无所谓 —— 判定会保持 `unknown`，入口不显示。
+  if (!shelfStore.loaded) {
+    void shelfStore.fetchBooks().catch(() => undefined)
+  }
   await waitForChapterListReady()
   if (readerViewUnmounted) return
   // 直接进入阅读器(含刷新恢复)时正文已经就位, 不会再触发 store.content 的

@@ -5,6 +5,7 @@ import {
   getBookGroups,
   deleteBook as apiDeleteBook,
   deleteBooks as apiDeleteBooks,
+  saveBook as apiSaveBook,
   saveBookGroupId as apiSaveBookGroupId,
   saveBookGroup as apiSaveBookGroup,
   deleteBookGroups as apiDeleteBookGroups,
@@ -56,6 +57,12 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   const books = ref<Book[]>([])
   const recentBooks = ref<Book[]>([])
   const loading = ref(false)
+  /** 是否成功拉过一次书架。
+   *
+   *  给阅读页的「加入书架」入口用：`books` 为空既可能是「书架真的空」，也可能
+   *  是「还没加载」。只看 `books.length` 会把后者当成前者，对一本其实已在书架
+   *  的书显示「加入书架」，点下去是一次覆盖写。 */
+  const loaded = ref(false)
   const sorting = ref(false)
 
   async function refreshRecentBooks() {
@@ -96,6 +103,8 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   /// 共用的书架加载逻辑: 读取书架及应用本地缓存信息后刷新最近阅读。
   async function loadBooks() {
     books.value = await getBookshelfWithCacheInfo()
+    // 只有真正拿到数据才算「已加载」: 抛错时保持 false, 阅读页便不会据此判定。
+    loaded.value = true
     await refreshRecentBooks()
   }
 
@@ -103,6 +112,16 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     await apiDeleteBook(book)
     books.value = books.value.filter((b) => b.bookUrl !== book.bookUrl)
     await refreshRecentBooks()
+  }
+
+  /** 加入书架并立刻刷新列表。
+   *
+   *  阅读页的「加入书架」用这个而不是裸调 `saveBook`：加完之后 `books` 必须
+   *  同步更新，否则 `canAddToShelf` 仍会认为「未上架」，入口要等下次重新拉
+   *  书架才消失，看起来像没生效。 */
+  async function addBook(book: Book) {
+    await apiSaveBook(book)
+    await fetchBooks()
   }
 
   // ─── Groups ───
@@ -458,8 +477,8 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   return {
-    books, recentBooks, loading, sorting,
-    fetchBooks, removeBook,
+    books, recentBooks, loading, loaded, sorting,
+    fetchBooks, addBook, removeBook,
     refreshRecentBooks, removeRecentBook, clearAllRecentBooks,
     groups, activeGroupId, displayGroups, visibleGroups, filteredBooks,
     sortMode, activeGroupSort, effectiveSortMode, sortedBooks,

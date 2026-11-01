@@ -4,6 +4,8 @@
       <div class="header-left">
         <h3>切换书源</h3>
         <span class="source-count" v-if="preparedResults.length">{{ preparedResults.length }} 个结果</span>
+        <!-- 有缓存时标一下, 说明列表不是刚搜的（与详情页同一套提示）。 -->
+        <span v-if="resultsFromCache && !searching" class="cache-badge">缓存</span>
       </div>
       <div class="header-actions">
         <!-- 与手机端换源弹窗的 menu_start_stop 对齐: 搜索中显示「停止」,
@@ -201,6 +203,12 @@ import type { SseLike } from '../../api/sse'
 import { getBookInfo, getCoverUrl } from '../../api/bookshelf'
 import { isLocalBook } from '../../utils/localBook'
 import { matchesSourceSwitchTitle, mergeSourceCandidates, normalizeSourceSwitchAuthor, sourceCandidateKey } from '../../utils/searchRank'
+import {
+  getSourceCandidateCache,
+  mergeForCommit,
+  sourceCandidateBookKey,
+  sourceCatalogSignatureOf,
+} from '../../utils/sourceCandidateCache'
 import type { Book, SearchBook } from '../../types'
 
 type CandidateItem = {
@@ -227,6 +235,17 @@ const selectedCandidate = ref<CandidateItem | null>(null)
 const candidatePreview = ref<Book | null>(null)
 const AVAILABLE_CONCURRENT_COUNT = 16
 let availableSourceSSE: SseLike | null = null
+
+/**
+ * 与详情页共用同一个持久化缓存（issue #28 第 2 点）。
+ *
+ * 两处面板读的是同一份 localStorage：在详情页刷出来的结果，进阅读页换源时
+ * 可以直接用，不必再并发搜一遍；反过来也成立。键里带书源清单签名，源库改了
+ * 就自动失效重搜。
+ */
+const sourceCandidateCache = getSourceCandidateCache()
+/** 这份列表是不是直接来自缓存（决定要不要把「缓存结果」提示挂出来）。 */
+const resultsFromCache = ref(false)
 
 const currentSource = computed(() => {
   if (!store.book) return null
@@ -289,11 +308,16 @@ const preparedResults = computed<CandidateItem[]>(() => {
     .sort((a, b) => b.score - a.score)
 })
 
-onMounted(() => {
+onMounted(async () => {
+  // 每次打开都刷新一遍书源清单: 缓存是否可信靠清单签名判断, 沿用过期清单会
+  // 把「刚启用的新书源」误判成「书源没变」，从而不自动刷新。
+  await sourceStore.fetchSources().catch(() => undefined)
   if (sourceStore.sources.length === 0) {
     sourceStore.fetchSources().catch(() => undefined)
   }
-  startSearch()
+  // 和详情页一致: 打开面板先读缓存, 没有缓存就只摆出书架记住的候选,
+  // 不自动并发搜源。要最新的点右上角刷新。
+  hydrateFromCache()
 })
 
 // 首次进入应用直接打开阅读页时, 书源列表往往晚于本面板就绪: 那一次合并因为
@@ -317,9 +341,39 @@ onUnmounted(() => {
   closeAvailableSourceSSE()
 })
 
+/** 打开面板 / 搜索书源。
+ *
+ *  `refresh = false`（打开面板）：先读缓存，不发请求；书源清单变过才自动重搜。
+ *  `refresh = true`（点刷新 / 重试）：强制并发搜索，并保留旧结果垫底。
+ */
 function startSearch(refresh = false) {
   if (!store.book || isLocal.value) return
   closeAvailableSourceSSE()
+  const cached = sourceCandidateCache.get(sourceCandidateCacheKey())
+  // 书源增删/停启用后，旧缓存里可能有已删除源的候选 → 自动重搜一次。
+  const catalogChanged = !!cached && !sourceCandidateCache.matches(cached, sourceCatalogSignature())
+
+  if (!refresh && !catalogChanged) {
+    searching.value = false
+    sourcesIncomplete.value = false
+    loadingMore.value = false
+    results.value = []
+    lastIndex.value = -1
+    hasMoreSources.value = false
+    selectedCandidate.value = null
+    candidatePreview.value = null
+    resultsFromCache.value = false
+    mergeCandidates(store.book.sourceCandidates || [])
+    if (cached) {
+      mergeCandidates(cached.books)
+      resultsFromCache.value = true
+      // 上次是中断/部分失败 → 如实提示，让用户自己决定要不要重试。
+      sourcesIncomplete.value = !cached.complete
+    }
+    if (preparedResults.value.length) void selectCandidate(preparedResults.value[0])
+    return
+  }
+
   searching.value = true
   sourcesIncomplete.value = false
   loadingMore.value = false
@@ -328,9 +382,43 @@ function startSearch(refresh = false) {
   hasMoreSources.value = true
   selectedCandidate.value = null
   candidatePreview.value = null
+  resultsFromCache.value = false
   mergeCandidates(store.book.sourceCandidates || [])
+  // 刷新时把旧缓存垫在下面：一边搜一边还在显示上次的结果，不会瞬间清空。
+  if (cached) mergeCandidates(cached.books)
 
   openAvailableSourceSSE('initial', refresh)
+}
+
+/** 当前书籍的缓存键。与详情页共用 `sourceCandidateBookKey`，口径不会漂移。 */
+function sourceCandidateCacheKey(): string {
+  const book = store.book
+  if (!book) return ''
+  return sourceCandidateBookKey({
+    name: book.name,
+    author: book.author,
+    bookUrl: book.bookUrl,
+    origin: book.origin,
+  })
+}
+
+/** 当前启用书源的签名。与详情页共用同一实现。 */
+function sourceCatalogSignature(): string {
+  return sourceCatalogSignatureOf(sourceStore.sources)
+}
+
+/** 与详情页一致的落库规则：完整搜完就替换；中断/部分失败与旧缓存合并。 */
+function commitResults(complete: boolean, previous: SearchBook[]) {
+  const key = sourceCandidateCacheKey()
+  if (!key) return
+  const merged = mergeForCommit(previous, results.value, complete, mergeSourceCandidates)
+  if (merged.length <= 1) return
+  sourceCandidateCache.set(key, sourceCatalogSignature(), merged, complete)
+}
+
+/** 打开面板时的入口：就是「不刷新地 startSearch()」。 */
+function hydrateFromCache() {
+  startSearch()
 }
 
 function mergeCandidates(candidates: SearchBook[]) {
@@ -372,6 +460,11 @@ function stopSearch() {
   searching.value = false
   loadingMore.value = false
   hasMoreSources.value = false
+  // 中断也要落缓存（与详情页一致）：用户刷到 6 个源后点停止，下次打开面板
+  // 必须还是这 6 个，不能退回书架里那 3 个旧候选。`complete = false` 让
+  // 「重试」入口继续可见。
+  const cached = sourceCandidateCache.get(sourceCandidateCacheKey())
+  commitResults(false, cached?.books || [])
   if (!selectedCandidate.value && preparedResults.value.length) {
     void selectCandidate(preparedResults.value[0])
   }
@@ -410,6 +503,8 @@ function openAvailableSourceSSE(mode: AvailableSourceMode, refresh = false) {
   if (!store.book) return
 
   const beforeCount = results.value.length
+  // 这一轮开始前已有的候选（可能是旧缓存）。中断/失败时用它兜底合并。
+  const previousResults = results.value.slice()
   const stream = getAvailableBookSourceSSE({
     url: store.book.bookUrl,
     name: store.book.name,
@@ -429,13 +524,13 @@ function openAvailableSourceSSE(mode: AvailableSourceMode, refresh = false) {
   stream.addEventListener('end', (event) => {
     if (availableSourceSSE !== stream) return
     applyAvailableSourcePayload(parseAvailableSourcePayload(event))
-    finishAvailableSourceSSE(stream, mode, beforeCount)
+    finishAvailableSourceSSE(stream, mode, beforeCount, false, previousResults)
   })
 
   stream.onerror = (event) => {
     if (availableSourceSSE !== stream) return
     console.error('getAvailableBookSourceSSE failed', event)
-    finishAvailableSourceSSE(stream, mode, beforeCount, true)
+    finishAvailableSourceSSE(stream, mode, beforeCount, true, previousResults)
   }
 }
 
@@ -444,6 +539,7 @@ function finishAvailableSourceSSE(
   mode: AvailableSourceMode,
   beforeCount: number,
   failed = false,
+  previousResults: SearchBook[] = [],
 ) {
   if (availableSourceSSE !== stream) return
   stream.close()
@@ -451,8 +547,13 @@ function finishAvailableSourceSSE(
 
   if (mode === 'initial') {
     searching.value = false
+    // 完整结束且没有源访问失败 → 用这一轮结果替换缓存；否则与旧缓存合并，
+    // 保住用户已经看到的那几个源（与详情页同一套规则）。
+    commitResults(!failed && !sourcesIncomplete.value, previousResults)
   } else {
     loadingMore.value = false
+    // 加载更多只是往同一份结果里追加，成功后顺带更新缓存。
+    if (!failed) commitResults(true, [])
   }
 
   if (!selectedCandidate.value && preparedResults.value.length) {
@@ -567,6 +668,16 @@ async function handleSwitch(res: SearchBook) {
 .header-left { display: flex; align-items: baseline; gap: 8px; }
 .source-header h3 { font-size: 16px; margin: 0; }
 .source-count { font-size: 11px; opacity: 0.5; }
+
+/* 「缓存」角标：与详情页的「缓存结果」同义，说明这份列表不是刚搜的。 */
+.cache-badge {
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 9999px;
+  font-size: 10px;
+  opacity: 0.65;
+  white-space: nowrap;
+}
 
 .header-actions { display: flex; align-items: center; gap: 2px; }
 

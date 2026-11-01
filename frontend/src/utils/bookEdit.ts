@@ -1,6 +1,6 @@
 import { BOOK_COVER_EXTENSIONS, MAX_BOOK_COVER_BYTES } from '../api/bookCover'
 import { readerOrigin } from '../api/scheme'
-import { searchMergeKey } from './searchRank'
+import { shelfMatchKey } from './searchRank'
 
 /** 书籍信息编辑的纯逻辑。
  *
@@ -154,17 +154,23 @@ export function editableFieldsForSave(
  *  而后端对同一本书是**整条覆盖** —— 一旦点在书架已有的书上, 用户自定义的封面、
  *  简介等就会被清空。两个入口(卡片按钮 + 右键菜单)都必须先用它挡一道。
  *
- *  先比 bookUrl, 再退回「书名+作者」归一化键, 以便跨书源识别同一本书。 */
+ *  先比 bookUrl, 再退回「书名+作者」归一化键, 以便跨书源识别同一本书。
+ *
+ *  **但跨书源这条只对「网络书 ↔ 网络书」成立**：书架里的本地书《遮天》
+ *  (local-txt/local-epub/local-pdf) 和搜索到的网络书《遮天》是两份完全不同的
+ *  内容 —— 同名同作者纯属巧合。早先这里不看书源类型，于是本地书会让搜索结果
+ *  错误地显示「已在书架」，用户反而没法把网络版加进来。 */
 export function isBookOnShelf(
-  book: { bookUrl: string; name?: string; author?: string },
-  shelf: { bookUrl: string; name?: string; author?: string }[],
+  book: { bookUrl: string; name?: string; author?: string; origin?: string },
+  shelf: { bookUrl: string; name?: string; author?: string; origin?: string }[],
 ): boolean {
   if (!book.bookUrl) return false
   if (shelf.some((item) => item.bookUrl === book.bookUrl)) return true
-  const identity = searchMergeKey({ name: book.name || '', author: book.author || '' })
-  return shelf.some((item) => (
-    searchMergeKey({ name: item.name || '', author: item.author || '' }) === identity
-  ))
+  // 本地书与网络书不互认：只剩「同一类书源」之间才走书名+作者回退。
+  // 判据抽在 `shelfMatchKey` 里, 与搜索页/发现页卡片上的「已加入」标记共用 ——
+  // 否则同一个问题要在三个地方各修一遍。
+  const identity = shelfMatchKey(book)
+  return shelf.some((item) => shelfMatchKey(item) === identity)
 }
 
 /** 草稿相对原书是否有改动。

@@ -537,4 +537,47 @@ describe('isBookOnShelf (加入书架前的判重)', () => {
     // 没有 bookUrl 的结果无法可靠判重, 交给后端; 这里不误判成「已在书架」。
     expect(isBookOnShelf({ bookUrl: '', name: '剑来', author: '烽火戏诸侯' }, shelf)).toBe(false)
   })
+
+  it('does not confuse a local book with a web book of the same name', () => {
+    // 回归：书架里导入过本地《遮天》(TXT/EPUB/PDF)，搜到的网络《遮天》不能显示
+    // 「已在书架」—— 内容不同，用户需要能把网络版加进来。
+    const localShelf = [
+      { bookUrl: 'local-txt:9f2c', name: '遮天', author: '辰东', origin: 'local-txt' },
+    ]
+    expect(isBookOnShelf(
+      { bookUrl: 'https://source-c.com/book/777', name: '遮天', author: '辰东', origin: 'https://source-c.com' },
+      localShelf,
+    )).toBe(false)
+  })
+
+  it('does not confuse a web book with the local copy either', () => {
+    const webShelf = [
+      { bookUrl: 'https://source-a.com/book/1', name: '遮天', author: '辰东', origin: 'https://source-a.com' },
+    ]
+    expect(isBookOnShelf(
+      { bookUrl: 'local-epub:abc', name: '遮天', author: '辰东', origin: 'local-epub' },
+      webShelf,
+    )).toBe(false)
+  })
+
+  it('still matches two local books by name+author', () => {
+    const localShelf = [
+      { bookUrl: 'local-txt:first', name: '遮天', author: '辰东', origin: 'local-txt' },
+    ]
+    expect(isBookOnShelf(
+      { bookUrl: 'local-txt:second', name: '遮天', author: '辰东', origin: 'local-txt' },
+      localShelf,
+    )).toBe(true)
+  })
+
+  it('matches local books by exact URL regardless of local kind', () => {
+    // bookUrl 完全相同就是同一份文件，书源类型不必参与判断。
+    const localShelf = [
+      { bookUrl: 'local-txt:same', name: '某书', author: '某人', origin: 'local-txt' },
+    ]
+    expect(isBookOnShelf(
+      { bookUrl: 'local-txt:same', name: '别的名字', author: '别人', origin: 'local-txt' },
+      localShelf,
+    )).toBe(true)
+  })
 })

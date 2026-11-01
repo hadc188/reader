@@ -6,6 +6,7 @@ import {
   mergeSourceCandidates,
   rankSearchResults,
   searchMergeKey,
+  shelfMatchKey,
   matchesSourceSwitchTitle,
 } from './searchRank'
 import type { SearchBook } from '../types'
@@ -67,6 +68,40 @@ describe('searchMergeKey', () => {
     expect(searchMergeKey({ name: '遮天', author: '作者：测试作者' })).toBe('遮天|测试作者')
     expect(searchMergeKey({ name: '遮天', author: '作者: 测 试 作 者' })).toBe('遮天|测试作者')
     expect(searchMergeKey({ name: '遮 天', author: '测试作者' })).toBe('遮天|测试作者')
+  })
+})
+
+describe('shelfMatchKey', () => {
+  it('keeps web books interchangeable across sources', () => {
+    // 同一本网络书在不同书源 URL 不同，但书架里只该算一本。
+    expect(shelfMatchKey({ name: '遮天', author: '辰东', origin: 'https://a.com' }))
+      .toBe(shelfMatchKey({ name: '遮天', author: '辰东', origin: 'https://b.com/book' }))
+  })
+
+  it('separates local books from web books', () => {
+    // 回归：书架里导入过本地《遮天》时，搜索到的网络《遮天》被标成「已加入」。
+    const local = shelfMatchKey({ name: '遮天', author: '辰东', origin: 'local-txt' })
+    const web = shelfMatchKey({ name: '遮天', author: '辰东', origin: 'https://a.com' })
+    expect(local).not.toBe(web)
+  })
+
+  it('covers all three local kinds as the same class', () => {
+    const txt = shelfMatchKey({ name: '遮天', author: '辰东', origin: 'local-txt' })
+    const epub = shelfMatchKey({ name: '遮天', author: '辰东', origin: 'local-epub' })
+    const pdf = shelfMatchKey({ name: '遮天', author: '辰东', origin: 'local-pdf' })
+    expect(txt).toBe(epub)
+    expect(epub).toBe(pdf)
+  })
+
+  it('still normalizes name and author like searchMergeKey', () => {
+    expect(shelfMatchKey({ name: ' 遮 天 ', author: '作者：辰 东', origin: 'https://a.com' }))
+      .toBe(shelfMatchKey({ name: '遮天', author: '辰东', origin: 'https://a.com' }))
+  })
+
+  it('treats a missing origin as a web book', () => {
+    // 老数据可能没有 origin；当成网络书比当成本地书更安全。
+    expect(shelfMatchKey({ name: '遮天', author: '辰东' }))
+      .toBe(shelfMatchKey({ name: '遮天', author: '辰东', origin: 'https://a.com' }))
   })
 })
 

@@ -128,6 +128,30 @@ export function searchMergeKey(book: Pick<SearchBook, 'name' | 'author'>): strin
   return `${normalizeSearchName(book.name)}|${normalizeSearchAuthor(book.author)}`
 }
 
+/**
+ * 「书架里是否已有这本书」用的键：在 `searchMergeKey` 前再按**书源类型**分档。
+ *
+ * 为什么需要多这一档：本地导入的《遮天》(TXT/EPUB/PDF) 和网络书源里的《遮天》
+ * 是同名同作者的两份不同内容，`searchMergeKey` 会把它们并成一本，于是搜索结果
+ * 里的网络版被标成「已在书架」、也无法加入。
+ *
+ * 只用 `origin` 判定本地/网络：`local-txt` / `local-epub` / `local-pdf` 是后端
+ * 固定前缀（见 utils/localBook）。网络书源之间仍然互相认作同一本（换源场景）。
+ */
+export function shelfMatchKey(
+  book: { name?: string; author?: string; origin?: string },
+): string {
+  return `${shelfKind(book.origin)}|${searchMergeKey({ name: book.name || '', author: book.author || '' })}`
+}
+
+/** 与 localBook 的三种本地源对齐；其余一律算网络书。 */
+function shelfKind(origin?: string): 'local' | 'web' {
+  const value = (origin || '').trim().toLowerCase()
+  return value === 'local-txt' || value === 'local-epub' || value === 'local-pdf'
+    ? 'local'
+    : 'web'
+}
+
 /** Strip whitespace so "遮 天" and "遮天" merge. */
 function normalizeSearchName(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, '')

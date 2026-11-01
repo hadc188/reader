@@ -134,6 +134,7 @@ import {
   mergeSearchResult,
   rankSearchResults,
   searchMergeKey,
+  shelfMatchKey,
 } from '../utils/searchRank'
 import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
@@ -172,7 +173,9 @@ const shelfBookUrls = computed(() => {
 })
 
 const shelfBookKeys = computed(() => {
-  return new Set(shelfStore.books.map((book) => searchMergeKey(book)))
+  // 用 shelfMatchKey 而不是 searchMergeKey: 后者会把本地《遮天》和网络《遮天》
+  // 并成一本, 导致搜索卡片错误地显示「已加入」。
+  return new Set(shelfStore.books.map((book) => shelfMatchKey(book)))
 })
 
 const sourceGroups = computed(() => {
@@ -497,7 +500,7 @@ async function handleAddToShelf(book: Book | SearchBook) {
 
 function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event: MouseEvent }) {
   const inShelf = shelfBookUrls.value.has(book.bookUrl)
-    || shelfBookKeys.value.has(searchMergeKey(book))
+    || shelfBookKeys.value.has(shelfMatchKey(book))
   const menuItems = [
     { label: '查看详情', action: () => handleBookInfo(book) },
     { divider: true },

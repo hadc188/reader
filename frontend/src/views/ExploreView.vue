@@ -223,7 +223,7 @@ import { showContextMenu } from '../composables/useContextMenu'
 import { useSourceImport } from '../composables/useSourceImport'
 import type { Book, SearchBook } from '../types'
 import { exploreKindLabel, exploreKindType, type ExploreKind } from '../api/explore'
-import { searchMergeKey } from '../utils/searchRank'
+import { shelfMatchKey } from '../utils/searchRank'
 import { isBookOnShelf } from '../utils/bookEdit'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { createCoverCacheSession } from '../utils/coverCacheSession'
@@ -268,7 +268,9 @@ const emptyCategoryHint = computed(() => {
 // 少了这两个集合, 「加入书架」在本页永不 disabled, 点到已在书架的书会走
 // save_book 的整条覆盖分支, 把用户自定义的封面/简介等冲掉。
 const shelfBookUrls = computed(() => new Set(shelfStore.books.map((book) => book.bookUrl)))
-const shelfBookKeys = computed(() => new Set(shelfStore.books.map((book) => searchMergeKey(book))))
+// shelfMatchKey 额外按「本地书 / 网络书」分档: 只按书名+作者会把这本本地导入的
+// 《遮天》和发现页的网络《遮天》并成一本, 于是网络版被错误标成「已加入」。
+const shelfBookKeys = computed(() => new Set(shelfStore.books.map((book) => shelfMatchKey(book))))
 
 onMounted(async () => {
   // 书架为空时「已加入」标记与 join 判重全都失效(见 shelfBookUrls 注释),

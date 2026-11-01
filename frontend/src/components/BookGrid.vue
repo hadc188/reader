@@ -85,7 +85,7 @@
 import { computed, nextTick, ref, TransitionGroup } from 'vue'
 import BookCard from './BookCard.vue'
 import type { Book, SearchBook } from '../types'
-import { searchMergeKey } from '../utils/searchRank'
+import { shelfMatchKey } from '../utils/searchRank'
 
 type DisplayItem = (Book | SearchBook) | { __placeholder: true }
 const PLACEHOLDER_KEY = '__drag-placeholder__'
@@ -135,7 +135,9 @@ const emit = defineEmits<{
 
 function isBookInShelf(book: Book | SearchBook): boolean {
   return props.shelfBookUrls?.has(book.bookUrl)
-    || props.shelfBookKeys?.has(searchMergeKey(book))
+    // shelfMatchKey 会额外区分「本地书 / 网络书」: 本地导入的《遮天》不该让
+    // 搜索到的网络版《遮天》显示成「已加入」。
+    || props.shelfBookKeys?.has(shelfMatchKey(book))
     || false
 }
 

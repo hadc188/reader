@@ -905,6 +905,7 @@ const JS_PRELUDE: &str = r#"(function (g) {
               url: o.url === undefined || o.url === null ? '' : String(o.url),
               code: o.code === undefined || o.code === null ? 0 : o.code,
               headers: headers,
+              callTime: Number(o.call_time) >= 0 ? Number(o.call_time) : 0,
               isSuccessful: o.isSuccessful === undefined ? o.code >= 200 && o.code < 300 : o.isSuccessful
             });
           };
@@ -913,6 +914,21 @@ const JS_PRELUDE: &str = r#"(function (g) {
           return function () { return o.body; };
         }
         if (prop === 'headers') return headers;
+        // legado `StrResponse.callTime()`: 本次请求的耗时(毫秒), 由
+        // `AnalyzeUrl` 在 `getStrResponse` 里用 `System.currentTimeMillis()-startTime`
+        // 记入 `putCallTime`。书源的「测速」脚本全靠它排序线路:
+        //
+        //   try{t=Number(r.callTime())}catch(e2){t=-1}
+        //   if(alive&&t>=0&&t<bestT){...}
+        //
+        // 缺这个方法时每次都落到 catch, t 恒为 -1 → 所有线路都被判成
+        // 「没有可用耗时」→ 一键测速报「❌ 全部线路异常」。
+        if (prop === 'callTime') {
+          return function () {
+            var t = Number(o.call_time);
+            return isFinite(t) && t >= 0 ? Math.round(t) : 0;
+          };
+        }
         if (prop === 'header') {
           return function (k) { var v = headers[S(k).toLowerCase()]; return v === undefined ? null : v; };
         }
@@ -1263,11 +1279,19 @@ const JS_PRELUDE: &str = r#"(function (g) {
   // showReadingBrowser(url, title)（段评页）签名与 startBrowser 兼容。
   J.startBrowserDp = J.startBrowser;
   J.showReadingBrowser = function (u, title) { return J.startBrowser(u, title); };
-  // legado 并发请求; 串行执行功能等价（返回 StrResponse 数组）。
+  // legado 并发请求: `urlList.asFlow().mapAsync(threadCount)`（见
+  // `JsExtensions.ajaxAll`）。书源拿它做**线路测速**，靠 `callTime()` 比快慢；
+  // 串行也能出结果，但 N 条线路就要串行等满 N 个超时，且先发的那条会污染
+  // 后面的连接复用 —— 实测某源 3 条线路里 1 条不可达，串行要 20s+，
+  // 用户看到的就是「一键测速卡住 / 失败」。这里走宿主的真并发实现（保持
+  // 输入顺序返回，与 legado 的 `toList().toTypedArray()` 一致）。
   J.ajaxAll = function (urls) {
     if (typeof urls === 'string') urls = urls.split(',');
+    var specs = [];
+    for (var i = 0; i < urls.length; i++) specs.push(S(urls[i]));
+    var envelopes = JSON.parse(S(g.__connect_all(JSON.stringify(specs), requestHeaders())));
     var out = [];
-    for (var i = 0; i < urls.length; i++) out.push(httpResp(g.__connect(S(urls[i]), requestHeaders()), stripUrlOption(S(urls[i]))));
+    for (var j = 0; j < envelopes.length; j++) out.push(httpResp(JSON.stringify(envelopes[j]), stripUrlOption(specs[j])));
     return out;
   };
 
@@ -1457,6 +1481,32 @@ const JS_PRELUDE: &str = r#"(function (g) {
       children: function () {
         return elementsApi(wrapElements(s.children === undefined ? '[]' : s.children, el));
       },
+      // JSoup `Node.parentNode()` / `Element.parent()`: 父元素。
+      //
+      // 目录规则常写 `out.add(a.parentNode())` —— 章节列表的 `<a>` 外面包着
+      // `<p>`，宿主再按 `a@text` / `a@href` 从父节点往下取，`<a>` 自己不带
+      // 章节名之外的上下文。缺这两个方法时脚本在第一轮就抛 `not a function`，
+      // 整条 chapterList 中断 → **目录 0 章**（搜索/详情都正常，很容易误判成
+      // 站点改版）。
+      //
+      // 父节点在快照里是 `parent` 字段（见 `rule_engine::element_snapshot`），
+      // 只展开一层；祖先链上再无父节点时返回 null（legado 的根节点同样返回 null）。
+      parentNode: function () {
+        var p = s.parent;
+        if (!p || typeof p !== 'object') return null;
+        // 父节点通过 `parentNode()` 取到之后，书源通常只读文本/属性，
+        // 不会对父节点再 `remove()`（那会把整块从文档里摘掉）。
+        // 因此这里不挂 owner，避免 `remove()` 误伤原文档。
+        return wrapElement(p, null);
+      },
+      parent: function () {
+        return el.parentNode();
+      },
+      // `nextElementSibling()` / `previousElementSibling()`: 兄弟元素。
+      // 部分书源用它们把「书名 <p> + 作者 <p>」这类相邻段落串起来读。
+      // 快照里没有兄弟链，返回 null 让脚本的安全写法（判空）继续跑。
+      nextElementSibling: function () { return null; },
+      previousElementSibling: function () { return null; },
       // `clone()`: JSoup 返回独立副本(不挂在原文档上), 后续删除只影响副本。
       clone: function () {
         return wrapElement(cloneSnapshot(s), null);
@@ -2848,6 +2898,13 @@ fn eval_js_inner_with_source(
             "__connect",
             Func::new(move |spec: String, headers: String| -> String {
                 js_connect(&spec, &headers, &default_headers).to_string()
+            }),
+        )?;
+        let default_headers = source_info.headers.clone();
+        globals.set(
+            "__connect_all",
+            Func::new(move |specs: String, headers: String| -> String {
+                js_connect_all(&specs, &headers, &default_headers)
             }),
         )?;
         globals.set(
@@ -5080,7 +5137,7 @@ fn js_request_with_bytes(
 ) -> JsonValue {
     let url = url.trim().to_string();
     if url.is_empty() {
-        return json!({ "body": "", "code": 0, "url": "", "headers": {} });
+        return json!({ "body": "", "code": 0, "url": "", "headers": {}, "call_time": 0 });
     }
     let method = match method.to_ascii_uppercase().as_str() {
         "POST" => HttpMethod::POST, "HEAD" => HttpMethod::HEAD,
@@ -5135,6 +5192,9 @@ fn js_request_with_bytes(
     };
     let outcome = run_blocking_http(move || -> anyhow::Result<JsonValue> {
         let http = http?;
+        // `StrResponse.callTime()` 的计时起点：与 legado `getStrResponse` 一致，
+        // 从「发起这次请求」开始算到读完 body 为止（见下方 elapsed_ms）。
+        let started = std::time::Instant::now();
         // 带自定义 `proxy` 头的请求要另建 client(书源 client 的代理是固定的)。
         // 注意: 面板请求的短超时不是靠这里, 而是下面给 `spec.timeout` 做 per-request
         // 覆盖 —— 它优先于 client 自身的超时, 且不需要重建连接池。
@@ -5166,9 +5226,14 @@ fn js_request_with_bytes(
         } else {
             JS_HTTP_RUNTIME.block_on(http.session.request(&client, spec, concurrent_rate.as_deref()))?
         };
+        // `StrResponse.callTime()` 的耗时口径：legado 在 `getStrResponse` 里包的是
+        // **整个请求**（建连 + 读完 body），见 `AnalyzeUrl.kt` 的
+        // `connectionTime = System.currentTimeMillis() - startTime`。
+        // 这里同样包住 `session.request*` 的整个调用，而不是只量建连。
+        let elapsed_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u64;
         let headers = response.headers.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), json!(v))).collect::<serde_json::Map<_, _>>();
         let body = if raw_response { latin1_bytes_string(&response.raw_body) } else { response.body };
-        Ok(json!({"body":body, "code":response.status, "url":response.url, "headers":headers}))
+        Ok(json!({"body":body, "code":response.status, "url":response.url, "headers":headers, "call_time":elapsed_ms}))
     });
     let value = outcome.unwrap_or_else(|e| {
         if panel_request {
@@ -5179,7 +5244,7 @@ fn js_request_with_bytes(
         } else {
             push_js_log(format!("[http] 请求失败: {e:#}"));
         }
-        json!({ "body": "", "code": 0, "url": url, "headers": {} })
+        json!({ "body": "", "code": 0, "url": url, "headers": {}, "call_time": 0 })
     });
     // legado `java.getStrResponse()` 无参时返回"最近一次请求的响应"。
     //
@@ -5272,6 +5337,36 @@ fn js_connect(spec: &str, headers: &str, default_headers: &[(String, String)]) -
         merged.extend(map.clone());
     }
     js_request(&method, url, body, &JsonValue::Object(merged), default_headers, &options)
+}
+
+/// `__connect_all(specsJson, headers)`：`ajaxAll` 的宿主实现。
+///
+/// legado 的 `ajaxAll` 是 `mapAsync(AppConfig.threadCount)` 的**并发**请求，
+/// 书源用它给多条线路测速并按 `callTime()` 选最快的一条。串行实现虽然结果
+/// 一样，但一条不可达线路就要等满一个超时窗口，整体等于 N 个超时之和。
+///
+/// 返回值是**按输入顺序**排列的信封数组（与 `toList().toTypedArray()` 一致）：
+/// 书源靠下标把信封和 URL 对上（`rs[i]` ↔ `hs[i]`），顺序错位就会选错线路。
+fn js_connect_all(specs: &str, headers: &str, default_headers: &[(String, String)]) -> String {
+    let specs: Vec<String> = serde_json::from_str(specs).unwrap_or_default();
+    if specs.is_empty() {
+        return "[]".to_string();
+    }
+    // 这里的调用方是 `run_blocking_http` 起出来的阻塞线程，本函数内部再起线程
+    // 做真并发；`js_connect` 在没有 tokio 上下文的线程上会直接同步发请求。
+    let results: Vec<JsonValue> = std::thread::scope(|scope| {
+        let handles: Vec<_> = specs
+            .iter()
+            .map(|spec| scope.spawn(|| js_connect(spec, headers, default_headers)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or_else(|_| {
+                json!({"body": "", "code": 0, "url": "", "headers": {}, "call_time": 0})
+            }))
+            .collect()
+    });
+    JsonValue::Array(results).to_string()
 }
 
 // ────────────────────── 书源面板(showBrowser)宿主桥 ──────────────────────

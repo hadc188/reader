@@ -91,8 +91,27 @@ pub fn analyze_url(
             }
             if let Some(script) = options.get("js").and_then(Value::as_str) {
                 if !script.trim().is_empty() {
-                    url = eval_js_url(script, &url, key, page, &source.book_source_url, &base_url)
-                        .map_err(AppError::Internal)?;
+                    // legado `AnalyzeUrl`：
+                    //   option.getJs()?.let { evalJS(it, url)?.toString()?.let { url = it } }
+                    // 脚本的**返回值**才替换 url；`evalJS` 返回 `null`（Rhino 的
+                    // undefined）时 `?.let` 不执行，url 保持不变。
+                    //
+                    // 这里的 `js` 选项在真实书源里大量用作「请求前副作用」（清限频
+                    // Cookie 之类），末尾往往是 `try{cookie.removeCookie(u)}catch(e){}`
+                    // 这种语句块 —— 按 ECMAScript 规范它**有完成值**（`try` 块里最后
+                    // 一条表达式的值，如 `true`），于是 url 被改成 `"true"`，紧接着
+                    // `absolute_url` 拼出一个非法地址，报
+                    // `builder error: relative URL without a base`，症状是**搜索恒失败**。
+                    //
+                    // 所以只接受「看起来确实是地址」的返回值（带 scheme 或站内绝对
+                    // 路径），其余一律保留原 url —— 这个源的脚本末尾就是
+                    // `try{cookie.removeCookie(u)}catch(e){}`，完成值为 `true`。
+                    if let Ok(value) = eval_js_url(script, &url, key, page, &source.book_source_url, &base_url) {
+                        let value = value.trim();
+                        if looks_like_url(value) {
+                            url = value.to_string();
+                        }
+                    }
                 }
             }
         }
@@ -250,6 +269,41 @@ pub fn parse_source_headers(header_str: &str) -> Vec<(String, String)> {
         }
     }
     parse_legacy_header_object(trimmed)
+}
+
+/// 判断 `js` 选项的返回值是否"确实是个地址"。
+///
+/// 只用于 [`analyze_url`] 里覆盖 url 的那一步：legado 的语义是「脚本返回非
+/// null 就替换 url」，而 ECMAScript 的语句块（`try{...}catch(e){}`、赋值、
+/// 自增……）都有完成值，脚本尾部随手写一句副作用就会把 url 改成 `"true"`
+/// 这种非地址文本，随后建请求时炸在 `relative URL without a base`。
+///
+/// 接受这几种形态：
+/// - 带 scheme 的绝对地址（`http:` / `https:` / `data:` / 其它 `x:` 协议）；
+/// - 协议相对（`//host/path`）；
+/// - 站内绝对路径（`/path`）、相对路径（`./`、`../`）、查询串（`?a=b`）。
+///
+/// 其余（布尔、数字、`undefined`、任意裸词）返回 false，调用方保留原 url。
+fn looks_like_url(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if value.starts_with("//") || value.starts_with('/') || value.starts_with("./") || value.starts_with("../") || value.starts_with('?') {
+        return true;
+    }
+    // `scheme:` —— scheme 必须是「字母开头 + 字母/数字/+/-/.」，避免把
+    // `true`、`123`、`NaN` 这类求值结果误判成协议名。
+    match value.split_once(':') {
+        Some((scheme, rest)) => {
+            let mut chars = scheme.chars();
+            let head_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+            head_ok
+                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+                && (rest.is_empty() || !rest.starts_with(' '))
+        }
+        None => false,
+    }
 }
 
 pub fn absolute_url(base: &str, url: &str) -> String {

@@ -413,6 +413,38 @@ impl RuleEngine {
         list_rule: &str,
         context: &mut HashMap<String, String>,
     ) -> (Vec<BookChapter>, Vec<String>) {
+        // 「选择器段 + 后续 `@js:` 段」必须**串联**求值（legado `AnalyzeRule`
+        // 的 `splitSourceRule` 语义：JS_PATTERN 把脚本段切出来，剩下的文本前后
+        // 各成一段，上一段的输出喂给下一段）。
+        //
+        // 目录列表规则里这种写法很常见：
+        //   id.list@dl>a
+        //   @js:var seen={};var out=[];for(...){...}out;
+        // 早先这里只看 `detect_mode`：规则开头不是 `@js:` 就判成 CSS，整条串
+        // （含 `\n@js:` 那几行）丢给 CSS 选择器，恒选不到 → **目录 0 章**，
+        // 而搜索/详情都正常，很容易误判成站点改版。
+        //
+        // 只处理「选择器在前、脚本在后」这一种（`has_trailing_script_segment`）。
+        // 整条规则就是 `@js:` 的走原来的 JS 分支：那条路径的返回值可能是
+        // JSONPath 原始节点（`java.getElements("$.list[*]")`），不一定有元素
+        // 快照字段，硬套快照解析会把合法结果丢掉。
+        if has_trailing_script_segment(list_rule) {
+            if let Some(text) = eval_list_rule_chain(list_rule, body, base_url) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    // 脚本段交回的是**元素快照数组**（`[{tag,text,outerHtml,…}]`），
+                    // 不是 HTML 串。按快照逐项套字段规则；不是快照时回退成 HTML
+                    // 片段（脚本也可能自己拼一段 HTML 回来）。
+                    if let Ok(items) = serde_json::from_str::<Vec<Value>>(text) {
+                        if items.iter().all(is_element_snapshot) {
+                            return chapters_from_snapshots(items, base_url, rule, context, body);
+                        }
+                    }
+                    let html = html_fragment_from_chain(text);
+                    return parse_chapter_list_html(&html, base_url, rule, "", context);
+                }
+            }
+        }
         match self.detect_mode(list_rule, body) {
             ParseMode::JsonPath => parse_chapter_list_json(body, base_url, rule, self.strip_mode_prefix(list_rule), context),
             ParseMode::XPath => parse_chapter_list_xpath(body, base_url, rule, self.strip_mode_prefix(list_rule), context),
@@ -1617,6 +1649,17 @@ fn parse_chapter_list_html(
 
     let items = html::select_list(&doc, strip_mode_prefix(list_sel));
 
+    chapters_from_elements(items, base_url, rule, ctx, body)
+}
+
+/// 逐项套 `chapterName` / `chapterUrl` 等字段规则，产出章节列表。
+fn chapters_from_elements(
+    items: Vec<scraper::ElementRef<'_>>,
+    base_url: &str,
+    rule: &TocRule,
+    ctx: &mut HashMap<String, String>,
+    next_url_body: &str,
+) -> (Vec<BookChapter>, Vec<String>) {
     // Use a set to deduplicate chapters by URL
     let mut seen_urls = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(items.len());
@@ -1680,7 +1723,7 @@ fn parse_chapter_list_html(
     // 没有配 `nextTocUrl` 时直接给空 —— 不能把空串交给 `select_text_list`：
     // 空选择器在元素级语义里表示"当前元素自身"，会凭空产出一个 next_url，
     // 让本来单页的目录被当成有下一页。
-    let next_urls = toc_next_urls(body, base_url, rule);
+    let next_urls = toc_next_urls(next_url_body, base_url, rule);
 
     (out, next_urls)
 }
@@ -1713,6 +1756,40 @@ fn toc_next_urls(body: &str, base_url: &str, rule: &TocRule) -> Vec<String> {
         .filter(|u| !u.trim().is_empty())
         .map(|u| resolve_url(base_url, u.trim()))
         .collect()
+}
+
+/// 快照数组 → 章节：把每个快照还原成 HTML 片段后复用元素级字段规则。
+///
+/// 逐项还原（而不是拼成一个大文档再选一次）是为了让 `chapterName: text`
+/// 这类裸字段规则仍然作用在**单个章节元素**上，与 CSS 分支的语义一致。
+fn chapters_from_snapshots(
+    items: Vec<Value>,
+    base_url: &str,
+    rule: &TocRule,
+    ctx: &mut HashMap<String, String>,
+    next_url_body: &str,
+) -> (Vec<BookChapter>, Vec<String>) {
+    let html = items
+        .iter()
+        .map(|item| element_snapshot_html(item).0)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let doc = html::parse_document(&html);
+    let elements = html::document_top_elements(&doc);
+    chapters_from_elements(elements, base_url, rule, ctx, next_url_body)
+}
+
+/// 链式求值的文本结果 → 可直接被 CSS 引擎解析的 HTML。
+///
+/// 正常路径是快照数组（见 `chapters_from_snapshots`）；脚本自己拼 HTML 回来时
+/// 原样使用。这里只处理「看起来不象 HTML」的兜底，避免把裸文本丢给选择器。
+fn html_fragment_from_chain(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.starts_with('<') {
+        trimmed.to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn parse_chapter_list_xpath(
@@ -2377,6 +2454,45 @@ fn element_snapshot(element: &scraper::ElementRef) -> Value {
         "innerHtml": element.inner_html(),
         "outerHtml": element.html(),
         "attrs": attrs,
+        // 父元素快照(递归一层)。JSoup 的 `element.parentNode()` 返回 `Node`,
+        // 书源用 `out.add(a.parentNode())` 把 `<a>` 换成它的 `<p>` 父节点，
+        // 再交给 `a@text` / `a@href` 取章节名与地址。没有父节点时整个目录
+        // 解析会抛 `not a function` → 0 章。
+        //
+        // 只向上展开一层就够：书源拿父节点去做文本/属性读取，极少再往上爬；
+        // 展开整条祖先链会让每个元素快照都带上整棵文档，序列化开销爆炸。
+        "parent": element.parent().and_then(scraper::ElementRef::wrap).map(parent_snapshot),
+    })
+}
+
+/// 父元素快照：只带 `tag` / `attrs` / `ownText`，**不带任何内文**。
+///
+/// 体积是这个函数存在的全部理由。目录规则常写 `id.list@dl>a`（整本 2000+
+/// 章），若每个 `<a>` 的快照都复制一份父节点的内容，总序列化体积就是 O(n²)：
+///
+/// - 带 `innerHtml`/`outerHtml`：实测某源 2791 章 → **3.7 GB**，选择器本身
+///   跑 170 秒，QuickJS 直接失败（症状：目录/正文加载不出来）；
+/// - 只去掉内文、仍带 `text`：`<dl>` 的 `text` 是整本目录，体积照样 O(n²)，
+///   脚本里每次 `attr('href')` 都触发一轮完整序列化，实测 68 秒。
+///
+/// 书源拿 `parentNode()` 的典型用法是 `out.add(a.parentNode())`（把 `<a>`
+/// 换成外层 `<p>`）后交给 `a@text` / `a@href` —— 那条链需要的是**子元素**，
+/// 而子元素本来就完整保存在 `innerHtml` 里由宿主重新解析。真正读父节点自身
+/// 文本的写法（`parent().text()`）很少，这里给 `ownText`（只含直属文本节点，
+/// 通常很短）足以覆盖，同时保住了 O(n) 体积。
+fn parent_snapshot(element: scraper::ElementRef) -> Value {
+    let mut attrs = serde_json::Map::new();
+    for (name, value) in element.value().attrs() {
+        attrs.insert(name.to_string(), Value::String(value.to_string()));
+    }
+    json!({
+        "tag": element.value().name(),
+        "text": html::extract_text(&element, "ownText").unwrap_or_default(),
+        "ownText": html::extract_text(&element, "ownText").unwrap_or_default(),
+        "innerHtml": "",
+        "outerHtml": "",
+        "attrs": attrs,
+        "parent": Value::Null,
     })
 }
 
@@ -2484,6 +2600,18 @@ enum RuleSegment<'a> {
 /// 逐段串联求值（上一段的输出喂给下一段）。桌面端早先只认「规则以 JS 开头」
 /// 的形态，中间夹 JS 时整条规则被当成一个 CSS 选择器 —— 选择器里含 `<js>`
 /// 自然选不到任何东西，搜索于是恒为 0 条。
+/// 规则是否是「选择器段 + 后续脚本段」（脚本不在开头）。
+///
+/// 只用于列表规则的分流，判断依据是：规则里含 `@js:` / `<js>`，且第一个脚本
+/// 标记**不在**规则开头（前面还有选择器文本）。
+fn has_trailing_script_segment(rule: &str) -> bool {
+    let trimmed = rule.trim_start();
+    if trimmed.starts_with("@js:") || trimmed.starts_with("js:") || trimmed.starts_with("<js>") {
+        return false;
+    }
+    rule.contains("<js>") || rule.contains("@js:")
+}
+
 fn split_rule_segments(rule: &str) -> Vec<RuleSegment<'_>> {
     let mut segments = Vec::new();
     let mut rest = rule;
@@ -2628,19 +2756,7 @@ pub fn eval_rule_chain_for_test(rule: &str, body: &str, base_url: &str) -> Optio
 
 /// `scraper` 元素 → 元素快照 JSON（与 `element_binding_from_ref` 同构）。
 fn element_snapshot_json(el: &scraper::ElementRef) -> Value {
-    let attrs: serde_json::Map<String, Value> = el
-        .value()
-        .attrs()
-        .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
-        .collect();
-    json!({
-        "tag": el.value().name(),
-        "text": el.text().collect::<String>(),
-        "ownText": el.text().collect::<String>(),
-        "innerHtml": el.inner_html(),
-        "outerHtml": el.html(),
-        "attrs": attrs,
-    })
+    element_snapshot(el)
 }
 
 fn eval_field_html(rule: &str, el: &scraper::ElementRef, base_url: &str) -> Option<String> {
@@ -3256,20 +3372,7 @@ fn script_uses_element_api(script: &str) -> bool {
 
 /// 把 `scraper` 元素转成元素快照绑定(供 `__wrapElement` 还原)。
 fn element_binding_from_ref(el: &scraper::ElementRef) -> serde_json::Value {
-    let attrs: serde_json::Map<String, serde_json::Value> = el
-        .value()
-        .attrs()
-        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
-        .collect();
-    let snapshot = serde_json::json!({
-        "tag": el.value().name(),
-        "text": html::select_text_from_element(el, "").unwrap_or_else(|| el.text().collect::<String>()),
-        "ownText": el.text().collect::<String>(),
-        "innerHtml": el.inner_html(),
-        "outerHtml": el.html(),
-        "attrs": attrs,
-    });
-    crate::parser::js::element_binding(&snapshot)
+    crate::parser::js::element_binding(&element_snapshot(el))
 }
 
 /// 元素快照上的字段规则是否**需要选择器**求值。

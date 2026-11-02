@@ -313,8 +313,24 @@ async fn fetch_inner(
                 {
                     body = format!("<?xml version=\"1.0\"?>{}", body);
                 }
-                if status >= 500 && attempt < max_retries {
-                    last_err = Some(anyhow::anyhow!("server error status {}", status));
+                // 非 2xx 一律重试，对齐 legado `OkHttpUtils.newCallResponse`：
+                //
+                //   for (i in 0..retry) {
+                //       response = newCall(...).await()
+                //       if (response.isSuccessful) return response
+                //   }
+                //
+                // 早先这里只对 `status >= 500` 重试，服务端 4xx 直接返回。这在
+                // 「一次性挑战 Cookie」的站点上是致命的：`xsbook.org`(Tengine)
+                // 对未授权的请求回 403 + `Set-Cookie: <随机名>=<值>`，带上这个
+                // Cookie 后同一请求就 200。书源脚本恰恰先用
+                // `cookie.removeCookie(base)` 清掉 Cookie（为了绕限频），于是
+                // **每个** 详情/目录/正文请求都要重新过一次挑战；只重试 5xx
+                // 时永远停在那条 403 上，界面症状就是「目录正文加载不出来」。
+                //
+                // 重试次数仍由书源的 `retry` 选项决定（默认 2），不额外放大。
+                if !is_successful && attempt < max_retries {
+                    last_err = Some(anyhow::anyhow!("request failed with status {}", status));
                 } else {
                     return Ok(FetchResponse {
                         url,

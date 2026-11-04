@@ -1215,6 +1215,9 @@ pub async fn delete_book_source_core(
         .remove_source_candidates(&user_ns, &HashSet::from([url.clone()]))
         .await?;
     state.book_service.clear_source_cookie(&user_ns, &url).await;
+    // 书源已从库里删掉，它的会话目录之后再没有任何读取路径 —— 连目录一起回收，
+    // 否则 `source-state/<md5>` 会一直攒下去。
+    state.book_service.remove_source_state(&user_ns, &url).await;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 
@@ -1253,6 +1256,10 @@ pub async fn delete_book_sources_core(
         .book_service
         .clear_source_cookies(&user_ns, &deleted_list)
         .await;
+    state
+        .book_service
+        .remove_source_states(&user_ns, &deleted_list)
+        .await;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }
 
@@ -1287,6 +1294,10 @@ pub async fn delete_all_book_sources(
     state
         .book_service
         .clear_source_cookies(&user_ns, &deleted_list)
+        .await;
+    state
+        .book_service
+        .remove_source_states(&user_ns, &deleted_list)
         .await;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": true})))
 }

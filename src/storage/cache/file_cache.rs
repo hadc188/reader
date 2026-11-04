@@ -147,6 +147,42 @@ impl FileCache {
         }
     }
 
+    /// 列出某命名空间下所有书的缓存目录及其**最近一次写入**时间。
+    ///
+    /// 给「孤儿章节缓存回收」用：只有不在书架上的书才可能是孤儿，而回收还要
+    /// 按年龄判断（见 `BookService::clean_orphan_chapter_caches`），所以这里把
+    /// 目录的 mtime 一并带出去。目录不存在时返回空表（首次启动的正常情况）。
+    pub async fn list_book_dirs(
+        &self,
+        user_ns: &str,
+    ) -> anyhow::Result<Vec<(String, std::time::SystemTime)>> {
+        let dir = self.root.join(user_ns);
+        let mut out = Vec::new();
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // 取不到 mtime 就按「刚刚写过」处理：宁可这次不删，也别误删活跃缓存。
+            let modified = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .unwrap_or_else(std::time::SystemTime::now);
+            out.push((name.to_string(), modified));
+        }
+        Ok(out)
+    }
+
     /// Get the directory path for a book's cache
     fn book_path(&self, user_ns: &str, book_key: &str) -> PathBuf {
         self.root.join(user_ns).join(book_key)

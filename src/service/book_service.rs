@@ -386,6 +386,26 @@ fn is_cancelled(signal: Option<&CancelSignal>) -> bool {
     signal.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// 判断一个书源会话目录是否「什么都没有」。
+///
+/// `SourceSession` 只写 `cookies.json` 与 `state.json`，两者在无内容时分别是
+/// `{}` 和 `{}`（或空串）。只要其中任意一个有实质内容（登录态、`variable`、
+/// `loginInfo` 等）就判定为非空 —— 宁可多留一个目录，也不能删掉用户的登录态。
+async fn source_state_dir_is_empty(dir: &std::path::Path) -> bool {
+    for name in ["cookies.json", "state.json"] {
+        let Ok(raw) = tokio::fs::read_to_string(dir.join(name)).await else {
+            // 读不到（不存在/权限）就当它没有内容, 继续看下一个文件。
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed == "{}" || trimmed == "[]" || trimmed == "null" {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
 /// 阅读页统一渲染章节标题；正文若自带 `<h1>` 等标题块会重复显示。
 /// 只剥离开头第一个明确标题元素，保留图片和普通正文。
 fn strip_leading_content_title(content: &str) -> String {
@@ -1103,8 +1123,83 @@ impl BookService {
         self.login_sessions.write().await.retain(|_, session| session.source_url != source_url);
     }
 
+    /// 书源被删除/批量删除时，把这个书源的持久化会话目录也删掉。
+    ///
+    /// 与 `clear_source_cookie` 分开的原因：那个只清 cookie 内容，书源还在、
+    /// 之后可能重新登录，目录留着是对的。而书源删掉之后，`source-state/<md5>`
+    /// 里只剩没人会再读的空壳，必须连目录一起回收 —— 否则每次导入一批书源再
+    /// 删掉，都会在磁盘上攒一层永远不用的目录（实测某数据目录堆了 907 个）。
+    pub async fn remove_source_state(&self, user_ns: &str, source_url: &str) {
+        // 目录名与 `SourceSession::new` 必须完全一致：`md5("{ns}::{normalized}")`。
+        // 两边任一处改名都会让这里静默失效，所以两边都依赖 `normalize_source_url`。
+        let key = format!("{user_ns}::{}", normalize_source_url(source_url));
+        let dir = self.storage_dir.join("source-state").join(md5_hex(&key));
+        if dir.exists() {
+            match tokio::fs::remove_dir_all(&dir).await {
+                Ok(()) => {}
+                Err(err) => tracing::warn!(
+                    dir = %dir.display(),
+                    "删除书源会话目录失败: {err}"
+                ),
+            }
+        }
+    }
+
     pub async fn clear_source_cookies(&self, user_ns: &str, source_urls: &[String]) {
         for url in source_urls { self.clear_source_cookie(user_ns, url).await; }
+    }
+
+    /// 批量删除书源的持久化会话目录（书源被删掉后调用）。
+    pub async fn remove_source_states(&self, user_ns: &str, source_urls: &[String]) {
+        for url in source_urls { self.remove_source_state(user_ns, url).await; }
+    }
+
+    /// 回收**空壳**的书源会话目录（`source-state/<md5>`）。
+    ///
+    /// 正常删除书源现在会连目录一起删（见 `remove_source_state`），但历史版本
+    /// 只清 cookie 内容不删目录，于是留下大量只有 `{}` 的空壳 —— 实测某数据
+    /// 目录 907 个里 870 个是空的（实际书源只有几十个）。
+    ///
+    /// 只删**内容确实为空**且**闲置够久**的：有 cookie 的目录是用户登录态，
+    /// 哪怕对应书源眼下不在库里也要留着（可能只是暂时停用或稍后重新导入）。
+    pub async fn clean_empty_source_state_dirs(&self, max_age: Duration) -> usize {
+        let root = self.storage_dir.join("source-state");
+        let mut entries = match tokio::fs::read_dir(&root).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(err) => {
+                tracing::warn!(dir = %root.display(), "读取书源会话目录失败: {err}");
+                return 0;
+            }
+        };
+        let now = std::time::SystemTime::now();
+        let mut removed = 0usize;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .unwrap_or(now);
+            if now.duration_since(modified).unwrap_or_default() < max_age {
+                continue;
+            }
+            if !source_state_dir_is_empty(&path).await {
+                continue;
+            }
+            match tokio::fs::remove_dir_all(&path).await {
+                Ok(()) => removed += 1,
+                Err(err) => tracing::warn!(
+                    dir = %path.display(),
+                    "删除空壳书源会话目录失败: {err}"
+                ),
+            }
+        }
+        removed
     }
 
     /// Validate in an isolated session. A search without matches cannot tell
@@ -1113,7 +1208,11 @@ impl BookService {
         &self, user_ns: &str, source: &BookSource, cookie: &str, keyword: &str,
     ) -> Result<bool, AppError> {
         let candidate_http = HttpClient::new(30, self.http.active_proxy()).map_err(AppError::Internal)?;
-        let context = candidate_http.source_context(&format!("cookie-check-{}", uuid::Uuid::new_v4()), &source.book_source_url, None).map_err(AppError::Internal)?;
+        // `user_ns` 以前是 `cookie-check-{uuid}`，而 `SourceSession::new` 会按
+        // `md5(user_ns::source_url)` 建目录 —— 每验证一次 cookie 就永久留下一个
+        // 空目录（实测某数据目录里堆了 907 个，实际书源只有几十个）。
+        // 这里用固定命名空间：同一书源反复验证复用同一个目录，量级降到与书源数同阶。
+        let context = candidate_http.source_context("cookie-check", &source.book_source_url, None).map_err(AppError::Internal)?;
         let url = url::Url::parse(&source.book_source_url).map_err(|_| AppError::BadRequest("书源地址无效".into()))?;
         context.session.cookies.set(&url, cookie).map_err(AppError::Internal)?;
         let current = self.http.source_context(user_ns, &source.book_source_url, None).map_err(AppError::Internal)?;
@@ -2508,6 +2607,127 @@ impl BookService {
             .remove(user_ns, &book_key, chapter_url)
             .await
             .map_err(|e| AppError::Internal(e.into()))
+    }
+
+    /// 回收**不在书架上**的书的章节正文缓存。
+    ///
+    /// 为什么需要它：`delete_book` / `delete_books` 只在书**还在书架里**时才
+    /// 匹配得到，并据此调 `clear_book_related_cache`。而从搜索结果/发现页直接
+    /// 点开阅读、又没有「加入书架」的书，其章节缓存写在
+    /// `cache/<ns>/<md5(bookUrl)>/` 下，之后就再没有任何路径会删除它 ——
+    /// 实测某开发数据目录里 69 份章节缓存有 62 份属于这种孤儿，占了绝大部分
+    /// 体积。与封面缓存不同，章节正文**没有任何自动淘汰**（`FileCache` 里没有
+    /// TTL，也没有全局容量上限），不主动回收就会一直涨。
+    ///
+    /// 判定规则：
+    /// - 书架上的书（任意命名空间里读到的）一律豁免，无论多旧；
+    /// - 其余目录只有**闲置超过 `max_age`** 才删。刚读完但还没决定加不加书架
+    ///   的书不会在下次启动时被清掉，符合「读完一本书、隔一会儿再回来看」的
+    ///   常见用法。
+    ///
+    /// 与 `clean_stale_search_covers` 一样是崩溃/强退的兜底：正常的删除书籍
+    /// 路径已经会清缓存，这里只负责收那些没被任何人认领的目录。
+    pub async fn clean_orphan_chapter_caches(&self, max_age: Duration) -> Result<usize, AppError> {
+        // 读书架失败时**整体跳过**：宁可多留，也不能因为读到空列表就误删全部缓存。
+        let Ok(books) = self.read_bookshelf("default").await else {
+            return Ok(0);
+        };
+        let mut pinned: HashSet<String> = HashSet::new();
+        // 目录缓存（`data/<ns>/chapters/<md5(tocUrl)>.vN.json`）用同一批书架书
+        // 反查：它按 tocUrl 命名，与正文缓存按 bookUrl 命名不是一套键。
+        let mut pinned_toc: HashSet<String> = HashSet::new();
+        for book in &books {
+            if !book.book_url.is_empty() {
+                pinned.insert(md5_hex(&book.book_url));
+            }
+            if let Some(toc_url) = book.toc_url.as_deref().filter(|u| !u.is_empty()) {
+                let name = md5_hex(toc_url);
+                // 两代修订都要钉住，否则 v2/v3 里没被认出的那一份会被当成孤儿。
+                pinned_toc.insert(format!("{name}.v2.json"));
+                pinned_toc.insert(format!("{name}.v3.json"));
+            }
+        }
+
+        let dirs = self
+            .cache
+            .list_book_dirs("default")
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+
+        let now = std::time::SystemTime::now();
+        let mut removed = 0usize;
+        for (book_key, modified) in dirs {
+            if pinned.contains(&book_key) {
+                continue;
+            }
+            // 刚写过的目录不动：用户可能刚读完、正要加书架。
+            let idle = now.duration_since(modified).unwrap_or_default();
+            if idle < max_age {
+                continue;
+            }
+            match self.cache.remove_book("default", &book_key).await {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(err) => tracing::warn!(
+                    book_key = %book_key,
+                    "回收孤儿章节缓存失败: {err}"
+                ),
+            }
+        }
+
+        removed += self
+            .remove_orphan_chapter_lists(&pinned_toc, max_age)
+            .await;
+        Ok(removed)
+    }
+
+    /// 回收不在书架上的书的**目录缓存**（`data/<ns>/chapters/*.json`）。
+    ///
+    /// 与正文缓存同样的成因：`clear_book_related_cache` 只在删书时触发，而从
+    /// 搜索/发现页点开读过、没加书架的书，其 toc 缓存没有任何删除事件。
+    /// 这类文件往往几百 KB 到 1 MB（整份章节目录），实测比正文缓存还占地方。
+    async fn remove_orphan_chapter_lists(
+        &self,
+        pinned: &HashSet<String>,
+        max_age: Duration,
+    ) -> usize {
+        let dir = self.storage_dir.join("data").join("default").join("chapters");
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(err) => {
+                tracing::warn!(dir = %dir.display(), "读取章节目录缓存目录失败: {err}");
+                return 0;
+            }
+        };
+        let now = std::time::SystemTime::now();
+        let mut removed = 0usize;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if pinned.contains(name) {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .unwrap_or(now);
+            if now.duration_since(modified).unwrap_or_default() < max_age {
+                continue;
+            }
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => removed += 1,
+                Err(err) => tracing::warn!(path = %path.display(), "删除孤儿目录缓存失败: {err}"),
+            }
+        }
+        removed
     }
 
     pub async fn chapter_list_cache_exists(&self, user_ns: &str, toc_url: &str) -> bool {
@@ -6015,6 +6235,197 @@ mod tests {
         // 书架的图还在，发现页那张（连内容）已被清掉。
         let (data, _) = service.get_cover("public", shelf_url).await.unwrap();
         assert_eq!(data, b"shelf-cover-bytes");
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    /// 从搜索/发现页读过、但**没加入书架**的书，章节缓存原本永远没人删：
+    /// `delete_book` 只在书架里匹配得到，孤儿目录会一直堆着。
+    #[tokio::test]
+    async fn orphan_chapter_cache_is_cleaned_but_shelf_book_is_kept() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-orphan-chapter-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+
+        let shelf_url = "https://s.example/book/on-shelf";
+        let orphan_url = "https://s.example/book/read-but-not-added";
+        service
+            .save_book(
+                "default",
+                crate::model::book::Book {
+                    name: "书架书".to_string(),
+                    author: "作者".to_string(),
+                    book_url: shelf_url.to_string(),
+                    origin: "https://s.example".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // 两边都写了章节正文缓存。
+        service
+            .cache
+            .put("default", &md5_hex(shelf_url), "ch-1", "书架书的正文")
+            .await
+            .unwrap();
+        service
+            .cache
+            .put("default", &md5_hex(orphan_url), "ch-1", "看完就走的正文")
+            .await
+            .unwrap();
+
+        // 阈值 0 = 全部视为闲置够久。
+        let removed = service
+            .clean_orphan_chapter_caches(Duration::from_secs(0))
+            .await
+            .unwrap();
+
+        assert_eq!(removed, 1, "只该清掉孤儿目录");
+        assert!(
+            service
+                .cache
+                .exists("default", &md5_hex(shelf_url), "ch-1")
+                .await,
+            "书架书的章节缓存必须保住"
+        );
+        assert!(
+            !service
+                .cache
+                .exists("default", &md5_hex(orphan_url), "ch-1")
+                .await,
+            "未加入书架且闲置的章节缓存应被回收"
+        );
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    /// 刚读完还没决定加不加书架的书，不能在下一次启动时被清掉。
+    #[tokio::test]
+    async fn recent_orphan_chapter_cache_survives_the_age_threshold() {
+
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-orphan-chapter-fresh-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let url = "https://s.example/book/just-read";
+        service
+            .cache
+            .put("default", &md5_hex(url), "ch-1", "刚读完的正文")
+            .await
+            .unwrap();
+
+        // 24 小时的阈值：刚写下的目录远没到。
+        let removed = service
+            .clean_orphan_chapter_caches(Duration::from_secs(24 * 60 * 60))
+            .await
+            .unwrap();
+
+        assert_eq!(removed, 0);
+        assert!(service.cache.exists("default", &md5_hex(url), "ch-1").await);
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    /// 目录缓存（`data/<ns>/chapters/*.json`）同样是孤儿高发区：
+    /// 从搜索页读过的书没加书架，toc 缓存就没人清。这类文件单体最大。
+    #[tokio::test]
+    async fn orphan_chapter_list_cache_is_cleaned_but_shelf_book_is_kept() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-orphan-toc-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let toc_dir = storage_dir.join("data").join("default").join("chapters");
+        std::fs::create_dir_all(&toc_dir).unwrap();
+
+        let shelf_toc = "https://s.example/toc/on-shelf";
+        let orphan_toc = "https://s.example/toc/read-but-not-added";
+        std::fs::write(toc_dir.join(format!("{}.v2.json", md5_hex(shelf_toc))), "[]").unwrap();
+        std::fs::write(toc_dir.join(format!("{}.v2.json", md5_hex(orphan_toc))), "[]").unwrap();
+
+        service
+            .save_book(
+                "default",
+                crate::model::book::Book {
+                    name: "书架书".to_string(),
+                    author: "作者".to_string(),
+                    book_url: "https://s.example/book/on-shelf".to_string(),
+                    origin: "https://s.example".to_string(),
+                    toc_url: Some(shelf_toc.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        service
+            .clean_orphan_chapter_caches(Duration::from_secs(0))
+            .await
+            .unwrap();
+
+        assert!(
+            toc_dir.join(format!("{}.v2.json", md5_hex(shelf_toc))).exists(),
+            "书架书的目录缓存必须保住"
+        );
+        assert!(
+            !toc_dir.join(format!("{}.v2.json", md5_hex(orphan_toc))).exists(),
+            "未加入书架的目录缓存应被回收"
+        );
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    /// 空壳书源会话目录要回收，有登录态的必须保住。
+    #[tokio::test]
+    async fn empty_source_state_dirs_are_cleaned_but_logged_in_ones_are_kept() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-source-state-clean-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let root = storage_dir.join("source-state");
+
+        let empty = root.join("empty-shell");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(empty.join("cookies.json"), "{}").unwrap();
+        std::fs::write(empty.join("state.json"), "{}").unwrap();
+
+        let logged_in = root.join("has-cookie");
+        std::fs::create_dir_all(&logged_in).unwrap();
+        std::fs::write(logged_in.join("cookies.json"), r#"{"sid":"abc"}"#).unwrap();
+        std::fs::write(logged_in.join("state.json"), "{}").unwrap();
+
+        let removed = service
+            .clean_empty_source_state_dirs(Duration::from_secs(0))
+            .await;
+
+        assert_eq!(removed, 1, "只该删空壳目录");
+        assert!(!empty.exists(), "空壳目录应被回收");
+        assert!(logged_in.exists(), "有 cookie 的目录是登录态，必须保住");
 
         let _ = std::fs::remove_dir_all(storage_dir);
     }

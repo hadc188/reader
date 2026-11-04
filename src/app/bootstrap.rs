@@ -53,6 +53,29 @@ pub async fn build_state(cfg: &AppConfig) -> anyhow::Result<AppState> {
         Ok(_) => {}
         Err(err) => tracing::warn!("failed to clean stale search cover cache: {err}"),
     }
+    // 章节正文缓存没有任何自动淘汰：从搜索结果/发现页读过、但没加入书架的书，
+    // 其 `cache/default/<md5(bookUrl)>/` 在书删除路径里匹配不到，会永久残留。
+    // 这里回收闲置超过 24 小时的孤儿目录；书架上的书一律豁免。
+    // 24 小时而不是 30 分钟：用户可能今天读了几章、明天才决定加书架。
+    match book_service
+        .clean_orphan_chapter_caches(std::time::Duration::from_secs(24 * 60 * 60))
+        .await
+    {
+        Ok(removed) if removed > 0 => {
+            tracing::info!(removed, "cleaned orphan chapter caches")
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!("failed to clean orphan chapter caches: {err}"),
+    }
+    // 历史版本删书源时只清 cookie 内容、不删 `source-state/<md5>` 目录，攒下大量
+    // 空壳（实测 907 个里 870 个是空的）。这里回收闲置超过 24 小时的空目录；
+    // 有 cookie/state 的目录是用户登录态，一律保留。
+    let removed_state_dirs = book_service
+        .clean_empty_source_state_dirs(std::time::Duration::from_secs(24 * 60 * 60))
+        .await;
+    if removed_state_dirs > 0 {
+        tracing::info!(removed_state_dirs, "cleaned empty source-state dirs");
+    }
     let book_source_service = Arc::new(BookSourceService::new(repo, &cfg.storage_dir));
     let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
     let local_epub_book_service = Arc::new(LocalEpubBookService::new(&cfg.storage_dir));

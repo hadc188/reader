@@ -3,7 +3,6 @@
     class="read-settings"
     :class="{ 'is-dark': isDarkSettings }"
     :style="{
-      background: theme.popup,
       color: theme.fontColor,
       '--settings-popup': theme.popup,
       '--settings-font': theme.fontColor,
@@ -2264,8 +2263,20 @@ onMounted(async () => {
   margin: 0 -2px 18px;
   padding: 3px;
   border-radius: 12px;
-  background: var(--settings-field-bg);
-  /* sticky 时需要盖住滚上来的内容，给一层与面板同色的底 */
+  /* sticky 时要盖住滚上来的内容。
+   *
+   * issue #31 的成因：这块遮罩与面板**不是同一块底**。
+   *  - 页签条自身只有 `--settings-field-bg`（5% 前景色），等于没底，滚动时
+   *    下面那行设置项会直接透上来，和页签文字叠成一团；
+   *  - 只靠外扩 `box-shadow` 又会被祖先的 `overflow-y:auto` 裁掉一部分，
+   *    且半透明面板下阴影与底色叠加会更深，形成一条更实的色带。
+   *
+   * 修法：两层背景叠起来 —— 底层是**面板自身底色**（遮住滚上来的内容、且与
+   * 面板同色所以不改变明度），顶层才是 5% 的凹槽色（保留原来的内凹观感）。
+   * 外扩的 6px 用同一个面板底色补齐页签四周，避免边缘漏出内容。 */
+  background:
+    linear-gradient(var(--settings-field-bg), var(--settings-field-bg)),
+    var(--settings-popup, #fff);
   box-shadow: 0 0 0 6px var(--settings-popup, transparent);
 }
 

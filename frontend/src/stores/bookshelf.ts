@@ -22,6 +22,7 @@ import {
   toAvailableBookSort,
 } from '../utils/bookshelfSort'
 import { clearRecentReadBooks, getRecentReadBookKey, loadRecentReadBooks, removeRecentReadBook } from '../utils/recentBooks'
+import { getSearchSessionCache } from '../utils/searchSessionCache'
 
 /** 书架排序方式的存储键。与 Legado 的 `bookshelfSort` 偏好同名同义。 */
 const BOOK_SORT_KEY = 'bookshelf-sort'
@@ -305,6 +306,11 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     searchKey.value = nextKey
   }
 
+  /** 结束这次搜索（返回书架 / 顶栏清空搜索）。
+   *
+   *  同时清掉搜索结果缓存：离开搜索页就代表这轮搜索结束，下次再搜同一个词
+   *  应当拿最新结果，而不是先看到一份过期列表。
+   *  注意「进阅读页」不走这里 —— 那是临时离开，缓存要留着。 */
   function clearSearch() {
     searchResults.value = []
     searchKey.value = ''
@@ -312,6 +318,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     searchScope.value = 'all'
     searchGroup.value = ''
     searchSourceUrl.value = ''
+    getSearchSessionCache().clear()
   }
 
   const isSearchMode = computed(() => searchKey.value.length > 0)

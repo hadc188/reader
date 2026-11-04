@@ -21,6 +21,8 @@ export function searchBookMultiSSE(params: {
   bookSourceUrl?: string
   concurrentCount?: number
   searchSize?: number
+  /** 从哪个书源下标接着搜（省略 / -1 = 第一页）。用于「上次没搜完」的续搜。 */
+  lastIndex?: number
 }) {
   const taskId = newSseTaskId('search')
   return openSse(
@@ -32,6 +34,7 @@ export function searchBookMultiSSE(params: {
       ...(params.bookSourceUrl ? { bookSourceUrl: params.bookSourceUrl } : {}),
       ...(params.concurrentCount ? { concurrentCount: params.concurrentCount } : {}),
       ...(params.searchSize ? { searchSize: params.searchSize } : {}),
+      ...(typeof params.lastIndex === 'number' ? { lastIndex: params.lastIndex } : {}),
     },
     { cancel: { command: 'cancel_book_search', taskId } },
   )

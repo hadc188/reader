@@ -396,6 +396,8 @@ import {
 const sourceCandidateCache = getSourceCandidateCache()
 /** 当前列表是否有缓存垫底（决定标题旁边显示「缓存结果」还是「未搜索」）。 */
 const sourcesCachedAt = ref(0)
+/** 这份缓存的年龄是否已超过保质期（仅用于提示，不阻止显示）。 */
+const sourcesCacheExpired = ref(false)
 const sourcesHaveCache = computed(() => sourcesCachedAt.value > 0)
 
 const props = defineProps<{
@@ -543,6 +545,10 @@ const sourcesCacheHint = computed(() => {
   if (!sourcesHaveCache.value) return '还没有搜索过其他书源，点右侧按钮开始搜索'
   const minutes = Math.max(0, Math.floor((Date.now() - sourcesCachedAt.value) / 60000))
   const when = minutes < 1 ? '刚刚' : `${minutes} 分钟前`
+  // 过期只提示、不自动重搜：issue #28 第 2 点明确要求打开详情别自动刷新。
+  if (sourcesCacheExpired.value) {
+    return `结果记于 ${when}，可能已过时，点右侧按钮获取最新`
+  }
   return `结果记于 ${when}，点右侧按钮获取最新`
 })
 
@@ -622,6 +628,7 @@ function resetDetailState() {
   sourcesStopped.value = false
   sourcesIncomplete.value = false
   sourcesCachedAt.value = 0
+  sourcesCacheExpired.value = false
   catalogTarget.value = ''
   chapterError.value = ''
   loadedCatalogIdentity.value = ''
@@ -701,11 +708,16 @@ function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) 
   const signature = sourceCatalogSignature()
   // 书源增删/停启用后，旧结果里可能有已删除源的条目，不可信 → 自动重搜。
   const catalogChanged = !!cached && !sourceCandidateCache.matches(cached, signature)
+  // 过期但**仍然可用**：按设计「超时后仍可读，由调用方决定怎么提示」。
+  // 直接丢掉会让用户以为之前搜到的源没了，所以照样摆出来，只是角标按过期时间
+  // 显示（`sourcesCacheHint`），由用户自己决定要不要点刷新。
+  const cacheExpired = !!cached && sourceCandidateCache.isStale(cached)
 
   if (!refresh && !catalogChanged) {
     if (cached) {
       if (!isCurrentDetail(loadId, bookKey)) return
       sourcesCachedAt.value = cached.savedAt
+      sourcesCacheExpired.value = cacheExpired
       // 旧缓存里的候选可能包含已禁用/已删除的源；`setSourceCandidates` 会按
       // 当前 `sourceCatalog` 过滤，所以这里直接并进去即可。
       setSourceCandidates([...initialCandidates, ...cached.books])
@@ -716,6 +728,7 @@ function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) 
     // 没有缓存: 只摆出本书自己的源, 不发请求 —— 这正是 issue #28 第 2 点要的
     // 「点进详情别自动刷新」。用户要别的源就点标题右边的刷新按钮。
     sourcesCachedAt.value = 0
+    sourcesCacheExpired.value = false
     setSourceCandidates(initialCandidates)
     sourcesLoading.value = false
     return
@@ -942,6 +955,8 @@ function stopSourceCandidates() {
       sourceCandidateCache.get(bookKey)?.books || [],
     )
     sourcesCachedAt.value = sourceCandidateCache.get(bookKey)?.savedAt || Date.now()
+    // 刚落库的结果一定是最新的，把可能残留的过期标记清掉。
+    sourcesCacheExpired.value = false
   }
   // 搜索可能一个结果都还没回来，界面上原本只有一行转圈；给一个明确回执，
   // 否则用户分不清是"停了"还是"卡住没动"。

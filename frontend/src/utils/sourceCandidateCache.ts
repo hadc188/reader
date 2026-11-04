@@ -58,7 +58,7 @@ export interface SourceCandidateCache {
   get(bookKey: string): SourceCandidateCacheEntry | undefined
   /** 写入某本书的缓存；同一本书只保留一条（旧的签名直接被顶掉）。 */
   set(bookKey: string, catalogSignature: string, books: SearchBook[], complete?: boolean): void
-  /** 丢弃全部缓存（书源增删停启时调用）。 */
+  /** 丢弃全部缓存。 */
   clear(): void
   /** 判断一条缓存是否与当前书源清单相符。 */
   matches(entry: SourceCandidateCacheEntry, catalogSignature: string): boolean

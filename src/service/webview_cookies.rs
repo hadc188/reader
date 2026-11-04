@@ -66,6 +66,52 @@ pub fn read_all(window: &tauri::WebviewWindow) -> anyhow::Result<Vec<CookieRecor
         .collect())
 }
 
+/// 把书源 jar 里现有的 Cookie **注入窗口**（反向同步）。
+///
+/// 对应 legado 的 `AppCookieManager.applyToWebView(url)`（`WebViewActivity`
+/// 建窗口时调用）。作用有两个：
+///
+/// 1. 用户第二次点「打开浏览器完成验证」时，窗口直接带上上次的 `cf_clearance`，
+///    不用再过一遍人机验证；
+/// 2. 站点按 Cookie 决定「已登录」的界面（会员中心、书架）能正确显示。
+///
+/// 注入前必须先设好窗口 UA —— Cloudflare 绑定 UA，用错 UA 的 token 带过去
+/// 只会让站点认定会话异常。
+pub fn write_into_window(
+    window: &tauri::WebviewWindow,
+    cookies: &[CookieRecord],
+) -> anyhow::Result<usize> {
+    let mut written = 0;
+    for record in cookies {
+        if record.name.is_empty() || record.name.chars().any(char::is_control) {
+            continue;
+        }
+        if record.value.chars().any(char::is_control) {
+            continue;
+        }
+        let mut builder = tauri::webview::Cookie::build((record.name.clone(), record.value.clone()))
+            .path(if record.path.starts_with('/') { record.path.clone() } else { "/".to_string() });
+        // 与 `SourceCookieJar::snapshot` 的约定一致：**带前导点才是域级**。
+        // 不带点的（`www.example.com`）是 host-only，不能设 `domain`，
+        // 否则会升级成整域、把会话泄漏给其它子域。
+        if let Some(suffix) = record.domain.trim().strip_prefix('.') {
+            if !suffix.is_empty() {
+                builder = builder.domain(suffix.to_string());
+            }
+        }
+        if record.secure {
+            builder = builder.secure(true);
+        }
+        if record.http_only {
+            builder = builder.http_only(true);
+        }
+        if window.set_cookie(builder.build()).is_ok() {
+            written += 1;
+        }
+    }
+    Ok(written)
+}
+
 /// 读出窗口**当前页面 origin 下**的 localStorage（`key=value` 对）。
 ///
 /// 为什么需要它：一类书源的「段评 / 本章说」页面是 SPA，鉴权要两样东西 ——

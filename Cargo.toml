@@ -32,6 +32,12 @@ ecb = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 encoding_rs = "0.8"
 cookie_store = "0.22"
+# `cookie_store::CookieStore::parse` 从 `Cookie` 头字符串解析时**不认 `Domain`
+# 属性**（实测 `a=b; Domain=.example.com; Path=/` 会把整段当成值的一部分），
+# 于是 cookie 被钉成 host-only，只在写入时那个 host 上生效。要按真实作用域写入
+# 必须自己构造 `cookie::Cookie` 再走 `insert_raw`。版本与 `cookie_store 0.22`
+# 依赖的 `cookie 0.18` 对齐。
+cookie = "0.18"
 flate2 = "1"
 md-5 = "0.10"
 sha1 = "0.10"

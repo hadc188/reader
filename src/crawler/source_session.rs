@@ -33,8 +33,102 @@ impl SourceCookieJar {
             .map(|(name, value)| format!("{name}={value}")).collect::<Vec<_>>().join("; ")
     }
 
+    /// 当前 jar 里的全部 Cookie（供注入验证窗口，见
+    /// `book_service::source_session_cookies`）。
+    ///
+    /// `iter_any` 不做域名过滤 —— 这里要的就是「这个源自己的全部会话」，
+    /// 每个书源一个独立 jar，不会串台。
+    ///
+    /// **域级 / host-only 必须区分**：`CookieDomain::as_cow()` 对
+    /// `Suffix(".pili45.com")` 与 `HostOnly("www.pili45.com")` 都返回裸域名，
+    /// 直接拿去注入会把 host-only 的会话泄漏给整个域。这里给 `Suffix` 补回
+    /// 前导点（`CookieRecord.domain` 的约定就是「带点=域级、不带点=host-only」，
+    /// 与 `set_source_window_cookies` / `set_detailed` 一致）。
+    pub fn snapshot(&self) -> Vec<crate::service::webview_cookies::CookieRecord> {
+        self.store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_any()
+            .filter_map(|cookie| {
+                let host = match &cookie.domain {
+                    cookie_store::CookieDomain::Suffix(host) => format!(".{host}"),
+                    cookie_store::CookieDomain::HostOnly(host) => host.clone(),
+                    // `NotPresent` / `Empty` 没有可归属的域，注入窗口无从下手。
+                    _ => return None,
+                };
+                Some(crate::service::webview_cookies::CookieRecord {
+                    name: cookie.name().to_string(),
+                    value: cookie.value().to_string(),
+                    domain: host,
+                    path: cookie.path.as_ref().to_string(),
+                    secure: cookie.secure().unwrap_or(false),
+                    http_only: cookie.http_only().unwrap_or(false),
+                })
+            })
+            .collect()
+    }
+
     pub fn set(&self, url: &Url, header: &str) -> anyhow::Result<()> {
         self.update(url, header, false)
+    }
+
+    /// 按**完整作用域**写入一条 cookie（从浏览窗口回收登录态时用）。
+    ///
+    /// 为什么不能复用 [`Self::set`]：那个方法收的是 `Cookie` 头字符串，走
+    /// `CookieStore::parse`，而 `parse` **不解析 `Domain` 属性** ——
+    /// `"a=b; Domain=.example.com; Path=/"` 会把 `Domain=…` 当成值的一部分
+    /// 存进去（实测），cookie 于是被钉成 host-only，只在写入时用的那个 host 上
+    /// 生效。
+    ///
+    /// 这条差异直接表现为「登录窗口里过了 Cloudflare 验证、窗口关掉之后仍然
+    /// 提示未检测到 cf_clearance」：`cf_clearance` 的作用域是 `.pili45.com`，
+    /// 而书源地址是 `https://www.pili45.com` —— host-only 的 `pili45.com`
+    /// cookie **不会**发给 `www.` 子域。
+    ///
+    /// 这里自己构造 `cookie::Cookie` 并调用 `insert_raw`，`Domain` 因此被当作
+    /// 真实作用域处理，与浏览器行为一致。
+    pub fn set_detailed(
+        &self,
+        name: &str,
+        value: &str,
+        domain: &str,
+        path: &str,
+        secure: bool,
+        http_only: bool,
+        request_url: &Url,
+    ) -> anyhow::Result<()> {
+        let mut builder = cookie::Cookie::build((name.to_string(), value.to_string()))
+            .path(path.to_string());
+        // **只有带前导点才算域级 cookie**（RFC 6265：`Domain=.example.com` 表示
+        // 整域，不带点表示 host-only）。
+        //
+        // `cookie` crate 的 `.domain("example.com")` 会被 `cookie_store` 存成
+        // `CookieDomain::Suffix("example.com")` —— 也就是**整域**生效。若不加
+        // 判断地把任何域名都塞进去，host-only 会话（只在 `www.` 上有效的登录态）
+        // 会被静默升级成整域，泄漏给所有子域。
+        //
+        // 不设 `.domain()` 时，`cookie_store` 按请求 URL 的主机名自动判为
+        // `HostOnly`，正是想要的效果。
+        let trimmed = domain.trim();
+        if let Some(suffix) = trimmed.strip_prefix('.') {
+            if !suffix.is_empty() {
+                builder = builder.domain(suffix.to_string());
+            }
+        }
+        if secure {
+            builder = builder.secure(true);
+        }
+        if http_only {
+            builder = builder.http_only(true);
+        }
+        let cookie = builder.build();
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = store.clone();
+        next.insert_raw(&cookie, request_url)
+            .map_err(|e| anyhow::anyhow!("写入 Cookie 失败: {e}"))?;
+        self.persist(&next)?;
+        *store = next;
+        Ok(())
     }
 
     pub fn replace(&self, url: &Url, header: &str) -> anyhow::Result<()> {

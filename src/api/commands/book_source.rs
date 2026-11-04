@@ -288,6 +288,7 @@ pub struct BookSourceLoginParam {
 #[tauri::command]
 pub async fn login_book_source(
     state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     req: BookSourceLoginParam,
     on_browser: tauri::ipc::Channel<crate::service::book_service::ShowBrowserRequest>,
 ) -> Result<ApiResponse<serde_json::Value>, AppError> {
@@ -300,6 +301,25 @@ pub async fn login_book_source(
         .get(&user_ns, &url)
         .await?
         .ok_or_else(|| AppError::NotFound("bookSource not found".to_string()))?;
+
+    // 执行登录脚本**之前**，先把登录窗口里现有的 Cookie 收进书源 jar。
+    //
+    // 用户的真实操作是：点「🌐 打开浏览器完成验证」→ 在独立窗口里过完
+    // Cloudflare 人机验证 → **不关窗口**直接切回来点「🍪 查看Cookie状态」。
+    // 而窗口 Cookie 原本只在 `CloseRequested` 时回收，那一刻 jar 还是空的，
+    // 于是必然报「❌ 未检测到 cf_clearance Cookie」。
+    //
+    // 手机端 legado 没这个问题：`WebViewActivity.onPageFinished` 每次加载完就
+    // `CookieStore.setCookie(...)`。桌面端**不能**照抄那个时机 ——
+    // `WebviewWindow::cookies()` 底层是 `wait_with_pump`（`GetMessageA` /
+    // `DispatchMessageA` 拉取当前线程消息队列），在 `NavigationCompleted`
+    // 回调栈里调用会重入消息泵，直接把窗口卡死（实测「一打开登录窗口就
+    // 未响应」）。
+    //
+    // 放在这里就安全：Tauri command 跑在 async 运行时，不在任何 WebView2
+    // 事件回调的栈上，泵消息是正常的。
+    sync_login_window_cookies(&app, &state.book_service, &source.book_source_url).await;
+
     let handler: crate::service::source_browser::BrowserHandler = Arc::new(move |request| {
         on_browser.send(request).map_err(|err| err.to_string())
     });
@@ -315,6 +335,64 @@ pub async fn login_book_source(
         );
     }
     Ok(ApiResponse::ok(result))
+}
+
+/// 取书源声明的 `User-Agent`（`header` 里的那一项）。
+///
+/// 用于把独立验证窗口的 UA 设成与书源请求一致 —— Cloudflare 的 `cf_clearance`
+/// 按 UA 绑定，两边不一致时 token 失效。取不到就返回 `None`，窗口用默认 UA。
+///
+/// `header` 里的 UA 可能是脚本（`@js:`）算出来的，那种情况这里拿不到静态值，
+/// 直接跳过：设一个错的 UA 比不设更糟。
+async fn source_user_agent(
+    source_service: &Arc<crate::service::book_source_service::BookSourceService>,
+    book_source_url: Option<&str>,
+) -> Option<String> {
+    let url = book_source_url?.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let source = source_service.get("default", url).await.ok().flatten()?;
+    let header = source.header.as_deref()?.trim();
+    // 脚本形态的头拿不到静态值（需要执行上下文），放弃。
+    if header.starts_with("@js:") || header.starts_with("<js>") {
+        return None;
+    }
+    crate::crawler::url_analyzer::parse_source_headers(header)
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+        .map(|(_, value)| value)
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// 把独立登录窗口当前的 Cookie 同步进书源 jar（若窗口存在）。
+///
+/// 只能在**非 WebView2 事件回调**的上下文里调用，见 `login_book_source` 的说明。
+async fn sync_login_window_cookies(
+    app: &tauri::AppHandle,
+    service: &Arc<crate::service::book_service::BookService>,
+    source_url: &str,
+) {
+    use tauri::Manager;
+    // 与 `open_external_window` 用的是同一个窗口标签。
+    let Some(window) = app.get_webview_window("source-link") else {
+        return;
+    };
+    let cookies = match crate::service::webview_cookies::read_all(&window) {
+        Ok(cookies) => cookies,
+        Err(err) => {
+            tracing::debug!(%err, "读取登录窗口 Cookie 失败（窗口可能已关闭）");
+            return;
+        }
+    };
+    if cookies.is_empty() {
+        return;
+    }
+    match service.set_source_window_cookies(source_url, &cookies).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "已把登录窗口 Cookie 同步到书源"),
+        Err(err) => tracing::warn!(%err, "同步登录窗口 Cookie 失败"),
+    }
 }
 
 #[tauri::command]
@@ -458,6 +536,22 @@ pub async fn open_external_window(
             // 加载进度条：文档创建时就挂上，慢站点也不会看起来像卡死。
             .initialization_script(external_window_progress_script());
 
+    // 让验证窗口用**书源自己的 User-Agent**，而不是 WebView2 的默认桌面 UA。
+    //
+    // 这是 Cloudflare 站点「验证能过、搜索仍然 403」的根因：`cf_clearance`
+    // 由 Cloudflare 按 UA（连同 IP、TLS 会话）绑定，验证窗口与后续书源请求
+    // 必须是**同一个 UA**，否则 token 被视为不匹配而失效。
+    //
+    // 书源 8045 把 UA 写成 `Mozilla/5.0 (Linux; Android 13; Pixel 7) … Mobile`，
+    // 而 WebView2 默认是桌面 Chrome —— 用户在窗口里过完验证拿到 cf_clearance，
+    // 书源请求换成移动 UA 后立刻被拦。
+    //
+    // legado 手机端正是这么做的：`WebViewActivity` 里
+    // `headerMap[AppConst.UA_NAME]?.let { userAgentString = it }`。
+    if let Some(ua) = source_user_agent(&state.book_source_service, book_source_url.as_deref()).await {
+        builder = builder.user_agent(&ua);
+    }
+
     // 站点里的二级链接（目录、详情、翻页、下载页）常带 `target="_blank"`。
     // 不接管这个回调时 Tauri 走默认实现，在 Windows 上把它们丢给系统浏览器 ——
     // 表现就是「窗口里点链接没反应，浏览器却弹出一个新标签」。
@@ -493,6 +587,33 @@ pub async fn open_external_window(
     let window = builder
         .build()
         .map_err(|err| AppError::BadRequest(format!("打开窗口失败: {err}")))?;
+
+    // 把书源 jar 里已有的 Cookie 注入窗口 —— 对应 legado `WebViewActivity` 里的
+    // `AppCookieManager.applyToWebView(url)`。
+    //
+    // 用户第二次点「打开浏览器完成验证」时，窗口直接带上上次的 `cf_clearance`，
+    // 不用再过一遍人机验证；站点按 Cookie 判定的已登录界面（会员中心/书架）
+    // 也能正确显示。
+    //
+    // 必须在 UA 设好之后（见上面的 `builder.user_agent`）：Cloudflare 把
+    // token 绑在 UA 上，UA 不对时带过去反而会让站点认定会话异常。
+    //
+    // 注意这里的写入发生在 `build()` 之后、页面开始请求**之前**——
+    // `set_cookie` 是同步的 WebView2 `AddOrUpdateCookie`，不涉及消息泵，
+    // 所以不会像 `cookies()` 那样在导航回调里死锁。
+    if let Some(source_url) = book_source_url.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let existing = state
+            .book_service
+            .source_session_cookies(source_url)
+            .await
+            .unwrap_or_default();
+        if !existing.is_empty() {
+            match crate::service::webview_cookies::write_into_window(&window, &existing) {
+                Ok(count) => tracing::debug!(count, "已把书源 Cookie 注入验证窗口"),
+                Err(err) => tracing::debug!(%err, "向验证窗口注入 Cookie 失败"),
+            }
+        }
+    }
 
     // 关闭时把该窗口里的 Cookie 收进 jar。只在**书源侧**登录时做：
     // 显式传了 `bookSourceUrl` 才写，避免把随便开的网页 Cookie 混进书源会话。

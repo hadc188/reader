@@ -4024,6 +4024,7 @@ dependencies = [
  "cbc",
  "chrono",
  "config",
+ "cookie",
  "cookie_store",
  "des",
  "dotenvy",

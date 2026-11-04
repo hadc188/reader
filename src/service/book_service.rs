@@ -973,6 +973,24 @@ impl BookService {
 /// 拿不到 service；而这份数据的生命周期正好是「窗口关闭 → 面板渲染」，
 /// 进程级表足够，也不需要落盘（值本身来自浏览器，重启后窗口会重新写）。
 
+    /// 读出某个书源 jar 里的**全部** Cookie（供注入验证窗口）。
+    ///
+    /// 与 [`Self::set_source_window_cookies`] 方向相反：那个是「窗口 → jar」，
+    /// 这个是「jar → 窗口」。对应 legado `AppCookieManager.applyToWebView(url)`。
+    ///
+    /// 按书源地址本身取即可：`cookie_store` 的 `iter_any` 不做域名过滤，
+    /// 拿到的就是这个源自己的会话（每个源一个独立 jar，不会串台）。
+    pub async fn source_session_cookies(
+        &self,
+        source_url: &str,
+    ) -> Result<Vec<crate::service::webview_cookies::CookieRecord>, String> {
+        let context = self
+            .http
+            .source_context("default", source_url, None)
+            .map_err(|e| e.to_string())?;
+        Ok(context.session.cookies.snapshot())
+    }
+
     pub async fn set_source_window_cookies(
         &self,
         source_url: &str,
@@ -982,6 +1000,13 @@ impl BookService {
             .http
             .source_context("default", source_url, None)
             .map_err(|e| e.to_string())?;
+        // 写入用的请求地址：作用域由 cookie 自己的 Domain 属性决定，这个 URL
+        // 只用于「host-only cookie 归属哪个 host」，所以取书源地址的 host。
+        let anchor = url::Url::parse(source_url.trim())
+            .or_else(|_| {
+                url::Url::parse(&format!("https://{}", source_url.trim().trim_start_matches('/')))
+            })
+            .map_err(|e| format!("书源地址无效: {e}"))?;
         let mut written = 0;
         for cookie in cookies {
             if cookie.name.is_empty() || cookie.name.chars().any(char::is_control) {
@@ -990,23 +1015,42 @@ impl BookService {
             if cookie.value.chars().any(char::is_control) {
                 continue;
             }
-            // 域必须是能解析的主机名；`Cookie.Domain` 有时带前导点。
-            let host = cookie.domain.trim().trim_start_matches('.');
-            if host.is_empty() || !host.contains('.') {
+            // `Cookie.Domain` 有时带前导点（`.pili45.com`），那正是站点声明的作用域；
+            // 原样交给 `set_detailed`，不能再像早先那样 `trim_start_matches('.')`
+            // 后靠写入 URL 猜作用域 —— 那会把 `cf_clearance` 钉成 host-only。
+            let domain = cookie.domain.trim().to_string();
+            // 没有 Domain 属性的 host-only cookie：没有 host 就无从归属，跳过。
+            if domain.is_empty() && cookie.path.is_empty() {
                 continue;
             }
-            let scheme = if cookie.secure { "https" } else { "http" };
             let path = if cookie.path.starts_with('/') { cookie.path.clone() } else { "/".to_string() };
-            let Ok(url) = url::Url::parse(&format!("{scheme}://{host}{path}")) else {
-                continue;
-            };
             // 空值代表站点删除了该 Cookie（退出登录）：从 jar 移除同名项，
             // 而不是写一个空值进去。
             if cookie.value.trim().is_empty() {
+                let Ok(url) = url::Url::parse(&format!(
+                    "https://{}{}",
+                    domain.trim_start_matches('.').trim_start_matches('.'),
+                    path
+                )) else {
+                    continue;
+                };
                 let _ = context.session.cookies.remove(&url, &cookie.name);
                 continue;
             }
-            if context.session.cookies.set(&url, &cookie.pair()).is_ok() {
+            if context
+                .session
+                .cookies
+                .set_detailed(
+                    &cookie.name,
+                    &cookie.value,
+                    &domain,
+                    &path,
+                    cookie.secure,
+                    cookie.http_only,
+                    &anchor,
+                )
+                .is_ok()
+            {
                 written += 1;
             }
         }

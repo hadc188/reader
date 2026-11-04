@@ -206,6 +206,73 @@ fn deserialize_login_ui<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Re
     }
 }
 
+/// 把「本该是字符串、却写成了 JSON 对象/数组」的字段还原成字符串。
+///
+/// ## 为什么需要
+///
+/// legado 用 **Gson** 反序列化书源。Gson 的 `TypeAdapters.STRING` 对非字符串
+/// 输入走 `nextString()`：对象被序列化成紧凑 JSON、数组取第一个元素，**从不
+/// 报类型错误**。所以手机端对这类「格式不严谨」的源照单全收。
+///
+/// serde 是严格类型检查，同一个源会直接失败：
+///
+/// ```text
+/// bad request: invalid type: map, expected a string
+/// ```
+///
+/// 用户看到的就是「这个源无法导入」，而同一份 JSON 在手机上正常
+/// （yckceo 8048 / twkan.cc 的 `header` 就写成了对象）。
+///
+/// ## 处理范围
+///
+/// 只覆盖 `BookSource` 里声明为 `Option<String>` 的字段。对象/数组原样
+/// `to_string()` 回字符串 —— 与 Gson 的 `nextString()` 一致，下游解析
+/// （`parse_source_headers` 按 JSON 解析 `header`、规则引擎按规则串求值）
+/// 拿到的仍是它原本期望的形态。
+///
+/// 规则对象（`ruleSearch` / `ruleToc` …）的子字段不在这里处理：它们经
+/// `deserialize_rule_option` 走 `Value` 中转，塞对象同样会失败，但真实书源里
+/// 从未出现过（836 个样本零命中），贸然放宽反而会把写错的规则悄悄变成
+/// 「合法但无用」的字符串。
+fn normalize_string_fields(obj: &mut serde_json::Map<String, Value>) {
+    const STRING_FIELDS: &[&str] = &[
+        "bookSourceName",
+        "bookSourceGroup",
+        "bookSourceUrl",
+        "bookSourceComment",
+        "bookUrlPattern",
+        "jsLib",
+        "concurrentRate",
+        "header",
+        "loginUrl",
+        "loginUi",
+        "loginCheckJs",
+        "coverDecodeJs",
+        "exploreUrl",
+        "exploreScreen",
+        "searchUrl",
+        "variableComment",
+        "ruleSearchUrl",
+        "ruleFindUrl",
+        "httpUserAgent",
+    ];
+    for field in STRING_FIELDS {
+        let Some(value) = obj.get(*field) else { continue };
+        let normalized = match value {
+            // 与 legado `StringJsonDeserializer` 一致：非标量一律 `toString()`
+            // （紧凑 JSON）。
+            Value::Object(_) | Value::Array(_) => Some(Value::String(value.to_string())),
+            // 标量：`isJsonPrimitive → asString`（`true` → `"true"`、`3` → `"3"`）。
+            Value::Bool(flag) => Some(Value::String(flag.to_string())),
+            Value::Number(number) => Some(Value::String(number.to_string())),
+            _ => None,
+        };
+        if let Some(value) = normalized {
+            obj.insert((*field).to_string(), value);
+        }
+    }
+}
+
 pub fn book_source_from_value(value: Value) -> serde_json::Result<BookSource> {
     serde_json::from_value(migrate_legacy_book_source_value(value))
 }
@@ -251,6 +318,8 @@ pub fn migrate_legacy_book_source_value(mut value: Value) -> Value {
             }
         }
     }
+    // 字符串字段被写成 JSON 对象/数组时按 Gson 语义还原成字符串。
+    normalize_string_fields(obj);
 
     migrate_rule_object(
         obj,
@@ -358,7 +427,41 @@ fn migrate_rule_object(obj: &mut Map<String, Value>, target: &str, fields: &[(&s
         }
     }
     if !target_obj.is_empty() {
+        // 规则子字段在书源格式里一律是**字符串**，但站点上下的源常把布尔/数字
+        // 直接写进去（`"canReName": true`）。legado 用 Gson，`nextString()` 对
+        // 标量照单全收（`true` → `"true"`、`3` → `"3"`），serde 则报
+        // `invalid type: boolean `true', expected a string`。
+        // 这里按 Gson 语义把标量转成字符串。
+        normalize_rule_scalars(&mut target_obj);
         obj.insert(target.to_string(), Value::Object(target_obj));
+    }
+}
+
+/// 把规则对象里「写成布尔/数字/对象/数组」的字段转成字符串。
+///
+/// 语义完全照搬 legado 的 `StringJsonDeserializer`（`GsonExtensions.kt`）：
+///
+/// ```kotlin
+/// json.isJsonPrimitive -> json.asString   // true → "true"、3 → "3"
+/// json.isJsonNull      -> null
+/// else                 -> json.toString() // 对象/数组 → 紧凑 JSON
+/// ```
+///
+/// 这个自定义反序列化器对 `INITIAL_GSON` 里的**所有** `String` 字段生效，
+/// 所以手机上任何字段写成什么类型都能导入；serde 严格类型检查则会直接
+/// 报 `invalid type: boolean `true', expected a string`（yckceo 8050 的
+/// `ruleBookInfo.canReName: true` 就是这样）。
+fn normalize_rule_scalars(fields: &mut Map<String, Value>) {
+    for (_, value) in fields.iter_mut() {
+        let converted = match &*value {
+            Value::Bool(flag) => Some(Value::String(flag.to_string())),
+            Value::Number(number) => Some(Value::String(number.to_string())),
+            Value::Object(_) | Value::Array(_) => Some(Value::String(value.to_string())),
+            _ => None,
+        };
+        if let Some(replacement) = converted {
+            *value = replacement;
+        }
     }
 }
 

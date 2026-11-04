@@ -28,6 +28,42 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// 「配置错误」标记：算法名 / 模式 / 密钥长度这类**写错了就永远算不出来**的
+/// 问题，在真正处理数据之前就能判定。
+///
+/// 与之相对的是**数据错误**（解密填充不对、GCM 标签不匹配、base64 非法）——
+/// 书源经常故意试解密，失败后落回 `||` 分支（`decrypt(x) || result`），
+/// 因此那类错误必须继续返回空串，绝不能抛异常打断整条规则。
+///
+/// `__sym` 据此区分：配置错误抛给脚本（对应 legado 构造
+/// `SymmetricCrypto` 时的 `NoSuchAlgorithmException` / `InvalidKeyException`），
+/// 数据错误记日志后返回空串。
+#[derive(Debug)]
+pub(crate) struct CryptConfigError(pub String);
+
+impl std::fmt::Display for CryptConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CryptConfigError {}
+
+/// 构造一个配置错误（`anyhow::bail!` 的等价物，带类型标记）。
+///
+/// 定义在文件前部：`macro_rules!` 按**文本顺序**解析，`__sym` 处的使用点
+/// 必须先看到它。
+macro_rules! bail_config {
+    ($($arg:tt)*) => {
+        return Err(anyhow::Error::new(CryptConfigError(format!($($arg)*))))
+    };
+}
+
+/// 把 `anyhow::Error` 拆出配置错误的消息；`None` 表示是数据错误。
+fn crypt_config_message(err: &anyhow::Error) -> Option<String> {
+    err.downcast_ref::<CryptConfigError>().map(|e| e.0.clone())
+}
+
 /// 进程内存 KV: `cache.putMemory` / `java.putCache` / `kv_put` 等, 重启即失。
 static JS_KV: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static JS_KV_ORDER: Lazy<Mutex<VecDeque<String>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
@@ -1100,7 +1136,11 @@ const JS_PRELUDE: &str = r#"(function (g) {
       // 置 8 让宿主把明文按 latin1 逐字节交回, 避免 UTF-8 转换毁掉图片数据。
       // `decryptStr` 在 legado 里明确返回 String, 因此不走这条分支。
       if (rawOut && op === 'dec' && g.__byteMode === true) flags |= 8;
-      return g.__sym(op, t, k, iv, payload, isBytes ? 'raw' : fmt, flags);
+      // 打成 JSON 传：宿主侧 `Func::new` 的元组上限是 7 个参数，而这里需要
+      // 7 个业务参数 **加** ctx（抛异常必需）。字段名保持短，减少序列化开销。
+      return g.__sym(JSON.stringify({
+        op: op, t: t, k: k, iv: iv, d: payload, fmt: isBytes ? 'raw' : fmt, flags: flags
+      }));
     };
     return {
       encrypt: function (d) { return run('enc', d, 'base64', false); },
@@ -1114,7 +1154,9 @@ const JS_PRELUDE: &str = r#"(function (g) {
   J.createSymmetricCrypto = symmetric;
   J.aesEncodeToBase64String = function (d, k, t, iv) { return symmetric(t, k, iv).encryptBase64(d); };
   J.aesEncodeToString = function (d, k, t, iv) { return symmetric(t, k, iv).encryptHex(d); };
-  J.aesBase64DecodeToString = function (d, k, t, iv) { return g.__sym('dec', S(t), S(k), S(iv), S(d), 'base64'); };
+  J.aesBase64DecodeToString = function (d, k, t, iv) {
+    return g.__sym(JSON.stringify({ op: 'dec', t: S(t), k: S(k), iv: S(iv), d: S(d), fmt: 'base64', flags: 0 }));
+  };
   J.aesDecodeToString = function (d, k, t, iv) { return symmetric(t, k, iv).decryptStr(d); };
   J.desEncodeToBase64String = J.aesEncodeToBase64String;
   J.desEncodeToString = J.aesEncodeToString;
@@ -2906,29 +2948,54 @@ fn eval_js_inner_with_source(
             Func::new(move |specs: String, headers: String| -> String {
                 js_connect_all(&specs, &headers, &default_headers)
             }),
-        )?;
-        globals.set(
+        )?;        globals.set(
             "__sym",
-            Func::new(
-                |op: String,
-                 transformation: String,
-                 key: String,
-                 iv: String,
-                 data: String,
-                 format: String,
-                 flags: Opt<i64>|
-                 -> String {
-                    // 位标记见 JS 侧 `symmetric()`: 1=key、2=iv、4=载荷是字节序列。
-                    let flags = flags.0.unwrap_or(0);
-                    match symmetric_codec_with_flags(&op, &transformation, &key, &iv, &data, &format, flags) {
-                        Ok(value) => value,
-                        Err(e) => {
-                            push_js_log(format!("[crypto] {transformation}: {e}"));
-                            String::new()
-                        }
+            // 参数打成 JSON 传：`Func::new` 的元组上限是 7 个参数，而这里            // 需要 7 个业务参数 **加** `ctx`（抛异常必需），超上限后
+            // `IntoJsFunc` 不成立。打包后签名只剩 `(ctx, json)`。
+            Func::new(|ctx: rquickjs::Ctx<'_>, args: String| -> rquickjs::Result<String> {
+                let parsed: JsonValue = match serde_json::from_str(&args) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        return Err(rquickjs::Exception::throw_message(
+                            &ctx,
+                            &format!("__sym 参数解析失败: {err}"),
+                        ))
                     }
-                },
-            ),
+                };
+                let field = |name: &str| -> String {
+                    parsed
+                        .get(name)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let op = field("op");
+                let transformation = field("t");
+                let key = field("k");
+                let iv = field("iv");
+                let data = field("d");
+                let format = field("fmt");
+                // 位标记见 JS 侧 `symmetric()`: 1=key、2=iv、4=载荷是字节序列。
+                let flags = parsed.get("flags").and_then(|v| v.as_i64()).unwrap_or(0);
+                match symmetric_codec_with_flags(&op, &transformation, &key, &iv, &data, &format, flags) {
+                    Ok(value) => Ok(value),
+                    Err(e) => match crypt_config_message(&e) {
+                        // 算法名/模式/密钥长度写错：对应 legado 构造
+                        // `SymmetricCrypto` 时抛的 `NoSuchAlgorithmException` /
+                        // `InvalidKeyException`。抛给脚本，调试面板能直接指认。
+                        Some(message) => {
+                            push_js_log(format!("[crypto] {transformation}: {message}"));
+                            Err(rquickjs::Exception::throw_message(&ctx, &message))
+                        }
+                        // 数据错误（填充/标签/base64）：书源常故意试错再走 `||`
+                        // 兜底，必须继续返回空串，不能打断整条规则。
+                        None => {
+                            push_js_log(format!("[crypto] {transformation}: {e}"));
+                            Ok(String::new())
+                        }
+                    },
+                }
+            }),
         )?;
         globals.set(
             "__log",
@@ -3281,14 +3348,16 @@ fn eval_js_inner_with_source(
         )?;
         java_obj.set(
             "digestHex",
-            Func::new(|input: String, algorithm: String| -> String {
+            Func::new(|ctx: rquickjs::Ctx<'_>, input: String, algorithm: String| -> rquickjs::Result<String> {
                 java_digest_hex(&input, &algorithm)
+                    .map_err(|err| rquickjs::Exception::throw_message(&ctx, &err.to_string()))
             }),
         )?;
         java_obj.set(
             "digestBase64Str",
-            Func::new(|input: String, algorithm: String| -> String {
+            Func::new(|ctx: rquickjs::Ctx<'_>, input: String, algorithm: String| -> rquickjs::Result<String> {
                 java_digest_base64(&input, &algorithm)
+                    .map_err(|err| rquickjs::Exception::throw_message(&ctx, &err.to_string()))
             }),
         )?;
         java_obj.set(
@@ -3756,7 +3825,7 @@ fn aes_gcm_crypt(encrypt: bool, key: &[u8], iv: &[u8], data: &[u8]) -> anyhow::R
         16 => run!(aes::Aes128),
         24 => run!(aes::Aes192),
         32 => run!(aes::Aes256),
-        n => anyhow::bail!("AES 密钥长度无效: {n}"),
+        n => bail_config!("AES 密钥长度无效: {n}"),
     }
 }
 
@@ -3791,16 +3860,15 @@ pub(super) fn symmetric_crypt(
     // GCM 是 AEAD：不能走 `block_crypt!` 那套分组模式（无填充、需要认证标签），
     // 单独分派。书源里 `AES/GCM/NoPadding` 用来解密接口响应与生成签名。
     if parts.clone().next().map(|p| p.eq_ignore_ascii_case("GCM")).unwrap_or(false) {
-        anyhow::ensure!(
-            algorithm.eq_ignore_ascii_case("AES"),
-            "GCM 目前只支持 AES，收到 {algorithm}"
-        );
+        if !algorithm.eq_ignore_ascii_case("AES") {
+            bail_config!("GCM 目前只支持 AES，收到 {algorithm}");
+        }
         return aes_gcm_crypt(encrypt, key, iv, data);
     }
     let mode = match parts.next().as_deref() {
         Some("CBC") => CipherMode::Cbc,
         Some("ECB") | Some("") | None => CipherMode::Ecb,
-        Some(other) => anyhow::bail!("不支持的模式 {other}"),
+        Some(other) => bail_config!("不支持的模式 {other}"),
     };
     let padding = match parts.next().as_deref() {
         Some("NOPADDING") => CipherPadding::None,
@@ -3812,7 +3880,7 @@ pub(super) fn symmetric_crypt(
             16 => block_crypt!(aes::Aes128, encrypt, mode, padding, key, iv, data),
             24 => block_crypt!(aes::Aes192, encrypt, mode, padding, key, iv, data),
             32 => block_crypt!(aes::Aes256, encrypt, mode, padding, key, iv, data),
-            n => anyhow::bail!("AES 密钥长度无效: {n}"),
+            n => bail_config!("AES 密钥长度无效: {n}"),
         },
         "DES" => block_crypt!(des::Des, encrypt, mode, padding, &key[..key.len().min(8)], iv, data),
         "DESEDE" | "TRIPLEDES" | "3DES" => {
@@ -3824,7 +3892,7 @@ pub(super) fn symmetric_crypt(
             key24.truncate(24);
             block_crypt!(des::TdesEde3, encrypt, mode, padding, &key24, iv, data)
         }
-        other => anyhow::bail!("不支持的算法 {other}"),
+        other => bail_config!("不支持的算法 {other}"),
     }
 }
 
@@ -4616,7 +4684,7 @@ fn bytes_to_json_array(bytes: &[u8]) -> String {
     out
 }
 
-fn java_digest_hex(input: &str, algorithm: &str) -> String {
+fn java_digest_hex(input: &str, algorithm: &str) -> anyhow::Result<String> {
     let bytes = input.as_bytes();
     let out = match normalize_digest_name(algorithm).as_str() {
         "MD5" => hex::encode(Md5::digest(bytes)),
@@ -4625,13 +4693,13 @@ fn java_digest_hex(input: &str, algorithm: &str) -> String {
         "SHA-256" => hex::encode(Sha256::digest(bytes)),
         "SHA-384" => hex::encode(Sha384::digest(bytes)),
         "SHA-512" => hex::encode(Sha512::digest(bytes)),
-        _ => return String::new(),
+        _ => anyhow::bail!("不支持摘要算法 {algorithm}"),
     };
-    out
+    Ok(out)
 }
 
 /// legado `java.digestBase64Str(data, algorithm)`: 同上但 base64 输出
-fn java_digest_base64(input: &str, algorithm: &str) -> String {
+fn java_digest_base64(input: &str, algorithm: &str) -> anyhow::Result<String> {
     let bytes = input.as_bytes();
     let out = match normalize_digest_name(algorithm).as_str() {
         "MD5" => base64::engine::general_purpose::STANDARD.encode(Md5::digest(bytes)),
@@ -4640,9 +4708,9 @@ fn java_digest_base64(input: &str, algorithm: &str) -> String {
         "SHA-256" => base64::engine::general_purpose::STANDARD.encode(Sha256::digest(bytes)),
         "SHA-384" => base64::engine::general_purpose::STANDARD.encode(Sha384::digest(bytes)),
         "SHA-512" => base64::engine::general_purpose::STANDARD.encode(Sha512::digest(bytes)),
-        _ => return String::new(),
+        _ => anyhow::bail!("不支持摘要算法 {algorithm}"),
     };
-    out
+    Ok(out)
 }
 
 /// legado `java.HMacHex(data, algorithm, key)`: HMAC 摘要(hex)
@@ -4652,7 +4720,7 @@ fn java_digest_base64(input: &str, algorithm: &str) -> String {
 /// 直接走 `java_hmac_hex`（`&str`）会先把字节转文本再取 UTF-8 字节，非 UTF-8
 /// 的二进制签名数据会被改写。
 ///
-/// 算法名归一化与 `java.HMacHex` / `HMacBase64` 共用 [`normalize_hmac_name`]：
+/// 算法名归一化与 `java.HMacHex` / `HMacBase64` 共用 [`normalize_digest_name`]：
 /// 两条 HMAC 路径曾经分叉 —— 这条剥了 `HMAC` 前缀、那条没剥，于是
 /// `Packages.javax.crypto.Mac("HmacSHA1")` 正常而 `java.HMacHex("HmacSHA1")`
 /// 静默返回空串（issue #29）。改这里时**不要**再自己解析算法名。
@@ -4669,7 +4737,7 @@ pub(crate) fn java_hmac_hex_bytes(key: &[u8], algorithm: &str, data: &[u8]) -> a
             Ok(hex::encode(mac.finalize().into_bytes()))
         }};
     }
-    match normalize_hmac_name(algorithm).as_str() {
+    match normalize_digest_name(algorithm).as_str() {
         "MD5" => hmac_bytes!(Md5),
         "SHA-1" => hmac_bytes!(Sha1),
         "SHA-224" => hmac_bytes!(Sha224),
@@ -4697,7 +4765,7 @@ fn java_hmac_base64(input: &str, algorithm: &str, key: &str) -> anyhow::Result<S
 /// `Invalid Signature` —— 排查成本极高（issue #29）。
 fn java_hmac(input: &str, algorithm: &str, key: &str, hex_out: bool) -> anyhow::Result<String> {
     let key_bytes = key.as_bytes();
-    let name = normalize_hmac_name(algorithm);
+    let name = normalize_digest_name(algorithm);
     let encoded: Option<String> = match name.as_str() {
         "MD5" => hmac_md5(input, key_bytes, hex_out),
         "SHA-1" => hmac_sha1(input, key_bytes, hex_out),
@@ -4733,47 +4801,29 @@ hmac_impl!(hmac_sha256, Sha256);
 hmac_impl!(hmac_sha384, Sha384);
 hmac_impl!(hmac_sha512, Sha512);
 
-/// 归一化摘要算法名, 兼容各种大小写/连字符写法
+/// 归一化**摘要**算法名，返回 `MD5` / `SHA-1` / … 这样的基准名。
+///
+/// 兼容三种写法（书源里都出现过）：
+/// - 规范名 `SHA-1` / `MD5`；
+/// - 无连字符 `SHA1` / `SHA256`（Java 的 `MessageDigest.getInstance` 也认）；
+/// - JCA 的 HMAC 前缀写法 `HmacSHA1` / `HmacSHA256` —— 书源常把
+///   `HMacHex` 的算法名直接抄到 `digestHex` 上。legado 的
+///   `DigestUtil.digester("HmacSHA1")` 会抛 `NoSuchAlgorithmException`，
+///   但把 `HmacSHA1` 认成 `SHA-1` 并不会算错（HMAC 的底层摘要就是它），
+///   因此这里接受它 —— 比让整条规则失败更有用。
+///
+/// 认不出的名字原样返回（大写、去连字符），由调用方的 match 落到错误分支。
 fn normalize_digest_name(algorithm: &str) -> String {
-    let a = algorithm.trim().to_uppercase();
-    match a.as_str() {
-        "MD5" => "MD5".to_string(),
-        "SHA" | "SHA1" | "SHA-1" => "SHA-1".to_string(),
-        "SHA224" | "SHA-224" => "SHA-224".to_string(),
-        "SHA256" | "SHA-256" => "SHA-256".to_string(),
-        "SHA384" | "SHA-384" => "SHA-384".to_string(),
-        "SHA512" | "SHA-512" => "SHA-512".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// 归一化 **HMAC** 算法名，返回与 [`normalize_digest_name`] 相同的基准名。
-///
-/// `java.HMacHex` / `java.HMacBase64` 在 legado 里是
-/// `javax.crypto.Mac.getInstance(algorithm)`，规范名是 **JCA 写法**
-/// （`HmacSHA1` / `HmacSHA256` / `HmacMD5` …）；而书源里也常混着写成摘要名
-/// （`SHA-1` / `SHA256`）。两边都要认。
-///
-/// 早先只有 `java_hmac_hex_bytes`（`Packages.javax.crypto.Mac` 那条路）剥了
-/// `HMAC` 前缀，`java.HMacHex` / `HMacBase64` 走的 `java_hmac` 没剥，
-/// 于是 `"HmacSHA1"` 归一化成 `"HMACSHA1"` → 匹配不到 → `unwrap_or_default()`
-/// → **静默返回空串**。书源的 HMAC 签名头因此是空的，服务端只回
-/// `Invalid Signature`（issue #29）。
-///
-/// 统一到这一处，两条 HMAC 路径共用，避免再次分叉。
-fn normalize_hmac_name(algorithm: &str) -> String {
-    let upper = algorithm.trim().to_ascii_uppercase();
-    // JCA 允许 `HmacSHA1` 与 `HmacSHA-1` 两种写法，连字符先去掉再比对。
-    let compact = upper.replace('-', "");
-    let bare = compact.strip_prefix("HMAC").unwrap_or(&compact).to_string();
-    match bare.as_str() {
+    // `HmacSHA-256` 与 `HmacSHA256` 都要认：先统一去掉连字符再比对。
+    let compact = algorithm.trim().to_ascii_uppercase().replace('-', "");
+    let bare = compact.strip_prefix("HMAC").unwrap_or(&compact);
+    match bare {
         "MD5" => "MD5".to_string(),
         "SHA" | "SHA1" => "SHA-1".to_string(),
         "SHA224" => "SHA-224".to_string(),
         "SHA256" => "SHA-256".to_string(),
         "SHA384" => "SHA-384".to_string(),
         "SHA512" => "SHA-512".to_string(),
-        // 认不出的名字原样返回，让调用方的 match 落到错误分支。
         other => other.to_string(),
     }
 }
@@ -7017,3 +7067,4 @@ mod tests {
         assert_eq!(out, b"65|133".to_vec());
     }
 }
+

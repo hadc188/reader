@@ -59,6 +59,7 @@ import { normalizeAudioContentType, synthesizeHttpTts } from '../api/httpTts'
 import { synthesizeEdgeTts, type EdgeTtsFormat } from '../api/edgeTts'
 import { synthesizeMsTts, type MsTtsFormat } from '../api/msTts'
 import { splitSpeechSegments, type SpeechSegment, type SpeechSegmentType } from '../utils/speechSegments'
+import { stripInvisibleMarkup } from '../utils/chapterSpeechText'
 import {
   readSavedReadingPosition,
   resolveReadingPosition,
@@ -2997,7 +2998,9 @@ export const useReaderStore = defineStore('reader', () => {
       stopTTS(false)
     }
 
-    const rawText = (text || content.value.replace(/<[^>]+>/g, '')).trim()
+    // 兜底取整章正文时也要先摘掉 <style>/<script>：本地 EPUB 的章节正文里内联着
+    // 整本书的 CSS，只按标签名剥会把 `display: block;` 之类当成正文念出来（issue #30）。
+    const rawText = (text || stripInvisibleMarkup(content.value).replace(/<[^>]+>/g, '')).trim()
     if (!rawText) return
 
     const sessionId = beginTTSSession()
@@ -4124,7 +4127,8 @@ export const useReaderStore = defineStore('reader', () => {
       chapterIndex: currentIndex.value,
       chapterName: currentChapter.value.title,
       chapterPos: pos,
-      bookText: snippet || content.value.slice(0, 50).replace(/<[^>]+>/g, ''),
+      bookText: snippet
+        || stripInvisibleMarkup(content.value).slice(0, 50).replace(/<[^>]+>/g, ''),
       time: Date.now(),
       content: '',
     }

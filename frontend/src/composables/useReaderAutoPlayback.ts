@@ -3,6 +3,7 @@ import type { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { cancelPageScrollAnimation } from '../utils/readerPaging'
 import { buildSpeechChunkPieces, buildSpeechChunksFromText } from '../utils/speechChunks'
+import { splitChapterContentIntoParagraphs } from '../utils/chapterSpeechText'
 import { SpeechStream, type SpeechChunk, type SpeechChunkType } from '../utils/speechStream'
 
 type ReaderStore = ReturnType<typeof useReaderStore>
@@ -536,28 +537,6 @@ export function useReaderAutoPlayback(
   const reportedSpeechChunkErrors = new Set<string>()
   const appStore = useAppStore()
 
-  /** 正文 → 段落文本。与 ReaderView.formatChapterHtml 的纯文本分支保持一致的切分。 */
-  function splitChapterContentIntoParagraphs(content: string): string[] {
-    let text = content
-    if (/<[a-z][\s\S]*>/i.test(content)) {
-      // 书源正文可能是 HTML：把块级标签换成换行，再去标签/解常见实体，得到可朗读文本。
-      text = content
-        .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<\/(p|div|li|h\d|tr)>/gi, '\n')
-        .replace(/<[^>]+>/g, '')
-        .replace(/&nbsp;/gi, ' ')
-        .replace(/&lt;/gi, '<')
-        .replace(/&gt;/gi, '>')
-        .replace(/&quot;/gi, '"')
-        .replace(/&#39;/gi, "'")
-        .replace(/&amp;/gi, '&')
-    }
-    return text
-      .split(/\n/)
-      .map((line) => line.replace(/^[\u3000\u00A0 \t]+/, '').trim())
-      .filter(Boolean)
-  }
-
   /**
    * 一段文本 → 缓冲流的块（含双音色按引号 / 说话人冒号标注旁白/对话）。
    *
@@ -631,6 +610,10 @@ export function useReaderAutoPlayback(
    *
    * 这里只取正文（会进 store 的正文缓存），不切换当前章；播放到这些块时由
    * onChapterChange 调 nextChapter()，届时 loadChapter 命中缓存，几乎瞬间完成。
+   *
+   * 正文是**字符串**而不是已渲染的 DOM，所以必须用 `splitChapterContentIntoParagraphs`
+   * 而不是 `innerText`：本地 EPUB 的章节里内联着整本书的 `<style>`，只按标签名剥
+   * 会把 CSS 规则当成段落念出来（issue #30：第一章中文正常、下一章开始念英文）。
    */
   async function prefetchNextChapterUnits(session: SpeechStreamSession): Promise<SpeechStreamUnit[]> {
     if (isContinuousMode.value) return []

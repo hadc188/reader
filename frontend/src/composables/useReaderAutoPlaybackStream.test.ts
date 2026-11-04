@@ -644,6 +644,35 @@ describe('useReaderAutoPlayback buffered speech stream', () => {
     )
     store.stopTTS()
   })
+
+  // issue #30：本地 EPUB 的章节正文里内联了整本书的作用域化 CSS。跨章预取走的是
+  // 字符串路径（没有 DOM 的 innerText 帮忙过滤），旧实现会把 CSS 规则当成段落朗读，
+  // 用户听到的就是「第一章中文正常，下一章开始念英文」。
+  it('跨章预取本地 EPUB 时不会把内联样式表当成正文朗读', async () => {
+    const { store, playback } = setupComposable()
+    const epubChapter =
+      '<div class="epub-chapter-content"><style>.epub-chapter-content .calibre2 '
+      + '{ display: block; font-size: 1em; margin: 1em 0 }</style>'
+      + '<p class="calibre2">下一章第一段正文。</p>'
+      + '<p class="calibre2">下一章第二段正文。</p></div>'
+    vi.mocked(getBookContent).mockImplementation(async ({ chapterUrl }) => (
+      chapterUrl === 'chapter-1' ? epubChapter : '第一段正文。\n第二段正文。'
+    ))
+
+    playback.startSpeech(paragraphs[0] as unknown as HTMLElement)
+    await vi.waitFor(() => expect(store.isSpeaking).toBe(true))
+
+    // 等预取把下一章合成完，逐块检查送进引擎的文本。
+    await vi.waitFor(
+      () => expect(vi.mocked(synthesizeHttpTts).mock.calls.some(([params]) => params.text.includes('下一章第一段正文'))).toBe(true),
+      { timeout: 4000 },
+    )
+    const texts = vi.mocked(synthesizeHttpTts).mock.calls.map(([params]) => params.text)
+    for (const cssWord of ['display', 'font-size', 'calibre', '{', '}']) {
+      expect(texts.some((text) => text.includes(cssWord))).toBe(false)
+    }
+    store.stopTTS()
+  })
 })
 
 /* ─── 双音色 + edge 的运行时脚手架（上面的用例共用） ─── */

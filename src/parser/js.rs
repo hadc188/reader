@@ -3293,14 +3293,16 @@ fn eval_js_inner_with_source(
         )?;
         java_obj.set(
             "HMacHex",
-            Func::new(|input: String, algorithm: String, key: String| -> String {
+            Func::new(|ctx: rquickjs::Ctx<'_>, input: String, algorithm: String, key: String| -> rquickjs::Result<String> {
                 java_hmac_hex(&input, &algorithm, &key)
+                    .map_err(|err| rquickjs::Exception::throw_message(&ctx, &err.to_string()))
             }),
         )?;
         java_obj.set(
             "HMacBase64",
-            Func::new(|input: String, algorithm: String, key: String| -> String {
+            Func::new(|ctx: rquickjs::Ctx<'_>, input: String, algorithm: String, key: String| -> rquickjs::Result<String> {
                 java_hmac_base64(&input, &algorithm, &key)
+                    .map_err(|err| rquickjs::Exception::throw_message(&ctx, &err.to_string()))
             }),
         )?;
         java_obj.set(
@@ -4648,7 +4650,12 @@ fn java_digest_base64(input: &str, algorithm: &str) -> String {
 ///
 /// `javax.crypto.Mac.getInstance(...).doFinal(bytes)` 的输入是字节数组，
 /// 直接走 `java_hmac_hex`（`&str`）会先把字节转文本再取 UTF-8 字节，非 UTF-8
-/// 的二进制签名数据会被改写。算法分发仍只有 `java_hmac` 一处。
+/// 的二进制签名数据会被改写。
+///
+/// 算法名归一化与 `java.HMacHex` / `HMacBase64` 共用 [`normalize_hmac_name`]：
+/// 两条 HMAC 路径曾经分叉 —— 这条剥了 `HMAC` 前缀、那条没剥，于是
+/// `Packages.javax.crypto.Mac("HmacSHA1")` 正常而 `java.HMacHex("HmacSHA1")`
+/// 静默返回空串（issue #29）。改这里时**不要**再自己解析算法名。
 pub(crate) fn java_hmac_hex_bytes(key: &[u8], algorithm: &str, data: &[u8]) -> anyhow::Result<String> {
     // 必须**直接用字节**算：早期实现把 key/data 按 ISO-8859-1 转成 `&str` 再取
     // UTF-8 字节，等于把每个高位字节膨胀成两字节，摘要完全对不上 —— 而书源的
@@ -4662,11 +4669,7 @@ pub(crate) fn java_hmac_hex_bytes(key: &[u8], algorithm: &str, data: &[u8]) -> a
             Ok(hex::encode(mac.finalize().into_bytes()))
         }};
     }
-    // `Mac.getInstance` 传的是 JCA 形式（`HmacSHA256` / `HmacSHA-1`），
-    // 先剥掉 `HMAC` 前缀再交给 `normalize_digest_name`。
-    let upper = algorithm.trim().to_ascii_uppercase().replace('-', "");
-    let bare = upper.strip_prefix("HMAC").unwrap_or(&upper).to_string();
-    match normalize_digest_name(&bare).as_str() {
+    match normalize_hmac_name(algorithm).as_str() {
         "MD5" => hmac_bytes!(Md5),
         "SHA-1" => hmac_bytes!(Sha1),
         "SHA-224" => hmac_bytes!(Sha224),
@@ -4677,28 +4680,35 @@ pub(crate) fn java_hmac_hex_bytes(key: &[u8], algorithm: &str, data: &[u8]) -> a
     }
 }
 
-fn java_hmac_hex(input: &str, algorithm: &str, key: &str) -> String {
+fn java_hmac_hex(input: &str, algorithm: &str, key: &str) -> anyhow::Result<String> {
     java_hmac(input, algorithm, key, true)
 }
 
 /// legado `java.HMacBase64(data, algorithm, key)`: HMAC 摘要(base64)
-fn java_hmac_base64(input: &str, algorithm: &str, key: &str) -> String {
+fn java_hmac_base64(input: &str, algorithm: &str, key: &str) -> anyhow::Result<String> {
     java_hmac(input, algorithm, key, false)
 }
 
-/// 通用 HMAC 计算, 按算法名分发到对应摘要类型
-fn java_hmac(input: &str, algorithm: &str, key: &str, hex_out: bool) -> String {
+/// 通用 HMAC 计算, 按算法名分发到对应摘要类型。
+///
+/// 未知算法**返回错误**而不是空串：legado 的 `Mac.getInstance(未知名)` 抛
+/// `NoSuchAlgorithmException`，书源调试面板会直接指出算法名写错。早先这里
+/// `unwrap_or_default()` 静默给 `""`，签名为空但流程照走，服务端只回
+/// `Invalid Signature` —— 排查成本极高（issue #29）。
+fn java_hmac(input: &str, algorithm: &str, key: &str, hex_out: bool) -> anyhow::Result<String> {
     let key_bytes = key.as_bytes();
-    let encoded: Option<String> = match normalize_digest_name(algorithm).as_str() {
+    let name = normalize_hmac_name(algorithm);
+    let encoded: Option<String> = match name.as_str() {
         "MD5" => hmac_md5(input, key_bytes, hex_out),
         "SHA-1" => hmac_sha1(input, key_bytes, hex_out),
         "SHA-224" => hmac_sha224(input, key_bytes, hex_out),
         "SHA-256" => hmac_sha256(input, key_bytes, hex_out),
         "SHA-384" => hmac_sha384(input, key_bytes, hex_out),
         "SHA-512" => hmac_sha512(input, key_bytes, hex_out),
-        _ => None,
+        _ => anyhow::bail!("不支持 HMAC 算法 {algorithm}"),
     };
-    encoded.unwrap_or_default()
+    // `new_from_slice` 只会因空密钥失败；显式报错同样比空串好排查。
+    encoded.ok_or_else(|| anyhow::anyhow!("HMAC 初始化失败（算法 {algorithm}）"))
 }
 
 macro_rules! hmac_impl {
@@ -4733,6 +4743,37 @@ fn normalize_digest_name(algorithm: &str) -> String {
         "SHA256" | "SHA-256" => "SHA-256".to_string(),
         "SHA384" | "SHA-384" => "SHA-384".to_string(),
         "SHA512" | "SHA-512" => "SHA-512".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 归一化 **HMAC** 算法名，返回与 [`normalize_digest_name`] 相同的基准名。
+///
+/// `java.HMacHex` / `java.HMacBase64` 在 legado 里是
+/// `javax.crypto.Mac.getInstance(algorithm)`，规范名是 **JCA 写法**
+/// （`HmacSHA1` / `HmacSHA256` / `HmacMD5` …）；而书源里也常混着写成摘要名
+/// （`SHA-1` / `SHA256`）。两边都要认。
+///
+/// 早先只有 `java_hmac_hex_bytes`（`Packages.javax.crypto.Mac` 那条路）剥了
+/// `HMAC` 前缀，`java.HMacHex` / `HMacBase64` 走的 `java_hmac` 没剥，
+/// 于是 `"HmacSHA1"` 归一化成 `"HMACSHA1"` → 匹配不到 → `unwrap_or_default()`
+/// → **静默返回空串**。书源的 HMAC 签名头因此是空的，服务端只回
+/// `Invalid Signature`（issue #29）。
+///
+/// 统一到这一处，两条 HMAC 路径共用，避免再次分叉。
+fn normalize_hmac_name(algorithm: &str) -> String {
+    let upper = algorithm.trim().to_ascii_uppercase();
+    // JCA 允许 `HmacSHA1` 与 `HmacSHA-1` 两种写法，连字符先去掉再比对。
+    let compact = upper.replace('-', "");
+    let bare = compact.strip_prefix("HMAC").unwrap_or(&compact).to_string();
+    match bare.as_str() {
+        "MD5" => "MD5".to_string(),
+        "SHA" | "SHA1" => "SHA-1".to_string(),
+        "SHA224" => "SHA-224".to_string(),
+        "SHA256" => "SHA-256".to_string(),
+        "SHA384" => "SHA-384".to_string(),
+        "SHA512" => "SHA-512".to_string(),
+        // 认不出的名字原样返回，让调用方的 match 落到错误分支。
         other => other.to_string(),
     }
 }

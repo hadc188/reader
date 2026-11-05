@@ -712,8 +712,16 @@ function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) 
   // 直接丢掉会让用户以为之前搜到的源没了，所以照样摆出来，只是角标按过期时间
   // 显示（`sourcesCacheHint`），由用户自己决定要不要点刷新。
   const cacheExpired = !!cached && sourceCandidateCache.isStale(cached)
+  // 上次**没搜完**（中途停止 / 部分源失败）→ 照样自动重搜一次。
+  //
+  // 这条很关键：`commitSourceCandidates` 无论完整与否都会写入**当前**签名，
+  // 所以光比签名看不出「这份缓存其实只搜了一半」。用户刷新到一半退出，缓存里
+  // 就是半份结果 + 与清单相符的签名 → 下次打开判成「没变」，永远不再补搜，
+  // 表现正是「刷新中途退出后再打开加载的是旧缓存」。
+  // 重搜时旧结果会作为 `previousBooks` 垫底，已看到的源不会丢。
+  const cacheIncomplete = !!cached && !cached.complete
 
-  if (!refresh && !catalogChanged) {
+  if (!refresh && !catalogChanged && !cacheIncomplete) {
     if (cached) {
       if (!isCurrentDetail(loadId, bookKey)) return
       sourcesCachedAt.value = cached.savedAt

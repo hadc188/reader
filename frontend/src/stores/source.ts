@@ -11,6 +11,37 @@ export const useSourceStore = defineStore('source', () => {
   let requestId = 0
   let sourceStateSignature = ''
 
+  /** 上次见到的书源清单签名（跨会话持久化）。
+   *
+   *  `availabilityVersion` 的口径是「这次 fetch 相比上次**本进程**看到的清单变了
+   *  没有」，所以 `sourceStateSignature` 一直是内存变量。但候选缓存
+   *  （`sourceCandidateCache`）是写进 localStorage 的，**跨会话存活** ——
+   *  于是应用重启后基线为空，首次 fetch 只记录基线不判定变化，用户在上次会话
+   *  「启用了书源但没能成功刷新详情页」这件事就永远补不上。
+   *
+   *  这里把基线也存一份到 localStorage：重启后第一次 fetch 就能发现真实变化，
+   *  详情页的 availabilityVersion 监听与签名比对都能正常工作。
+   *  用独立键，避免和候选缓存的 schema 混在一起。 */
+  const SOURCE_STATE_SIGNATURE_KEY = 'source-state-signature'
+
+  function loadPersistedSignature(): string {
+    try {
+      return localStorage.getItem(SOURCE_STATE_SIGNATURE_KEY) || ''
+    } catch {
+      return ''
+    }
+  }
+
+  function persistSignature(signature: string) {
+    try {
+      localStorage.setItem(SOURCE_STATE_SIGNATURE_KEY, signature)
+    } catch {
+      // 存储不可用（隐私模式/配额满）时退化成纯内存基线，功能不受影响。
+    }
+  }
+
+  sourceStateSignature = loadPersistedSignature()
+
   function sourceIdentity(url: string) {
     const normalized = url.trim()
     if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
@@ -49,6 +80,7 @@ export const useSourceStore = defineStore('source', () => {
           // 自然对不上，详情页据此重搜并覆盖；LRU 上限（20 条）负责淘汰。
         }
         sourceStateSignature = nextSignature
+        persistSignature(nextSignature)
         sources.value = list
       })
       .finally(() => {

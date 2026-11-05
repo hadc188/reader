@@ -19,6 +19,15 @@ export interface ShowBrowserRequest {
    * 嵌入」并整页替换成拦截提示。独立窗口里 window.top === window，这些检测都不触发。
    */
   externalWindow?: boolean
+  /**
+   * 发起这次打开操作的**书源地址**（`bookSourceUrl`）。
+   *
+   * 由后端随请求带回，前端要原样转给 `openExternalWindow` 的第三个参数：
+   * 独立窗口据此套用书源自己的 User-Agent、按移动/桌面选窗口尺寸、并把已有
+   * Cookie 注入窗口。缺了它，移动端 H5 登录页（如 `fanqienovel.com`）会按
+   * 桌面宽度渲染，显示不全且无法下滑。
+   */
+  bookSourceUrl?: string | null
 }
 
 export function closeSourcePanel(panelId: string) {

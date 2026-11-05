@@ -55,6 +55,14 @@ pub struct ShowBrowserRequest {
     /// 调用脚本拿到空页继续执行。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub external_window: bool,
+    /// 发起这次打开操作的**书源地址**（`bookSourceUrl`）。
+    ///
+    /// 前端拿到后要原样传给 `open_external_window` 的 `bookSourceUrl` 参数：
+    /// 独立窗口要用书源自己的 User-Agent、按移动/桌面尺寸渲染、并把已有的
+    /// Cookie 注入窗口 —— 缺了它就退化成「WebView2 默认桌面 UA + 默认尺寸」，
+    /// 移动端 H5 登录页（`fanqienovel.com` 这类）会显示不全且滑不动。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book_source_url: Option<String>,
 }
 
 thread_local! {
@@ -333,6 +341,10 @@ pub async fn handle_source_panel_bridge(
                 html: payload.get("html").and_then(|v| v.as_str()).map(str::to_string),
                 preload_js: payload.get("preloadJs").and_then(|v| v.as_str()).map(str::to_string),
                 options, title: None, await_result: false, panel_id: None, external_window: false,
+                // 面板所属书源：前端要转给 `open_external_window`，让独立窗口
+                // 用对的 UA / 尺寸 / Cookie。
+                book_source_url: Some(entry.book_source_url.clone())
+                    .filter(|u| !u.trim().is_empty()),
             }, entry.clone()).map_err(|e| e.to_string())?;
             Ok(json!(request))
         }

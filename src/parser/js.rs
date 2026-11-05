@@ -3009,6 +3009,9 @@ fn eval_js_inner_with_source(
             Func::new(|url: String, html: String, preload_js: String, options: String, title: String| {
                 let html = (!html.is_empty()).then_some(html);
                 let preload_js = (!preload_js.is_empty()).then_some(preload_js);
+                // 带上发起这次打开的书源地址：前端要转给
+                // `open_external_window`，窗口据此决定 UA / 尺寸 / Cookie 注入。
+                let book_source_url = Some(active_source().url).filter(|u| !u.trim().is_empty());
                 crate::service::book_service::set_show_browser_request(
                     crate::service::book_service::ShowBrowserRequest {
                         url,
@@ -3019,6 +3022,7 @@ fn eval_js_inner_with_source(
                         await_result: false,
                         panel_id: None,
                         external_window: false,
+                        book_source_url,
                     },
                 );
             }),
@@ -3028,6 +3032,7 @@ fn eval_js_inner_with_source(
                 url, title: (!title.is_empty()).then_some(title),
                 html: (!html.is_empty()).then_some(html), preload_js: None,
                 options: None, await_result: true, panel_id: None, external_window: false,
+                book_source_url: Some(active_source().url).filter(|u| !u.trim().is_empty()),
             };
             match crate::service::source_browser::await_browser(request) {
                 Ok(page) => json!({"ok":true,"page":page}),
@@ -3038,10 +3043,16 @@ fn eval_js_inner_with_source(
         // 不等回数据。书源里「注册页 / 用户后台 / 网页版阅读」这类入口用它 ——
         // 这些页面在 iframe 里会被 X-Frame-Options 或前端安全 SDK 拦掉。
         globals.set("__open_external_window", Func::new(|url: String, title: String| {
+            // 书源地址**必须**带上：前端把它转给 `open_external_window`，
+            // 窗口据此套用书源的 UA、按移动/桌面选尺寸、注入已有 Cookie。
+            // 缺了它就退化成「WebView2 默认桌面 UA + 900px 窗口」，移动端 H5
+            // 登录页（书源 8054 的 `fanqienovel.com`）会显示不全且滑不动。
+            let book_source_url = Some(active_source().url).filter(|u| !u.trim().is_empty());
             let request = crate::service::book_service::ShowBrowserRequest {
                 url, title: (!title.is_empty()).then_some(title),
                 html: None, preload_js: None, options: None,
                 await_result: false, panel_id: None, external_window: true,
+                book_source_url,
             };
             match crate::service::source_browser::request_external_window(request.clone()) {
                 Ok(()) => json!({"ok":true}).to_string(),

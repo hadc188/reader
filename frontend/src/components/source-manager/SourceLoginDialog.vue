@@ -152,7 +152,13 @@ function showBrowser(request: ShowBrowserRequest, current: number) {
   // 检测「是否被 iframe 嵌入」并整页替换成拦截提示。独立窗口不触发。
   if (request.externalWindow) {
     if (current !== generation || !props.modelValue) return
-    void openExternalWindow(request.url, request.title || '书源网页', props.source?.bookSourceUrl)
+    // 优先用后端回传的书源地址（它就是发起这次脚本调用的那个源），
+    // 再退回对话框自身持有的源。
+    void openExternalWindow(
+      request.url,
+      request.title || '书源网页',
+      request.bookSourceUrl || props.source?.bookSourceUrl,
+    )
       .catch((err) => notify(err instanceof Error ? err.message : '打开窗口失败', 'error'))
     return
   }

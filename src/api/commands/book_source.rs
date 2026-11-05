@@ -415,7 +415,114 @@ pub fn close_source_panel(panel_id: String) {
 /// 未登录」的成因。
 ///
 /// 窗口尺寸取主窗口的 92%，居中略偏上，视觉上像「从主窗口里弹出来的」。
-/// 独立窗口的**加载进度条**脚本（作为 `initialization_script` 注入）。
+/// 移动端 UA 时独立窗口用的宽度（CSS px）。
+///
+/// 取 420：介于 iPhone（390/393/430）与主流安卓（360-412）之间，绝大多数
+/// 移动 H5 站在这个宽度下按单列布局渲染，与手机观感一致。
+///
+/// 为什么不能直接用桌面尺寸：`<meta name="viewport" content="width=device-width">`
+/// 的页面拿到 900px 宽会按 900px 布局 —— 表单横向铺满、固定高度的滚动容器
+/// 反而把内容切掉，表现是「显示不全 + 不能下滑」（书源 8054 的番茄登录页）。
+const MOBILE_WINDOW_WIDTH: f64 = 420.0;
+
+/// 移动窗口的最小高度。比桌面窗口高一些，尽量一屏放下登录表单。
+const MOBILE_WINDOW_HEIGHT: f64 = 760.0;
+
+/// 判断 User-Agent 是否属于移动端（决定独立窗口是否按手机尺寸与视口渲染）。
+///
+/// 抽成纯函数是为了能测：这段判断直接决定「H5 页面是否显示完整」，
+/// 判错的症状与「站点改版」极难区分。
+fn is_mobile_user_agent(ua: &str) -> bool {
+    let ua = ua.to_ascii_lowercase();
+    // `Mobile` 覆盖主流移动 Safari/Chrome；`Android`/`iPhone`/`iPad` 兜住
+    // 不写 `Mobile` 的写法（平板、部分定制浏览器）。
+    ua.contains("mobile")
+        || ua.contains("android")
+        || ua.contains("iphone")
+        || ua.contains("ipad")
+}
+
+/// 独立窗口的**移动端视口修正**脚本（作为 `initialization_script` 注入）。
+///
+/// 只对移动 UA 的窗口注入。解决两类「H5 页显示不全 / 滑不动」：
+///
+/// 1. **视口宽度**：有些 H5 站只用 JS 按 UA 判端，HTML 里仍留着桌面的
+///    `<meta name="viewport" content="width=1200">`；窗口只有 420px 宽时页面
+///    按 1200px 渲染，右侧整块被裁掉。这里把 viewport 强制改成
+///    `width=device-width`。
+///
+/// 2. **滚动被锁**：移动端 H5 惯用 `html,body{height:100%;overflow:hidden}`
+///    加一个内部滚动容器，桌面 WebView2 没有手机的惯性滚动与地址栏收起行为，
+///    内部容器高度算错就直接滑不动。这里在检测到「文档比视口高但滚不动」时
+///    给 `html,body` 放开 `overflow:auto` 并允许纵向滚动。
+///
+/// 刻意写得保守：只在**确实滑不动**时才动样式，且只用 `overflow-y:auto`
+/// （不改 `display`/`height`），避免把本来正常的固定布局页面弄乱。
+fn mobile_viewport_script() -> &'static str {
+    r##"
+(function () {
+  if (window.__readerMobileViewport) return;
+  window.__readerMobileViewport = true;
+
+  // 1) viewport：把任何固定宽度改成 device-width。
+  function fixViewport() {
+    var head = document.head || document.documentElement;
+    if (!head) return;
+    var meta = document.querySelector('meta[name="viewport"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.name = 'viewport';
+      head.appendChild(meta);
+    }
+    var content = meta.getAttribute('content') || '';
+    // 只改「显式固定宽度」的写法；`width=device-width` 保持原样。
+    if (/width\s*=\s*\d+/.test(content) || content === '') {
+      meta.setAttribute(
+        'content',
+        'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover'
+      );
+    }
+  }
+
+  // 2) 滚动：文档比视口高、却滑不动时放开 overflow。
+  function unlockScroll() {
+    var doc = document.documentElement;
+    var body = document.body;
+    if (!doc || !body) return;
+    var viewportH = window.innerHeight || doc.clientHeight || 0;
+    var contentH = Math.max(doc.scrollHeight || 0, body.scrollHeight || 0);
+    if (contentH <= viewportH + 24) return; // 本来就不用滚
+    var canScroll = (doc.scrollHeight - doc.clientHeight) > 24;
+    if (canScroll) return; // 已经能滚
+    var style = doc.style;
+    if (getComputedStyle(doc).overflowY === 'hidden') style.overflowY = 'auto';
+    if (getComputedStyle(body).overflowY === 'hidden') body.style.overflowY = 'auto';
+    // 有些站把高度钉死在 body 上，一并放开（只动 height，不动其它布局属性）。
+    if (getComputedStyle(body).height === viewportH + 'px') {
+      body.style.height = 'auto';
+      body.style.minHeight = viewportH + 'px';
+    }
+  }
+
+  function run() {
+    try { fixViewport(); } catch (e) {}
+    try { unlockScroll(); } catch (e2) {}
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', run, { once: true });
+  } else {
+    run();
+  }
+  // SPA 会在路由切换后重建 DOM，多跑几次；开销可忽略。
+  window.addEventListener('load', run, { once: true });
+  setTimeout(run, 600);
+  setTimeout(run, 1800);
+})();
+"##
+}
+
+/// 独立窗口的**加载进度条**（作为 `initialization_script` 注入）。
 ///
 /// 上游站点常要几百毫秒到好几秒才出首屏，WebView2 在拿到 HTML 之前是一整片
 /// 空底色 —— 用户看到的就是「点了没反应、黑屏卡住」。
@@ -499,6 +606,23 @@ pub async fn open_external_window(
         let _ = existing.close();
     }
 
+    // 让验证窗口用**书源自己的 User-Agent**，而不是 WebView2 的默认桌面 UA。
+    //
+    // 这是 Cloudflare 站点「验证能过、搜索仍然 403」的根因：`cf_clearance`
+    // 由 Cloudflare 按 UA（连同 IP、TLS 会话）绑定，验证窗口与后续书源请求
+    // 必须是**同一个 UA**，否则 token 被视为不匹配而失效。
+    //
+    // 书源 8045 把 UA 写成 `Mozilla/5.0 (Linux; Android 13; Pixel 7) … Mobile`，
+    // 而 WebView2 默认是桌面 Chrome —— 用户在窗口里过完验证拿到 cf_clearance，
+    // 书源请求换成移动 UA 后立刻被拦。
+    //
+    // legado 手机端正是这么做的：`WebViewActivity` 里
+    // `headerMap[AppConst.UA_NAME]?.let { userAgentString = it }`。
+    //
+    // **必须在算窗口尺寸之前取到**：移动 UA 要把窗口收窄成手机宽度，见下。
+    let window_ua = source_user_agent(&state.book_source_service, book_source_url.as_deref()).await;
+    let is_mobile_ua = window_ua.as_deref().is_some_and(is_mobile_user_agent);
+
     // 尺寸按主窗口算：比它小一点，用户能看出这是「子窗口」。
     let mut width = 900.0_f64;
     let mut height = 700.0_f64;
@@ -513,6 +637,20 @@ pub async fn open_external_window(
             width = (logical_w * 0.92).clamp(560.0, 1200.0);
             height = (logical_h * 0.92).clamp(420.0, 900.0);
         }
+    }
+    if is_mobile_ua {
+        // 移动端 UA 要配移动窗口宽度：`fanqienovel.com` 这类 H5 站用
+        // `<meta name="viewport" content="width=device-width">`，宽 900 的桌面
+        // 窗口会让它按 900px 布局，正文/表单横向铺开、竖向又被固定高度的滚动
+        // 容器卡住 —— 表现就是「H5 页面显示不全、也没法下滑」（书源 8054 的
+        // 番茄登录页）。
+        //
+        // 手机端 legado 是整屏 WebView，天然是移动视口；桌面端要显式给窄窗口。
+        // 只对**移动 UA** 收窄，桌面书源不受影响。
+        width = width.min(MOBILE_WINDOW_WIDTH);
+        height = height.max(MOBILE_WINDOW_HEIGHT);
+    }
+    if let Some(main) = app.get_webview_window("main") {
         if let (Ok(pos), Ok(size), Ok(scale)) =
             (main.outer_position(), main.inner_size(), main.scale_factor())
         {
@@ -520,7 +658,7 @@ pub async fn open_external_window(
             let logical_y = pos.y as f64 / scale;
             let logical_w = size.width as f64 / scale;
             let logical_h = size.height as f64 / scale;
-            // 相对主窗口居中。
+            // 相对主窗口居中（用最终尺寸，收窄后也居中）。
             x = Some(logical_x + (logical_w - width) / 2.0);
             y = Some(logical_y + (logical_h - height) / 2.0 - 20.0);
         }
@@ -536,20 +674,11 @@ pub async fn open_external_window(
             // 加载进度条：文档创建时就挂上，慢站点也不会看起来像卡死。
             .initialization_script(external_window_progress_script());
 
-    // 让验证窗口用**书源自己的 User-Agent**，而不是 WebView2 的默认桌面 UA。
-    //
-    // 这是 Cloudflare 站点「验证能过、搜索仍然 403」的根因：`cf_clearance`
-    // 由 Cloudflare 按 UA（连同 IP、TLS 会话）绑定，验证窗口与后续书源请求
-    // 必须是**同一个 UA**，否则 token 被视为不匹配而失效。
-    //
-    // 书源 8045 把 UA 写成 `Mozilla/5.0 (Linux; Android 13; Pixel 7) … Mobile`，
-    // 而 WebView2 默认是桌面 Chrome —— 用户在窗口里过完验证拿到 cf_clearance，
-    // 书源请求换成移动 UA 后立刻被拦。
-    //
-    // legado 手机端正是这么做的：`WebViewActivity` 里
-    // `headerMap[AppConst.UA_NAME]?.let { userAgentString = it }`。
-    if let Some(ua) = source_user_agent(&state.book_source_service, book_source_url.as_deref()).await {
-        builder = builder.user_agent(&ua);
+    // 应用前面取到的书源 UA（移动 UA 同时注入视口修正脚本）。
+    if let Some(ua) = window_ua {
+        builder = builder
+            .user_agent(&ua)
+            .initialization_script(mobile_viewport_script());
     }
 
     // 站点里的二级链接（目录、详情、翻页、下载页）常带 `target="_blank"`。
@@ -1606,5 +1735,52 @@ mod tests {
         assert!(!source_became_available(None, &disabled));
         assert!(source_became_available(Some(&disabled), &enabled));
         assert!(!source_became_available(Some(&enabled), &enabled));
+    }
+
+    /// 移动 UA 要能被认出来 —— 它决定独立窗口是否按手机尺寸渲染。
+    ///
+    /// 书源 8054 的番茄登录页就是移动 H5：UA 判定失败时窗口按 900px 桌面宽度
+    /// 渲染，页面显示不全、也滑不动。
+    #[test]
+    fn detects_mobile_user_agents() {
+        for ua in [
+            // 8054 / 8045 用的就是这两种
+            "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+            // 不写 Mobile 的安卓浏览器
+            "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36",
+            // 大小写不应影响判定
+            "mozilla/5.0 (linux; android 12) mobile safari",
+        ] {
+            assert!(is_mobile_user_agent(ua), "应判为移动端: {ua}");
+        }
+    }
+
+    /// 桌面 UA 不能被误判 —— 否则正常网页会被塞进 420px 窄窗口。
+    #[test]
+    fn does_not_treat_desktop_user_agents_as_mobile() {
+        for ua in [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "",
+        ] {
+            assert!(!is_mobile_user_agent(ua), "不应判为移动端: {ua}");
+        }
+    }
+
+    /// 视口脚本必须同时处理「固定宽度 viewport」与「滚动被锁」两件事。
+    #[test]
+    fn mobile_viewport_script_covers_both_failure_modes() {
+        let script = mobile_viewport_script();
+        // 1) 把 width=<数字> 改成 device-width
+        assert!(script.contains("device-width"), "应改写 viewport 为 device-width");
+        // 2) 放开被锁死的纵向滚动
+        assert!(script.contains("overflowY"), "应处理 overflow 锁死");
+        assert!(script.contains("scrollHeight"), "应检测文档是否比视口高");
+        // 幂等：重复注入不应叠加
+        assert!(script.contains("__readerMobileViewport"));
     }
 }

@@ -734,7 +734,13 @@ function openSourceBrowserPanel(request: ShowBrowserRequest) {
   // （localStorage、Cookie、XHR 都是同源）。放在 iframe 面板里得一层层桥接，
   // 漏一处就是白屏，因此这类请求直接开窗口。
   if (request.externalWindow) {
-    void openExternalWindow(request.url, request.title || undefined)
+    // 带上书源地址：独立窗口据此套用书源 UA、按移动/桌面选尺寸、注入 Cookie。
+    // 缺了它，移动端 H5 页面（如番茄登录页）会按桌面宽度渲染，显示不全且滑不动。
+    void openExternalWindow(
+      request.url,
+      request.title || undefined,
+      request.bookSourceUrl || undefined,
+    )
     return
   }
   if (!request.panelId) {

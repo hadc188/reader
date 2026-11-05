@@ -368,6 +368,15 @@ fn installation_mode() -> &'static str {
     "installer"
 }
 
+/// 按平台与安装形态挑出要下载的更新包。
+///
+/// 只有 **Windows 便携包** 与 **Linux AppImage** 存在"便携/安装"两种形态 —— 它们
+/// 的数据跟着可执行文件走, 升级方式必须与当前运行形态一致, 否则会换错包。
+///
+/// macOS 恒为 `("macos", _)` → DMG: `installation_mode()` 在 macOS 上没有分支,
+/// 永远返回 `"installer"`, 所以 `macos-universal.zip` 那条分支曾经是死代码
+/// (CI 仍会产出该 zip 供手动下载, 但应用内更新从不下它)。这里删掉, 避免以后
+/// 有人误以为 macOS 有"便携 zip 更新"通道。
 fn select_update_asset<'a>(
     assets: &'a [GithubAsset],
     platform: &str,
@@ -376,7 +385,6 @@ fn select_update_asset<'a>(
     let suffix = match (platform, mode) {
         ("windows", "portable") => "windows-x64-portable.zip",
         ("windows", _) => "windows-x64-setup.exe",
-        ("macos", "portable") => "macos-universal.zip",
         ("macos", _) => "macos-universal.dmg",
         ("linux", "portable") => "linux-x64.appimage",
         ("linux", _) => "linux-x64.deb",
@@ -682,6 +690,28 @@ mod tests {
             .unwrap()
             .name
             .ends_with("portable.zip"));
+    }
+
+    /// macOS 只有 DMG 一条更新通道: `installation_mode()` 在 macOS 上恒为
+    /// `"installer"`, 但这里把两种 mode 都试一遍 —— Release 里同时挂了
+    /// `macos-universal.zip`, 一旦有人恢复那条分支, 应用内更新就会去下 zip
+    /// 而不是 DMG, 用户拿到的是需要手动解压的包。issue #32 的修复依赖
+    /// "升级只替换 .app、数据在用户目录", 换错包会打乱这条链路。
+    #[test]
+    fn selects_macos_dmg_regardless_of_mode() {
+        let assets = vec![
+            asset("Reader-v2-macos-universal.dmg"),
+            asset("Reader-v2-macos-universal.zip"),
+        ];
+        for mode in ["installer", "portable"] {
+            assert!(
+                select_update_asset(&assets, "macos", mode)
+                    .unwrap()
+                    .name
+                    .ends_with(".dmg"),
+                "mode={mode} 时也必须选 DMG",
+            );
+        }
     }
 
     #[test]

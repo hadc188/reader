@@ -1,10 +1,16 @@
 //! Portable-mode path resolution.
 //!
-//! Release builds keep everything next to the executable so the whole app can be
-//! moved between machines by copying one folder. Debug builds instead use a
-//! fixed location in the source tree.
+//! 桌面版的默认形态是便携的: release 构建把数据放在可执行文件旁边, 整个文件夹
+//! 拷走就能带走全部状态。**macOS 例外** —— 可执行文件位于
+//! `Reader.app/Contents/MacOS/`, 而 DMG / app-zip 的升级方式就是整体替换
+//! `Reader.app`, 数据放在包内会随升级一起被删(issue #32), 因此那边固定使用
+//! `~/Library/Application Support/reader/data`。调试构建统一用源码树内的固定
+//! 位置。
 
+#[cfg(any(target_os = "macos", test))]
+use std::ffi::OsStr;
 use std::fs;
+#[cfg(not(target_os = "macos"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -119,7 +125,40 @@ fn data_dir() -> anyhow::Result<(PathBuf, bool)> {
     if cfg!(debug_assertions) {
         return Ok((dev_root().join(".dev-data"), false));
     }
+    release_data_dir()
+}
 
+/// macOS: 数据固定放在系统用户目录, 绝不放应用包内。
+///
+/// 可执行文件位于 `X.app/Contents/MacOS/`, 而 DMG / app-zip 的升级方式就是
+/// 整体替换 `X.app`。旧版按「exe 同级 `data/`」落盘, 于是书库(`reader.db`)、
+/// 书源与本地备份(`storage/`)全都住进了应用包, 每次升级被连包一起删掉
+/// (issue #32)。首次启动时把旧版留在包内的那份数据搬出来。
+#[cfg(target_os = "macos")]
+fn release_data_dir() -> anyhow::Result<(PathBuf, bool)> {
+    let fallback = fallback_data_dir()?.join("reader").join("data");
+    migrate_data_out_of_app_bundle(&fallback);
+    // 数据本来就在用户目录, 不存在"安装目录不可写"这回事, 不必提示迁移。
+    Ok((fallback, false))
+}
+
+/// 其他平台: 优先 exe 同级 `data/`(Windows 便携包 / Linux AppImage), 目录
+/// 不可写时回退到系统用户目录。
+///
+/// Linux 不需要 macOS 那样的迁出逻辑, 原因是安装位置本身就不可写:
+///
+/// - **AppImage**: AppImage 运行时把 squashfs 挂到 `$TMPDIR/.mount_*`, 只读。
+///   `exe_dir()` 解析到那里面, `is_writable()` 必然失败, 于是直接走
+///   `$XDG_DATA_HOME/reader/data`(或 `~/.local/share/reader/data`)。数据从来
+///   就没进过 AppImage 文件本身 —— 换一个新 AppImage 覆盖旧文件, 数据不受影响。
+/// - **DEB**: 装到 `/usr/bin`, 普通用户不可写, 同样落到 `XDG_DATA_HOME`。
+///
+/// 换言之 Linux 靠 `is_writable()` 兜住了, 而 macOS 的 `.app` 在用户目录下
+/// (下载目录 / 桌面 / `/Applications` 均可写), 探针会成功 —— 这才是 #32 只在
+/// macOS 出现的原因。**不要**为了"统一"把 Linux 改成固定用户目录: AppImage 的
+/// 便携性是特性, 解压到 U 盘也能带着数据走。
+#[cfg(not(target_os = "macos"))]
+fn release_data_dir() -> anyhow::Result<(PathBuf, bool)> {
     let portable = exe_dir()?.join("data");
     if is_writable(&portable) {
         cleanup_legacy_fallback_data(&portable);
@@ -130,6 +169,173 @@ fn data_dir() -> anyhow::Result<(PathBuf, bool)> {
     let first_time = !fallback.exists();
     Ok((fallback, first_time))
 }
+
+/// 可执行文件位于 macOS 应用包内时, 返回旧版写在包里的数据目录。
+///
+/// 形如 `…/Reader.app/Contents/MacOS/reader-desktop` →
+/// `…/Reader.app/Contents/MacOS/data`。判定只看路径形态, 不碰文件系统, 因此
+/// 在任意平台上都能单测。
+#[cfg(any(target_os = "macos", test))]
+fn bundled_data_dir(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()? != OsStr::new("MacOS") {
+        return None;
+    }
+    let contents = macos_dir.parent()?;
+    if contents.file_name()? != OsStr::new("Contents") {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    if bundle.extension()? != OsStr::new("app") {
+        return None;
+    }
+    Some(macos_dir.join("data"))
+}
+
+/// 把旧版留在应用包内的数据搬到用户目录。
+///
+/// **只复制, 不删除旧目录** —— 在 `.app` 里增删任何文件都会让代码签名失效,
+/// macOS 随后会直接拒绝启动(「应用已损坏」)。旧目录随下次整包替换自然消失,
+/// 不值得为省几百 MB 冒这个风险。
+///
+/// 成功后写一个标记: 否则用户在新位置删掉的书记录会在下次启动时被包内的旧
+/// 副本"复活", 看起来像是删不掉。
+#[cfg(any(target_os = "macos", test))]
+fn migrate_bundled_data(bundled: &Path, current: &Path) {
+    if bundled == current || !bundled.is_dir() {
+        return;
+    }
+    if current.join(APP_BUNDLE_MIGRATED_MARKER).is_file() {
+        return;
+    }
+    match copy_bundled_data(bundled, current) {
+        Ok(()) => {
+            let _ = fs::create_dir_all(current);
+            let _ = fs::write(current.join(APP_BUNDLE_MIGRATED_MARKER), "1");
+            eprintln!(
+                "阅读：已把旧版留在应用包内的数据迁移到：{}（旧目录原样保留，可手动删除）",
+                current.display()
+            );
+        }
+        Err(err) => {
+            // 迁移失败不能阻断启动: 新数据目录照常创建, 用户还能继续用, 旧数据
+            // 也一份没动, 下次启动会重试。
+            eprintln!(
+                "阅读：应用包内的旧数据迁移失败, 已原样保留并将在下次启动重试：{}：{err}",
+                bundled.display()
+            );
+        }
+    }
+}
+
+/// 复制旧数据, 但跳过 `storage/cache`。
+///
+/// 章节正文缓存可能有几个 GB, 而它在启动路径上是同步执行的 —— 全量拷贝会让
+/// 用户对着白屏等上几十秒。缓存本身可重建(重新点开章节即可), 不属于"丢了就
+/// 找不回来"的数据; 书库、书源、本地书原件、备份、登录态一律照搬。
+#[cfg(any(target_os = "macos", test))]
+fn copy_bundled_data(bundled: &Path, current: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(current)?;
+    for entry in fs::read_dir(bundled)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let target = current.join(&name);
+        // 章节缓存在 `storage/cache`; 顶层同名目录只是防御性跳过。
+        if name == OsStr::new("cache") {
+            continue;
+        }
+        if name == OsStr::new("storage") {
+            copy_dir_skipping_cache(&entry.path(), &target)?;
+            continue;
+        }
+        if target.exists() {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            copy_legacy_data_if_missing(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// 递归复制 `storage/`, 跳过其中的 `cache` 子目录。
+#[cfg(any(target_os = "macos", test))]
+fn copy_dir_skipping_cache(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if entry.file_name() == OsStr::new("cache") {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_skipping_cache(&entry.path(), &target)?;
+        } else if !target.exists() {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn migrate_data_out_of_app_bundle(current: &Path) {
+    // 1) 就地替换 / 重装: 旧数据还在当前应用包里。
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bundled) = bundled_data_dir(&exe) {
+            migrate_bundled_data(&bundled, current);
+        }
+    }
+    // 2) Finder 用新包"替换"旧包时, 旧包是被**移到废纸篓**而不是直接删掉的,
+    //    里面往往就是用户升级前的全部书源、书架与本地备份 —— 正是 issue #32 里
+    //    "升级后全没了"的那一份。只在目标位置还没有书库时去捞, 绝不用它覆盖
+    //    用户已经在新位置产生的数据。
+    if !current.join("reader.db").is_file() {
+        if let Some(trashed) = latest_trashed_bundle_data() {
+            migrate_bundled_data(&trashed, current);
+        }
+    }
+}
+
+/// 在废纸篓里找最近一个 Reader 应用包内的旧数据目录。
+///
+/// 不按应用名过滤: Finder 在重名覆盖时会生成 `Reader 2.app` 之类的名字。判据
+/// 是结构 —— `*.app/Contents/MacOS/data/reader.db` —— 这个组合足够特异, 不会
+/// 命中别的应用。
+#[cfg(target_os = "macos")]
+fn latest_trashed_bundle_data() -> Option<PathBuf> {
+    let trash = env_path("HOME")?.join(".Trash");
+    pick_latest_bundle_data(&trash)
+}
+
+/// 从 `trash` 下挑出书库最新的一份(按 `reader.db` 的修改时间)。
+///
+/// 纯文件系统遍历, 不涉及平台 API, 因此在任意平台上都能单测。
+#[cfg(any(target_os = "macos", test))]
+fn pick_latest_bundle_data(trash: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(trash).ok()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension() != Some(OsStr::new("app")) {
+            continue;
+        }
+        let data = path.join("Contents").join("MacOS").join("data");
+        let Ok(meta) = fs::metadata(data.join("reader.db")) else {
+            continue;
+        };
+        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().map(|(at, _)| modified > *at).unwrap_or(true) {
+            best = Some((modified, data));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// 应用包内旧数据已经搬过一次的标记(见 `migrate_bundled_data`)。
+#[cfg(any(target_os = "macos", test))]
+const APP_BUNDLE_MIGRATED_MARKER: &str = ".app-bundle-data-migrated";
 
 /// 早期版本在安装目录不可写时退回到 `%LOCALAPPDATA%\reader\data`。现在只要
 /// 便携目录恢复可写，就把这份旧回退数据收回来，避免两个目录各自保存一份书库。
@@ -173,10 +379,10 @@ fn cleanup_legacy_data_dir(current: &Path, legacy: &Path) {
     remove_empty_legacy_root(legacy);
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn cleanup_legacy_fallback_data(_current: &Path) {}
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn copy_legacy_data_if_missing(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
@@ -277,6 +483,7 @@ fn remove_empty_legacy_root(legacy: &Path) {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn is_writable(dir: &Path) -> bool {
     if fs::create_dir_all(dir).is_err() {
         return false;
@@ -291,6 +498,7 @@ fn is_writable(dir: &Path) -> bool {
     ok
 }
 
+#[cfg(not(target_os = "macos"))]
 fn exe_dir() -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe().context("无法定位可执行文件路径")?;
     exe.parent()
@@ -925,5 +1133,183 @@ mod tests {
         assert!(!target.join(".legacy-profile-migrated").is_file());
 
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// macOS 数据目录回归测试(issue #32)。
+///
+/// 这些用例不依赖文件系统布局之外的平台特性, 因此在任意平台上都能跑: 迁出
+/// 应用包这段逻辑一旦退化成「数据留在 `.app` 里」, 升级就会再次清空书库。
+#[cfg(test)]
+mod macos_data_dir_tests {
+    use super::*;
+
+    fn sandbox(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("reader-macos-data-{name}-{nonce}"))
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    /// 可执行文件在 `X.app/Contents/MacOS/` 下时, 旧数据目录必须被认出来 ——
+    /// 这就是 issue #32 里随升级被删掉的那个 `data/`。
+    #[test]
+    fn bundled_data_dir_is_recognised_inside_app_bundle() {
+        let exe = PathBuf::from("/Applications/Reader.app/Contents/MacOS/reader-desktop");
+        assert_eq!(
+            bundled_data_dir(&exe),
+            Some(PathBuf::from("/Applications/Reader.app/Contents/MacOS/data")),
+        );
+    }
+
+    /// 普通可执行文件(Windows 便携包、Linux AppImage、`cargo run`)不能被误判
+    /// 成应用包, 否则会去搬一个不存在的目录。
+    #[test]
+    fn bundled_data_dir_ignores_non_bundle_layouts() {
+        for exe in [
+            "/Applications/Reader.exe",
+            "/home/u/Reader/Reader.exe",
+            "/usr/bin/reader",
+            "/Applications/Reader.app/Contents/MacOSX/reader",
+            "/Applications/Reader.app/Contents/reader",
+            "/Applications/Reader/Contents/MacOS/reader",
+        ] {
+            assert_eq!(bundled_data_dir(Path::new(exe)), None, "{exe}");
+        }
+    }
+
+    /// 首次升级启动: 包内旧数据整棵树搬到用户目录, 数据库与备份都在。
+    #[test]
+    fn bundled_data_is_copied_out_of_the_app() {
+        let root = sandbox("migrate-out");
+        let bundled = root.join("Reader.app/Contents/MacOS/data");
+        write_file(&bundled.join("reader.db"), "sources-and-shelf");
+        write_file(&bundled.join("storage/webdav/default/backups/backup-1.zip"), "backup");
+        write_file(&bundled.join("storage/cache/default/abc/1.txt"), "chapter-cache");
+
+        let current = root.join("Application Support/reader/data");
+        migrate_bundled_data(&bundled, &current);
+
+        assert_eq!(
+            fs::read_to_string(current.join("reader.db")).unwrap(),
+            "sources-and-shelf",
+        );
+        assert_eq!(
+            fs::read_to_string(current.join("storage/webdav/default/backups/backup-1.zip")).unwrap(),
+            "backup",
+        );
+        assert!(current.join(APP_BUNDLE_MIGRATED_MARKER).is_file());
+        // 章节缓存体积可能上 GB 且可重建, 迁移必须跳过, 否则首次启动要白屏等很久。
+        assert!(
+            !current.join("storage/cache").exists(),
+            "缓存目录不应随迁移复制",
+        );
+        // 不能动 .app: 增删包内文件会让代码签名失效, 应用随后直接启动不了。
+        assert!(
+            bundled.join("reader.db").is_file(),
+            "迁移必须只复制, 不删除应用包内的文件",
+        );
+
+        // 用户在新位置删掉数据后, 包内旧副本不得再把它"复活"。
+        fs::remove_file(current.join("reader.db")).unwrap();
+        migrate_bundled_data(&bundled, &current);
+        assert!(!current.join("reader.db").exists(), "迁移只应发生一次");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 新位置已有同名文件时保留新版本 —— 用户升级后继续读写的那个才是最新的。
+    #[test]
+    fn migration_keeps_newer_files() {
+        let root = sandbox("keep-newer");
+        let bundled = root.join("Reader.app/Contents/MacOS/data");
+        write_file(&bundled.join("reader.db"), "old");
+        let current = root.join("Application Support/reader/data");
+        write_file(&current.join("reader.db"), "new");
+
+        migrate_bundled_data(&bundled, &current);
+
+        assert_eq!(fs::read_to_string(current.join("reader.db")).unwrap(), "new");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 没有旧数据(全新安装)时不建标记文件, 也不留下半成品目录。
+    #[test]
+    fn missing_bundled_data_is_a_noop() {
+        let root = sandbox("no-bundled");
+        let bundled = root.join("Reader.app/Contents/MacOS/data");
+        let current = root.join("Application Support/reader/data");
+
+        migrate_bundled_data(&bundled, &current);
+
+        assert!(!current.exists());
+        assert!(!current.join(APP_BUNDLE_MIGRATED_MARKER).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+}
+/// 废纸篓捞回: Finder 覆盖安装会把旧 `Reader.app` 移进废纸篓, 那是用户丢失
+/// 数据的最后一份副本。
+#[cfg(test)]
+mod trashed_bundle_tests {
+    use super::*;
+
+    fn sandbox(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("reader-trash-{name}-{nonce}"))
+    }
+
+    fn write_bundle(root: &Path, app: &str, db: &str) -> PathBuf {
+        let data = root.join(app).join("Contents").join("MacOS").join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("reader.db"), db).unwrap();
+        data
+    }
+
+    /// 废纸篓里可能有多个旧包(多次升级), 必须挑书库最新的那个。
+    #[test]
+    fn picks_the_most_recent_trashed_bundle() {
+        let root = sandbox("pick");
+        write_bundle(&root, "Reader.app", "old");
+        let newest = write_bundle(&root, "Reader 2.app", "newest");
+        // 目录创建顺序不可靠, 显式拉开 mtime。
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let old_db = root.join("Reader.app/Contents/MacOS/data/reader.db");
+        fs::File::options()
+            .write(true)
+            .open(&old_db)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+
+        assert_eq!(pick_latest_bundle_data(&root), Some(newest));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 废纸篓里的普通文件、没有 `data/reader.db` 的 app 都不能被误认。
+    #[test]
+    fn ignores_non_library_entries() {
+        let root = sandbox("ignore");
+        fs::create_dir_all(root.join("Some.app/Contents/MacOS")).unwrap();
+        fs::write(root.join("notes.txt"), "hi").unwrap();
+        fs::create_dir_all(root.join("Other")).unwrap();
+
+        assert_eq!(pick_latest_bundle_data(&root), None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 废纸篓不存在(macOS 首次启动前 / 权限受限)时安静返回 None。
+    #[test]
+    fn missing_trash_is_not_an_error() {
+        let root = sandbox("missing");
+        assert_eq!(pick_latest_bundle_data(&root.join("nope")), None);
     }
 }

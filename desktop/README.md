@@ -21,7 +21,7 @@ reader-rust 的纯单机桌面形态：**无 HTTP 服务端、无 Docker、无�
 - **IPC**：所有旧 `/reader3/*` 路由变成本地 command（`reader_rust::api::invoke_handler()` 聚合注册）。前端 `api/invoke.ts` 把路径映射到 command 名并解包 `{isSuccess, errorMsg, data}` 信封。
 - **SSE → Channel**：多源搜索 / 缓存进度 / 可用源探测等 5 个流改用 `tauri::ipc::Channel`，前端 `api/sse.ts` 的 `openSse()` 保留 EventSource 表面。
 - **二进制/资源**：封面（`/cover`）、EPUB 资源（`/epub`）、上传文件（`/files`）、书源登录代理（`/bookSourceProxy`）由自定义 URI 协议 `reader`（origin `http://reader.localhost`）承载，`<img>`/`<iframe>` 保持同步加载。
-- **数据目录**：`<exe 所在目录>/data/`（便携模式；只读目录回退 `%LOCALAPPDATA%\reader\data`）。
+- **数据目录**：`<exe 所在目录>/data/`（便携模式；只读目录回退 `%LOCALAPPDATA%\reader\data`）。**macOS 固定用 `~/Library/Application Support/reader/data`**：`Reader.app` 的升级方式是整包替换，数据放在包内会随升级被删（issue #32）；首次启动会从 `Contents/MacOS/data` 及废纸篓里的旧 `Reader.app` 迁出旧数据。
 - **Windows 安装包名**：`Reader-L`。安装器产物的名字来自 `productName`，而它同时被写进 Windows 卸载注册表键名，因此不能在 Windows 上与别的应用重名（`Reader` 会与 Readwise Reader 冲突，导致 winget 把两者当成同一个包）。这条 Windows 专属覆盖写在 `src-tauri/tauri.windows.conf.json`，macOS/Linux 仍用 `tauri.conf.json` 里的 `Reader`。改名的迁移逻辑见 `src-tauri/windows-hooks.nsh`。
 - **单用户**：无登录/鉴权，所有数据落在 `"default"` 命名空间。
 

@@ -591,6 +591,9 @@ pub async fn open_external_window(
     url: String,
     title: Option<String>,
     book_source_url: Option<String>,
+    // 等待确认的标识。非空表示这个窗口是 `startBrowserAwait` 打开的：
+    // 关闭时必须回传「已完成」，唤醒后端阻塞中的书源脚本。
+    await_panel_id: Option<String>,
 ) -> Result<ApiResponse<()>, AppError> {
     use tauri::Manager;
 
@@ -742,6 +745,38 @@ pub async fn open_external_window(
                 Err(err) => tracing::debug!(%err, "向验证窗口注入 Cookie 失败"),
             }
         }
+    }
+
+    // ── 等待方唤醒 ─────────────────────────────────────────────────────
+    //
+    // `startBrowserAwait` 打开的这个窗口，脚本正阻塞在
+    // `await_external_window` 的 `recv_timeout` 上。用户关窗必须把它唤醒，
+    // 否则书源脚本会挂满 30 分钟超时，后面「抓 Cookie / 上传凭证」全都不执行
+    // （番茄登录的「保存失败」+ 诊断页不出现就是这么来的）。
+    //
+    // 这段**无条件**注册：与 Cookie 回收无关，任何带 `awaitPanelId` 的窗口都要
+    // 通知。刻意放在 Cookie 回收之前 —— 那个分支只在传了书源地址时才走。
+    if let Some(panel_id) = await_panel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+    {
+        let watched = window.clone();
+        let panel_at_close = panel_id.clone();
+        let notified = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        window.on_window_event(move |event| {
+            // `Destroyed` 覆盖所有关闭路径（用户点 X、`destroy()`、程序退出）；
+            // 它也可能是 `CloseRequested` 之后才到，所以用标志位保证只通知一次。
+            if !matches!(event, tauri::WindowEvent::Destroyed) {
+                return;
+            }
+            if notified.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let url = watched.url().map(|u| u.to_string()).unwrap_or_default();
+            crate::service::source_browser::complete_external_window(&panel_at_close, &url);
+        });
     }
 
     // 关闭时把该窗口里的 Cookie 收进 jar。只在**书源侧**登录时做：

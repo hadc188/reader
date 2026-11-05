@@ -736,10 +736,12 @@ function openSourceBrowserPanel(request: ShowBrowserRequest) {
   if (request.externalWindow) {
     // 带上书源地址：独立窗口据此套用书源 UA、按移动/桌面选尺寸、注入 Cookie。
     // 缺了它，移动端 H5 页面（如番茄登录页）会按桌面宽度渲染，显示不全且滑不动。
+    // `awaitPanelId` 非空时表示脚本正在等这个窗口关闭，关窗要唤醒它。
     void openExternalWindow(
       request.url,
       request.title || undefined,
       request.bookSourceUrl || undefined,
+      request.awaitPanelId || undefined,
     )
     return
   }

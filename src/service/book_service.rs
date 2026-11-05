@@ -63,6 +63,16 @@ pub struct ShowBrowserRequest {
     /// 移动端 H5 登录页（`fanqienovel.com` 这类）会显示不全且滑不动。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub book_source_url: Option<String>,
+    /// 「等这个窗口关闭」的确认标识。
+    ///
+    /// 非空表示窗口是 `java.startBrowserAwait` 打开的：书源脚本正阻塞在
+    /// `source_browser::await_external_window` 上，用户关窗后必须回传这个 id
+    /// 才能唤醒它，让脚本继续执行（抓 Cookie / 上传凭证 / 显示诊断页）。
+    ///
+    /// 与 `panel_id` 分开：那个是 iframe 面板的托管 id（面板要回传网页正文），
+    /// 这个是独立窗口的「关窗即完成」信号，两者语义和生命周期都不同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub await_panel_id: Option<String>,
 }
 
 thread_local! {
@@ -345,6 +355,7 @@ pub async fn handle_source_panel_bridge(
                 // 用对的 UA / 尺寸 / Cookie。
                 book_source_url: Some(entry.book_source_url.clone())
                     .filter(|u| !u.trim().is_empty()),
+                await_panel_id: None,
             }, entry.clone()).map_err(|e| e.to_string())?;
             Ok(json!(request))
         }

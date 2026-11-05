@@ -28,6 +28,11 @@ export interface ShowBrowserRequest {
    * 桌面宽度渲染，显示不全且无法下滑。
    */
   bookSourceUrl?: string | null
+  /**
+   * 等待确认的标识：有值时这个独立窗口是 `startBrowserAwait` 打开的，
+   * 窗口关闭后要回传「已完成」唤醒阻塞中的脚本（{@link AwaitExternalWindow}）。
+   */
+  awaitPanelId?: string | null
 }
 
 export function closeSourcePanel(panelId: string) {
@@ -63,13 +68,22 @@ export async function evalSourceClick(params: {
  * 前端安全 SDK 主动检测「自己是否被 iframe 嵌入」，命中就把整页替换成
  * 「页面渲染安全策略拦截」。独立窗口里 `window.top === window`，检测不触发 ——
  * 与手机端 legado 直接 `loadUrl` 的行为一致。
+ *
+ * `awaitPanelId` 非空时表示这是 `startBrowserAwait` 打开的窗口：关窗后要通知
+ * 后端唤醒阻塞中的书源脚本（否则脚本会一直等）。
  */
-export function openExternalWindow(url: string, title?: string, bookSourceUrl?: string) {
+export function openExternalWindow(
+  url: string,
+  title?: string,
+  bookSourceUrl?: string,
+  awaitPanelId?: string,
+) {
   return invoke<void>('open_external_window', {
     url,
     title: title ?? null,
     // 传了书源地址才会在窗口关闭时把 Cookie 收进它的 jar —— 这是「窗口里登录
     // 成功、回到面板仍显示未登录」的解法。
     bookSourceUrl: bookSourceUrl ?? null,
+    awaitPanelId: awaitPanelId ?? null,
   })
 }

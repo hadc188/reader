@@ -1305,11 +1305,34 @@ const JS_PRELUDE: &str = r#"(function (g) {
     var target = S(u);
     var hasHtml = html !== undefined && html !== null && String(html) !== '';
     if (!hasHtml && /^https?:\/\//i.test(target)) {
+      // **必须真的等窗口关闭**再往下跑。
+      //
+      // legado 的 `startBrowserAwait` 是阻塞的：
+      // `SourceVerificationHelp.getVerificationResult` 在
+      // `while (getResult(...) == null) LockSupport.parkNanos(...)` 里一直等，
+      // 直到用户关掉 WebView 才继续。
+      //
+      // 书源就是按这个语义写的 —— 打开登录页 → 等用户登录 → 关窗 → 抓 Cookie。
+      // 早先这里只 `__open_external_window` 就立刻返回空 Resp，下一行立刻去抓
+      // Cookie，抓到的是未登录会话：番茄登录因此永远「保存失败」，诊断页也不
+      // 会出现（yckceo 8054）。
       try {
-        g.__open_external_window(target, S(title));
-        return Resp(JSON.stringify({ body: '', url: target, code: 200, headers: {} }));
+        var r = JSON.parse(g.__await_external_window(target, S(title)));
+        if (!r.ok) throw new Error(r.error || '网页操作未完成');
+        var pageUrl = r.url || target;
+        // `refetchAfterSuccess === false` 表示调用方只要「用户操作完」这个信号，
+        // 不需要重新抓页面正文。默认（true）才回读一次。
+        if (refetchAfterSuccess === false) {
+          return Resp(JSON.stringify({ body: '', url: pageUrl, code: 200, headers: {} }));
+        }
+        return J.connect(pageUrl);
       } catch (_e) {
-        // 打开失败就退回面板，至少用户还能看到页面（哪怕被拦）。
+        // 没有等待通道（未在登录上下文中）时退回「打开即返回」，
+        // 至少页面能给用户看到。
+        try {
+          g.__open_external_window(target, S(title));
+          return Resp(JSON.stringify({ body: '', url: target, code: 200, headers: {} }));
+        } catch (_e2) {}
       }
     }
     var r = JSON.parse(g.__await_browser(target, S(title), hasHtml ? String(html) : ''));
@@ -3023,6 +3046,7 @@ fn eval_js_inner_with_source(
                         panel_id: None,
                         external_window: false,
                         book_source_url,
+                        await_panel_id: None,
                     },
                 );
             }),
@@ -3033,15 +3057,32 @@ fn eval_js_inner_with_source(
                 html: (!html.is_empty()).then_some(html), preload_js: None,
                 options: None, await_result: true, panel_id: None, external_window: false,
                 book_source_url: Some(active_source().url).filter(|u| !u.trim().is_empty()),
+                await_panel_id: None,
             };
             match crate::service::source_browser::await_browser(request) {
                 Ok(page) => json!({"ok":true,"page":page}),
                 Err(error) => json!({"ok":false,"error":error}),
             }.to_string()
         }))?;
-        // `java.startBrowserAwait` 的**独立窗口**变体：只把链接交给独立窗口，
-        // 不等回数据。书源里「注册页 / 用户后台 / 网页版阅读」这类入口用它 ——
-        // 这些页面在 iframe 里会被 X-Frame-Options 或前端安全 SDK 拦掉。
+        // `java.startBrowserAwait(url, title)` 的**独立窗口**变体：打开窗口并
+        // **阻塞等待它关闭**（legado `SourceVerificationHelp.getVerificationResult`
+        // 的语义）。书源的典型用法是「打开登录页 → 等用户登录 → 关窗 → 抓 Cookie」，
+        // 日志/上传都必须发生在关窗之后。
+        globals.set("__await_external_window", Func::new(|url: String, title: String| {
+            let book_source_url = Some(active_source().url).filter(|u| !u.trim().is_empty());
+            let request = crate::service::book_service::ShowBrowserRequest {
+                url, title: (!title.is_empty()).then_some(title),
+                html: None, preload_js: None, options: None,
+                await_result: true, panel_id: None, external_window: true,
+                book_source_url,
+                // 由 `await_external_window` 内部生成并填回，前端据此在关窗时唤醒。
+                await_panel_id: None,
+            };
+            match crate::service::source_browser::await_external_window(request) {
+                Ok(page) => json!({"ok":true,"url":page.url}).to_string(),
+                Err(error) => json!({"ok":false,"error":error}).to_string(),
+            }
+        }))?;
         globals.set("__open_external_window", Func::new(|url: String, title: String| {
             // 书源地址**必须**带上：前端把它转给 `open_external_window`，
             // 窗口据此套用书源的 UA、按移动/桌面选尺寸、注入已有 Cookie。
@@ -3053,6 +3094,7 @@ fn eval_js_inner_with_source(
                 html: None, preload_js: None, options: None,
                 await_result: false, panel_id: None, external_window: true,
                 book_source_url,
+                await_panel_id: None,
             };
             match crate::service::source_browser::request_external_window(request.clone()) {
                 Ok(()) => json!({"ok":true}).to_string(),

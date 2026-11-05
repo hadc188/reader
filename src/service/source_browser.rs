@@ -134,6 +134,79 @@ pub fn request_external_window(request: ShowBrowserRequest) -> Result<(), String
         .ok_or_else(|| "此操作需要先打开书源登录窗口".to_string())?;
     (context.handler)(request)
 }
+
+/// 打开独立窗口并**等它关闭**，再让 JS 继续执行。
+///
+/// 这是 `java.startBrowserAwait(url, title)` 的语义（legado 的
+/// `SourceVerificationHelp.getVerificationResult`）：脚本会一直阻塞，直到用户
+/// 把窗口关掉，然后才继续往下跑。
+///
+/// ## 为什么必须真的等
+///
+/// 书源 8054 的番茄登录就是典型用法：
+///
+/// ```js
+/// jv.startBrowserAwait('https://fanqienovel.com/', '番茄登录（登录完成后返回）');
+/// return _dpFqGrabSave(jv, ckObj);   // ← 抓 cookie 并上传
+/// ```
+///
+/// 如果不等（之前是 fire-and-forget），用户在窗口里还没登录，下一行就已经去
+/// 抓 cookie 了 —— 抓到的是空会话，上传失败，那个「番茄凭证抓取诊断」页面
+/// 自然也不会出现。手机端能正常工作，正是因为 legado 在那里阻塞等待。
+///
+/// 与 [`await_browser`] 的区别：那个等的是**iframe 面板**回传网页正文；
+/// 这个等的是**独立窗口关闭**，不读回数据（脚本要的是窗口里产生的 Cookie，
+/// 不是页面文本）。
+pub fn await_external_window(request: ShowBrowserRequest) -> BrowserReply {
+    let context = BROWSER_CONTEXT.with(|cell| cell.borrow().clone())
+        .ok_or_else(|| "此操作需要打开书源登录窗口后确认网页结果".to_string())?;
+    let await_panel_id = format!("external-{}", uuid::Uuid::new_v4());
+    let mut request = request;
+    request.external_window = true;
+    request.await_result = true;
+    // 前端读这个字段：非空表示脚本正等这个窗口关闭，关窗要唤醒。
+    request.await_panel_id = Some(await_panel_id.clone());
+    let (sender, receiver) = mpsc::sync_channel(1);
+    PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(await_panel_id.clone(), sender);
+    struct PendingPanel(String);
+    impl Drop for PendingPanel {
+        fn drop(&mut self) {
+            PENDING
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.0);
+        }
+    }
+    let _pending = PendingPanel(await_panel_id.clone());
+    // 投递给前端（前端收到后开窗口）。失败说明没有前端在听 —— 直接返回，
+    // 别让脚本空等 30 分钟。
+    (context.handler)(request)?;
+    // 与 `await_browser` 同一量级的超时：用户可能把窗口晾很久。
+    match receiver.recv_timeout(Duration::from_secs(30 * 60)) {
+        Ok(outcome) => outcome,
+        Err(_) => Err("网页操作已结束或等待超时".to_string()),
+    }
+}
+
+/// 独立窗口关闭时调用，唤醒 [`await_external_window`] 的等待方。
+///
+/// 窗口不读回网页正文，所以这里用空 body 的 [`BrowserPage`] 表示「用户已完成
+/// 操作」。调用方拿到后自己去读 Cookie（那才是脚本要的东西）。
+pub fn complete_external_window(panel_id: &str, url: &str) {
+    let sender = PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(panel_id);
+    if let Some(sender) = sender {
+        let _ = sender.send(Ok(BrowserPage {
+            url: url.to_string(),
+            body: String::new(),
+        }));
+    }
+}
 pub fn complete_browser(panel_id: &str, page: BrowserPage) -> Result<(), String> {
     if page.body.trim().is_empty() {
         return Err("网页尚未加载完成，请稍后确认".to_string());

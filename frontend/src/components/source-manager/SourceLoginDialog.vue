@@ -154,10 +154,12 @@ function showBrowser(request: ShowBrowserRequest, current: number) {
     if (current !== generation || !props.modelValue) return
     // 优先用后端回传的书源地址（它就是发起这次脚本调用的那个源），
     // 再退回对话框自身持有的源。
+    // `awaitPanelId` 非空时表示脚本正在等这个窗口关闭，关窗要唤醒它。
     void openExternalWindow(
       request.url,
       request.title || '书源网页',
       request.bookSourceUrl || props.source?.bookSourceUrl,
+      request.awaitPanelId || undefined,
     )
       .catch((err) => notify(err instanceof Error ? err.message : '打开窗口失败', 'error'))
     return

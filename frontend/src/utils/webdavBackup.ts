@@ -31,6 +31,7 @@ import type {
 } from '../api/backup'
 import type { BackupArchiveFile } from '../api/webdav'
 import type { Book, BookGroup, Bookmark, BookSource, ReplaceRule, RssSource } from '../types'
+import { getSourceCandidateCache } from './sourceCandidateCache'
 
 const BACKUP_VERSION = 2
 /**
@@ -362,6 +363,10 @@ async function clearCurrentData() {
       : Promise.resolve(),
     // 书源没有「按列表删」的接口, 直接整表清空。
     deleteAllBookSources(),
+    // 书源整表清空后，详情页/换源面板的「可读书源」候选缓存全部失效
+    // （签名是对旧书源清单算的）。这里整份丢掉 —— 这是少见的**全量**变更，
+    // 单删/启用/停用都只让对应条目的签名自然对不上即可，不必清空。
+    Promise.resolve().then(() => getSourceCandidateCache().clear()),
     // 自定义字体此前完全没清: import_custom_fonts 只 fs::write, 不同名的旧字体会
     // 一直留在字体目录里, 继续出现在字体列表里。
     clearCustomFonts(),

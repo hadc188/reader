@@ -58,11 +58,14 @@ export interface SourceCandidateCache {
   get(bookKey: string): SourceCandidateCacheEntry | undefined
   /** 写入某本书的缓存；同一本书只保留一条（旧的签名直接被顶掉）。 */
   set(bookKey: string, catalogSignature: string, books: SearchBook[], complete?: boolean): void
-  /** 丢弃全部缓存。 */
+  /** 丢弃某本书的缓存（这本书被删掉/移出书架时调用）。返回是否真的删了。 */
+  delete(bookKey: string): boolean
+  /** 丢弃全部缓存（书源被整体清空/批量导入这类全量变更时调用）。 */
   clear(): void
   /** 判断一条缓存是否与当前书源清单相符。 */
   matches(entry: SourceCandidateCacheEntry, catalogSignature: string): boolean
   isStale(entry: SourceCandidateCacheEntry): boolean
+  /** 当前有效的条目数（已剔除过期项）。 */
   size(): number
 }
 
@@ -76,6 +79,26 @@ export function createSourceCandidateCache(
   const storageKey = options.storageKey ?? SOURCE_CANDIDATE_STORAGE_KEY
 
   const entries = new Map<string, SourceCandidateCacheEntry>()
+
+  /** 清掉所有过期记录。
+   *
+   *  之前只有 LRU（20 条）一个上限，`isStale()` 算出来的过期只用于改提示文案，
+   *  数据本身永远不删 —— 于是几个月前点开过的书会一直躺在 localStorage 里，
+   *  直到被第 21 本挤掉。这里在启动（hydrate）与写入（set）时顺手回收，
+   *  保证「存在缓存里的一定还在保质期内」，口径与 `searchSessionCache` 一致。
+   *
+   *  没有定时器：不需要为此养一个 `setInterval` 拖住事件循环，这两个时机足够。 */
+  function pruneExpired() {
+    const cutoff = now() - ttlMs
+    let removed = false
+    for (const [key, entry] of entries) {
+      if (entry.savedAt <= cutoff) {
+        entries.delete(key)
+        removed = true
+      }
+    }
+    return removed
+  }
 
   /** 把内存里的内容整份写回存储。
    *
@@ -124,12 +147,17 @@ export function createSourceCandidateCache(
           complete: entry.complete !== false,
         })
       }
-      // 恢复时也按 LRU 上限裁一刀: 旧版本可能留下超量记录。
+      // 恢复时先清过期项，再按 LRU 上限裁一刀（旧版本可能留下超量记录）。
+      // 顺序不能反：过期的旧记录不该占着名额把还有效的挤掉。
+      let pruned = pruneExpired()
       while (entries.size > limit) {
         const oldest = entries.keys().next().value
         if (oldest === undefined) break
         entries.delete(oldest)
+        pruned = true
       }
+      // 删过东西就落一次盘，免得 localStorage 里继续留着这些已失效的条目。
+      if (pruned) persist()
     } catch {
       entries.clear()
     }
@@ -151,6 +179,8 @@ export function createSourceCandidateCache(
       // 只缓存非空结果：一条都没搜到通常意味着当时的网络/源站异常，缓存它
       // 会让用户下次打开看到「未找到其他书源」，反而更困惑。
       if (!books.length) return
+      // 先清过期项，别让它们占着 LRU 名额把刚搜到的结果挤出去。
+      pruneExpired()
       entries.delete(bookKey)
       entries.set(bookKey, {
         bookKey,
@@ -165,6 +195,13 @@ export function createSourceCandidateCache(
         entries.delete(oldest)
       }
       persist()
+    },
+
+    delete(bookKey) {
+      const existed = entries.delete(bookKey)
+      // 只有真删到东西才落盘：删书是批量操作，避免对每条不存在的记录都写一次。
+      if (existed) persist()
+      return existed
     },
 
     clear() {
@@ -186,6 +223,8 @@ export function createSourceCandidateCache(
     },
 
     size() {
+      // 语义是「当前有效条目数」，所以先清过期项。
+      if (pruneExpired()) persist()
       return entries.size
     },
   }

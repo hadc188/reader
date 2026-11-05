@@ -23,6 +23,7 @@ import {
 } from '../utils/bookshelfSort'
 import { clearRecentReadBooks, getRecentReadBookKey, loadRecentReadBooks, removeRecentReadBook } from '../utils/recentBooks'
 import { getSearchSessionCache } from '../utils/searchSessionCache'
+import { getSourceCandidateCache, sourceCandidateBookKey } from '../utils/sourceCandidateCache'
 
 /** 书架排序方式的存储键。与 Legado 的 `bookshelfSort` 偏好同名同义。 */
 const BOOK_SORT_KEY = 'bookshelf-sort'
@@ -112,6 +113,16 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   async function removeBook(book: Book) {
     await apiDeleteBook(book)
     books.value = books.value.filter((b) => b.bookUrl !== book.bookUrl)
+    // 书都删了，「可读书源」候选缓存没有继续留着的理由：它只服务于详情页/
+    // 换源面板，而那两处只会为仍在书架（或刚搜到）的书打开。不清的话它会一直
+    // 占着 LRU 名额，直到被别的书挤掉 —— 属于「不及时清理」。
+    // 键必须与详情页同源（`sourceCandidateBookKey`），否则删不到同一条。
+    getSourceCandidateCache().delete(sourceCandidateBookKey({
+      name: book.name,
+      author: book.author,
+      bookUrl: book.bookUrl,
+      origin: book.origin,
+    }))
     await refreshRecentBooks()
   }
 
@@ -353,8 +364,20 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
       .map(b => ({ bookUrl: b.bookUrl, origin: b.origin }))
     
     if (toDelete.length === 0) return
+    // 删除前先记下被删的书：清候选缓存需要 name/author/bookUrl/origin 全套，
+    // 而 `apiDeleteBooks` 之后 books 里就查不到了。
+    const removedBooks = books.value.filter(b => selectedBookUrls.value.has(b.bookUrl))
     await apiDeleteBooks(toDelete as Book[])
     books.value = books.value.filter(b => !selectedBookUrls.value.has(b.bookUrl))
+    const candidateCache = getSourceCandidateCache()
+    for (const book of removedBooks) {
+      candidateCache.delete(sourceCandidateBookKey({
+        name: book.name,
+        author: book.author,
+        bookUrl: book.bookUrl,
+        origin: book.origin,
+      }))
+    }
     clearSelection()
   }
 

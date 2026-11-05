@@ -161,7 +161,9 @@ describe('sourceCandidateCache', () => {
         ],
       }),
     })
-    const cache = createSourceCandidateCache({ storage })
+    // 注入时钟：这条只关心「结构不合法」的记录被丢弃，与 TTL 无关。
+    // 用真实时钟的话 savedAt: 1 早就过期了，会顺便被过期清理删掉而误判。
+    const cache = createSourceCandidateCache({ storage, now: () => 1, ttlMs: 1000 })
     expect(cache.size()).toBe(1)
     expect(cache.get('ok')!.books).toHaveLength(1)
   })
@@ -180,6 +182,86 @@ describe('sourceCandidateCache', () => {
     const cache = createSourceCandidateCache({ storage: null })
     cache.set('书A', 'sig', [book('https://a.com')])
     expect(cache.get('书A')!.books).toHaveLength(1)
+  })
+})
+
+describe('过期与删除（issue: 这缓存的清理是否及时）', () => {
+  it('prunes expired entries on write so they stop taking LRU slots', () => {
+    // 之前只有 LRU 上限，`isStale()` 只用来改提示文案、数据永远不删，
+    // 于是几个月前点开过的书会一直躺在 localStorage 里。
+    let clock = 0
+    const { storage, data } = memoryStorage()
+    const cache = createSourceCandidateCache({ storage, ttlMs: 1000, now: () => clock })
+
+    cache.set('旧书', 'sig', [book('https://old.com')])
+    clock = 5000
+    cache.set('新书', 'sig', [book('https://new.com')])
+
+    expect(cache.get('旧书')).toBeUndefined()
+    expect(cache.get('新书')).toBeDefined()
+    // 过期项也要从存储里消失，不能只在内存里删。
+    const persisted = JSON.parse(data.get(SOURCE_CANDIDATE_STORAGE_KEY)!)
+    expect(persisted.entries.map((e: { bookKey: string }) => e.bookKey)).toEqual(['新书'])
+  })
+
+  it('drops expired entries when hydrating from storage', () => {
+    // 关掉应用放几天再打开：启动时就把过期项清掉，并回写存储。
+    const old = { bookKey: '旧书', catalogSignature: 's', savedAt: 0, books: [book('https://a.com')], complete: true }
+    const { storage, data } = memoryStorage({
+      [SOURCE_CANDIDATE_STORAGE_KEY]: JSON.stringify({ version: 1, entries: [old] }),
+    })
+
+    const cache = createSourceCandidateCache({
+      storage,
+      ttlMs: 1000,
+      now: () => 999999,
+    })
+
+    expect(cache.size()).toBe(0)
+    // hydrate 时删过东西就要回写，否则过期条目会一直躺在 localStorage 里。
+    expect(JSON.parse(data.get(SOURCE_CANDIDATE_STORAGE_KEY)!).entries).toHaveLength(0)
+  })
+
+  it('delete() removes one book and persists immediately', () => {
+    // 删书时调用：这本书的候选缓存没有继续留着的理由。
+    const { storage, data } = memoryStorage()
+    const cache = createSourceCandidateCache({ storage })
+    cache.set('书A', 'sig', [book('https://a.com')])
+    cache.set('书B', 'sig', [book('https://b.com')])
+
+    expect(cache.delete('书A')).toBe(true)
+    expect(cache.get('书A')).toBeUndefined()
+    expect(cache.get('书B')).toBeDefined()
+
+    const persisted = JSON.parse(data.get(SOURCE_CANDIDATE_STORAGE_KEY)!)
+    expect(persisted.entries.map((e: { bookKey: string }) => e.bookKey)).toEqual(['书B'])
+  })
+
+  it('delete() reports false for an unknown key and does not rewrite storage', () => {
+    // 批量删书时会逐本调用；对不存在的记录不该每次都写一次盘。
+    const { storage, data } = memoryStorage()
+    const cache = createSourceCandidateCache({ storage })
+    cache.set('书A', 'sig', [book('https://a.com')])
+    const before = data.get(SOURCE_CANDIDATE_STORAGE_KEY)
+
+    expect(cache.delete('不存在')).toBe(false)
+    expect(data.get(SOURCE_CANDIDATE_STORAGE_KEY)).toBe(before)
+  })
+
+  it('delete() uses the same key helper as the detail modal', () => {
+    // 键口径必须两处一致，否则删不到同一条 —— 这里锁住 helper 的输出。
+    const key = sourceCandidateBookKey({
+      name: '遮天',
+      author: '辰东',
+      bookUrl: 'https://x.com/1',
+      origin: 'https://x.com',
+    })
+    const { storage } = memoryStorage()
+    const cache = createSourceCandidateCache({ storage })
+    cache.set(key, 'sig', [book('https://x.com')])
+
+    expect(cache.delete(key)).toBe(true)
+    expect(cache.size()).toBe(0)
   })
 })
 

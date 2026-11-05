@@ -108,6 +108,46 @@ describe('reader local txt chapters', () => {
     })
   })
 
+  it('lets an empty volume chapter through instead of reporting a parse error', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(false)
+    readerStore.book = {
+      name: '本地书',
+      author: '本地导入',
+      origin: 'local-txt',
+      bookUrl: 'local-txt:abc123',
+    }
+    readerStore.chapters = [
+      { title: '第一卷', url: 'local-txt:abc123#0', index: 0, isVolume: true },
+    ]
+    vi.mocked(getBookContent).mockResolvedValue('')
+
+    // 卷标题章正文天然为空，必须原样返回空串交给渲染层画标题页，
+    // 而不是抛「书源正文解析为空」（issue #33）。
+    await expect(readerStore.fetchChapterContent(0)).resolves.toBe('')
+  })
+
+  it('still rejects an empty chapter that is not a volume', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    // 在线状态下才会暴露原始错误；离线分支会先把任何错误改写成
+    // 「当前处于离线状态」，测不到这里要验证的判定。
+    appStore.setOnlineStatus(true)
+    readerStore.book = {
+      name: '网络书',
+      author: '作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'chapter-0', index: 0 },
+    ]
+    vi.mocked(getBookContent).mockResolvedValue('   ')
+
+    await expect(readerStore.fetchChapterContent(0)).rejects.toThrow('正文解析为空')
+  })
+
   it('preloads nearby chapters and reuses the completed content when switching', async () => {
     const appStore = useAppStore()
     const readerStore = useReaderStore()

@@ -213,3 +213,149 @@ async fn saving_same_named_local_txt_books_keeps_distinct_book_urls() {
 
     let _ = std::fs::remove_dir_all(storage_dir);
 }
+
+/// issue #33：`第一卷` 单独成章，但正文为空 —— 必须标 isVolume，
+/// 否则前端会把它当成"书源正文解析为空"报错。
+#[test]
+fn txt_parser_marks_volume_headings_as_volume_chapters() {
+    let text = "序章正文。\n\n第一卷\n\n第一章 初见\n第一章正文。\n\n第二章 重逢\n第二章正文。\n";
+    let chapters = parse_txt_chapters("local-txt:volume", text);
+
+    assert_eq!(chapters.len(), 4);
+    assert_eq!(chapters[0].title, "序章");
+    assert!(!chapters[0].is_volume);
+
+    assert_eq!(chapters[1].title, "第一卷");
+    assert!(chapters[1].is_volume, "卷标题必须标 isVolume");
+    assert_eq!(chapters[1].content, "", "卷标题章正文为空");
+
+    assert_eq!(chapters[2].title, "第一章 初见");
+    assert!(!chapters[2].is_volume, "普通章节不能被误标成卷");
+}
+
+/// 卷名带副标题（`第一卷 风起云涌`）同样要认出来。
+#[test]
+fn txt_parser_marks_volume_with_subtitle() {
+    let text = "第一卷 风起云涌\n\n第一章 初见\n正文。\n";
+    let chapters = parse_txt_chapters("local-txt:volume-sub", text);
+
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0].title, "第一卷 风起云涌");
+    assert!(chapters[0].is_volume);
+}
+
+/// 部/篇/集 也属于卷级标题。
+#[test]
+fn txt_parser_marks_other_volume_units() {
+    for title in ["第二部", "第三篇", "第四集", "卷五"] {
+        let text = format!("{title}\n\n第一章 正文\n内容。\n");
+        let chapters = parse_txt_chapters("local-txt:unit", &text);
+        assert!(chapters[0].is_volume, "{title} 应识别为卷级标题");
+    }
+}
+
+/// 空正文但标题不是卷级（`第一章` 后紧跟 `第二章`）：不能标卷，
+/// 否则真正的缺内容会被伪装成正常的卷标题页。
+#[test]
+fn txt_parser_does_not_mark_empty_chapter_as_volume() {
+    let text = "第一章 空章\n第二章 正文\n第二章内容。\n";
+    let chapters = parse_txt_chapters("local-txt:empty-not-volume", text);
+
+    assert_eq!(chapters.len(), 2);
+    assert!(!chapters[0].is_volume, "章级空章节不是卷标签");
+    assert_eq!(chapters[0].content, "");
+}
+
+/// 带副标题的卷名后面若跟着引子，正文不空 —— 此时照常显示文字，不算卷页。
+#[test]
+fn txt_parser_volume_with_intro_is_not_empty() {
+    let text = "第一卷 风起\n本卷引子。\n\n第一章 初见\n正文。\n";
+    let chapters = parse_txt_chapters("local-txt:volume-intro", text);
+
+    assert_eq!(chapters[0].title, "第一卷 风起");
+    assert!(!chapters[0].is_volume, "有正文时不该被当成空白卷页");
+    assert_eq!(chapters[0].content.trim(), "本卷引子。");
+}
+
+/// `【第一卷】` 这类成对括号写法要能识别成标题（issue #33 的次要问题）。
+/// 修前它会被当成正文吞进上一章。
+#[test]
+fn txt_parser_recognises_bracketed_headings() {
+    let text = "序章正文。\n\n【第一卷】\n\n第一章 初见\n第一章正文。\n";
+    let chapters = parse_txt_chapters("local-txt:bracket", text);
+
+    assert_eq!(chapters.len(), 3, "【第一卷】必须单独成章，不能被吞进序章");
+    assert_eq!(chapters[0].title, "序章");
+    assert_eq!(chapters[0].content.trim(), "序章正文。");
+    assert_eq!(chapters[1].title, "【第一卷】");
+    assert!(chapters[1].is_volume, "括号包裹的卷名同样是卷");
+    assert_eq!(chapters[1].content, "");
+    assert_eq!(chapters[2].title, "第一章 初见");
+}
+
+/// 括号包裹的**普通**章节也要认（`（第二章 初见）`），但不标卷。
+#[test]
+fn txt_parser_recognises_bracketed_normal_chapters() {
+    let text = "（第一章 开始）\n正文一。\n（第二章 继续）\n正文二。\n";
+    let chapters = parse_txt_chapters("local-txt:bracket-ch", text);
+
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0].title, "（第一章 开始）");
+    assert!(!chapters[0].is_volume);
+    assert_eq!(chapters[0].content.trim(), "正文一。");
+}
+
+/// 正文里夹着的括号提示语不能误判成分章。
+#[test]
+fn txt_parser_ignores_bracketed_prose() {
+    let text = "第一章 开始\n他看了一眼【此处删除】然后继续。\n第二章 结束\n正文二。\n";
+    let chapters = parse_txt_chapters("local-txt:bracket-prose", text);
+
+    assert_eq!(chapters.len(), 2, "正文中的【此处删除】不是标题");
+    assert!(chapters[0].content.contains("【此处删除】"));
+}
+/// 旧版导入的书（chapters.json 里没有 isVolume）读出来也要能识别卷章，
+/// 否则用户必须删书重导才能修好 issue #33。
+#[tokio::test]
+async fn legacy_index_without_is_volume_is_upgraded_on_read() {
+    let storage_dir = std::env::temp_dir().join(format!(
+        "reader-rust-local-txt-legacy-volume-{}",
+        std::process::id()
+    ));
+    if storage_dir.exists() {
+        std::fs::remove_dir_all(&storage_dir).unwrap();
+    }
+    let service =
+        reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
+
+    let text = "序章正文。\n\n第一卷\n\n第一章 初见\n第一章正文。\n";
+    let book = service
+        .import_txt_book("alice", "旧书.txt", text.as_bytes())
+        .await
+        .unwrap();
+
+    // 把 chapters.json 改写成旧格式：抹掉 isVolume 字段。
+    let book_dir = storage_dir
+        .join("data")
+        .join("alice")
+        .join("local_books")
+        .join(book.book_url.strip_prefix("local-txt:").unwrap());
+    let index_path = book_dir.join("chapters.json");
+    let raw = std::fs::read_to_string(&index_path).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    for chapter in value["chapters"].as_array_mut().unwrap() {
+        chapter.as_object_mut().unwrap().remove("isVolume");
+    }
+    std::fs::write(&index_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    let chapters = service
+        .get_chapter_list("alice", &book.book_url)
+        .await
+        .unwrap();
+    let volume = chapters.iter().find(|c| c.title == "第一卷").unwrap();
+    assert!(volume.is_volume, "旧索引里的卷章必须在读取时补标");
+    let normal = chapters.iter().find(|c| c.title == "第一章 初见").unwrap();
+    assert!(!normal.is_volume);
+
+    let _ = std::fs::remove_dir_all(storage_dir);
+}

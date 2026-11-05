@@ -22,6 +22,7 @@ pub struct ParsedTxtChapter {
     pub start: usize,
     pub end: usize,
     pub content: String,
+    pub is_volume: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +33,10 @@ struct StoredTxtChapter {
     index: i32,
     start: usize,
     end: usize,
+    /// 旧版索引里没有这个字段（issue #33 之前），缺省按 false 读，
+    /// 不要让它把整份 `chapters.json` 变成无法反序列化。
+    #[serde(default)]
+    is_volume: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +70,13 @@ pub struct TxtChapterRange {
     pub index: i32,
     pub start: usize,
     pub end: usize,
+    /// 卷标题（`第一卷` / `第二部` 之类），正文天然为空。
+    ///
+    /// 这类行要单独成章用于分卷导航，但**不能**被当成"正文解析失败"。legado 用
+    /// 同一个概念（`BookChapter.isVolume`）把它渲染成居中的大标题空白页；
+    /// 缺了这个标记，空正文会一路冒到前端，变成「书源正文解析为空」的假报错
+    /// （issue #33）。
+    pub is_volume: bool,
 }
 
 pub fn parse_txt_chapters(book_url: &str, text: &str) -> Vec<ParsedTxtChapter> {
@@ -77,6 +89,7 @@ pub fn parse_txt_chapters(book_url: &str, text: &str) -> Vec<ParsedTxtChapter> {
             index: range.index,
             start: range.start,
             end: range.end,
+            is_volume: range.is_volume,
         })
         .collect()
 }
@@ -96,7 +109,7 @@ pub fn parse_txt_chapter_ranges(book_url: &str, text: &str) -> Vec<TxtChapterRan
         let raw_line = line.trim_end_matches(['\r', '\n']);
         let title = raw_line.trim();
         let content_len = raw_line.len();
-        if is_chapter_heading(title, &heading_re) {
+        if is_chapter_heading(title, &heading_re) || is_bracketed_heading(title, &heading_re) {
             let leading_ws = raw_line.len().saturating_sub(raw_line.trim_start().len());
             headings.push((offset + leading_ws, offset + content_len, title.to_string()));
         }
@@ -106,7 +119,7 @@ pub fn parse_txt_chapter_ranges(book_url: &str, text: &str) -> Vec<TxtChapterRan
     if offset < text.len() {
         let raw_line = &text[offset..];
         let title = raw_line.trim();
-        if is_chapter_heading(title, &heading_re) {
+        if is_chapter_heading(title, &heading_re) || is_bracketed_heading(title, &heading_re) {
             let leading_ws = raw_line.len().saturating_sub(raw_line.trim_start().len());
             headings.push((offset + leading_ws, text.len(), title.to_string()));
         }
@@ -125,6 +138,7 @@ pub fn parse_txt_chapter_ranges(book_url: &str, text: &str) -> Vec<TxtChapterRan
             index: 0,
             start: 0,
             end: trim_chapter_end(text, first_start),
+            is_volume: false,
         });
     }
 
@@ -136,12 +150,17 @@ pub fn parse_txt_chapter_ranges(book_url: &str, text: &str) -> Vec<TxtChapterRan
             .unwrap_or(text.len());
         let end = trim_chapter_end(text, next_start).max(content_start);
         let index = chapters.len() as i32;
+        // 只有"标题看起来是卷 + 区间里确实没有正文"才算卷章。单看空正文不够：
+        // 「第一章」后面紧跟「第二章」时前一章也是空的，那多半是源文件本身缺内容，
+        // 不能悄悄当成卷标题放过去（用户会以为是排版问题而不是书的问题）。
+        let is_volume = end == content_start && is_volume_title(title);
         chapters.push(TxtChapterRange {
             title: title.clone(),
             url: build_chapter_url(book_url, index as usize),
             index,
             start: content_start,
             end,
+            is_volume,
         });
         if *title_start >= text.len() {
             break;
@@ -263,6 +282,7 @@ impl LocalTxtBookService {
                     index: chapter.index,
                     start: chapter.start,
                     end: chapter.end,
+                    is_volume: chapter.is_volume,
                 })
                 .collect(),
         };
@@ -321,6 +341,7 @@ impl LocalTxtBookService {
                 title: chapter.title,
                 url: chapter.url,
                 index: chapter.index,
+                is_volume: chapter.is_volume,
                 ..BookChapter::default()
             })
             .collect())
@@ -369,7 +390,17 @@ impl LocalTxtBookService {
         let data = fs::read_to_string(path)
             .await
             .map_err(map_local_txt_read_error)?;
-        serde_json::from_str(&data).map_err(|e| AppError::BadRequest(e.to_string()))
+        let mut index: StoredTxtIndex =
+            serde_json::from_str(&data).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        // 旧版索引没有 isVolume（issue #33 之前导入的书）。这里按与分章时相同的
+        // 判据就地补标：空区间 + 卷级标题。不回写文件 —— 索引是只读缓存，回写会
+        // 引入并发写入与版本兼容问题，而每次读取重算的成本可以忽略。
+        for chapter in index.chapters.iter_mut() {
+            if !chapter.is_volume && chapter.start >= chapter.end {
+                chapter.is_volume = is_volume_title(&chapter.title);
+            }
+        }
+        Ok(index)
     }
 }
 
@@ -380,11 +411,85 @@ fn fallback_range(book_url: &str, text: &str) -> Vec<TxtChapterRange> {
         index: 0,
         start: 0,
         end: text.len(),
+        is_volume: false,
     }]
 }
 
 fn chapter_heading_regex() -> Option<Regex> {
     Regex::new(r"^(?:第[\p{N}零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+[章节回卷部集篇]|卷[\p{N}零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+)(?:$|[\s:：、.．\-—].*|[^\s:：、.．\-—](?:.*[^。！？!?；;，,、])?)$").ok()
+}
+
+/// 整行被成对括号包住的标题，如 `【第一卷】`、`（第二章 初见）`、`「楔子」`。
+///
+/// 这类写法在中医/出版排版里很常见，裸正则因为开头是 `【` 匹配不上，整行会被
+/// 当成正文吞进上一章。legado 有对应规则（`特殊符号 标题(成对)`，默认关闭）；
+/// 这里只在**去掉括号后整行仍是一个标题**时才认，因此不会把 `【此处删除】`
+/// 这种夹在正文里的提示语误判成分章。
+fn is_bracketed_heading(line: &str, heading_re: &Regex) -> bool {
+    const PAIRS: &[(char, char)] = &[
+        ('【', '】'),
+        ('〔', '〕'),
+        ('〖', '〗'),
+        ('「', '」'),
+        ('『', '』'),
+        ('《', '》'),
+        ('〈', '〉'),
+        ('（', '）'),
+        ('(', ')'),
+        ('[', ']'),
+        ('［', '］'),
+    ];
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let Some(last) = line.chars().next_back() else {
+        return false;
+    };
+    if !PAIRS.iter().any(|(open, close)| *open == first && *close == last) {
+        return false;
+    }
+    // `【】` 里除了标题不该再有换行/多余空白，直接取内层再走一遍标题判定。
+    let inner = line[first.len_utf8()..line.len() - last.len_utf8()].trim();
+    !inner.is_empty() && is_chapter_heading(inner, heading_re)
+}
+
+/// 标题本身是不是"卷/部/篇/集"这一层，而不是具体的"章/回/节"。
+///
+/// 用来决定空正文的章节是**卷标题页**还是**真正的解析异常**：只有卷级标题
+/// 后面紧跟下一章（正文天然为空）才属于正常排版。
+fn is_volume_title(line: &str) -> bool {
+    // 先剥掉成对括号，`【第一卷】` 与 `第一卷` 判定一致。
+    let trimmed = line.trim();
+    let inner = trimmed
+        .strip_prefix(['【', '〔', '〖', '「', '『', '《', '〈', '（', '(', '[', '［'])
+        .and_then(|rest| {
+            rest.strip_suffix(['】', '〕', '〗', '」', '』', '》', '〉', '）', ')', ']', '］'])
+        })
+        .unwrap_or(trimmed);
+    let rest = inner.trim();
+    // 卷名可能带副标题（`第一卷 风起云涌`），只看开头那一段。
+    let head: String = rest
+        .chars()
+        .take_while(|ch| !ch.is_whitespace() && !matches!(ch, ':' | '：' | '、' | '.' | '．'))
+        .collect();
+    let is_digit = |ch: char| {
+        ch.is_ascii_digit()
+            || "零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟".contains(ch)
+    };
+    // 两种卷级写法都要认：
+    //   `第一卷` / `第二部` —— 序号在单位前面（末位是单位字）
+    //   `卷五`              —— 单位在序号前面（首位是单位字）
+    let chars: Vec<char> = head.chars().collect();
+    let ends_with_unit = chars
+        .last()
+        .is_some_and(|ch| matches!(ch, '卷' | '部' | '篇' | '集'));
+    let starts_with_unit = chars.first() == Some(&'卷');
+    if !ends_with_unit && !starts_with_unit {
+        return false;
+    }
+    // 必须有数字部分，否则「卷」单独一个字不认。
+    chars.iter().any(|ch| is_digit(*ch))
 }
 
 fn is_chapter_heading(line: &str, re: &Regex) -> bool {

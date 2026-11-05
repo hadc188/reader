@@ -1349,8 +1349,23 @@ const isPdfPageChapter = computed(
   () => isPdfBook(store.book) && (store.displayContent || '').includes(PDF_PAGE_ATTR),
 )
 
+/** 卷标题页只需要转义，不走 formatChapterHtml 的排版/清洗流程。 */
+function escapeHtml(text: string) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
 const formattedContent = computed(() => {
   if (isPdfPageChapter.value) return store.displayContent || ''
+  // 卷标题章（`第一卷` 之类）没有正文，渲染成居中大标题页 —— 与 legado 的
+  // `isVolumeTitle` 一致，也和 issue #33 里用户的期望一致。只在**确实没有正文**
+  // 时替换：卷标题后面若还跟着一段引子，照常显示那段文字。
+  if (store.currentChapter?.isVolume && !(store.displayContent || '').trim()) {
+    return `<div class="volume-title-page">${escapeHtml(store.currentChapter.title || '')}</div>`
+  }
   return formatChapterHtml(store.displayContent || '')
 })
 
@@ -4444,6 +4459,22 @@ watch(
   margin-bottom: 2em;
   text-align: center;
   line-height: 1.4;
+}
+
+/* 卷标题章（`第一卷` 之类）的空白页：正文区居中放大标题。
+   阅读页顶部本来就会显示章名，这里再居中强调一次是刻意的 —— 卷标题是一段
+   阅读的"封面"，与 legado 的 isVolumeTitle 渲染一致。 */
+.volume-title-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 55vh;
+  text-align: center;
+  font-size: 1.9em;
+  font-weight: 700;
+  line-height: 1.6;
+  letter-spacing: 0.08em;
+  opacity: 0.9;
 }
 
 /* 净化脚本未执行时的降级提示：低调但看得见，跟着正文字号走。 */

@@ -78,6 +78,11 @@ export interface BookChapter {
   title: string
   url: string
   index: number
+  /**
+   * 卷标题章（`第一卷` / `第二部` 之类）。这类章节正文天然为空，
+   * 阅读页应渲染成居中的大标题页，而不是报「正文解析为空」(issue #33)。
+   */
+  isVolume?: boolean
 }
 
 // ─── 书源 ───

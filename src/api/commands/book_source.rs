@@ -754,20 +754,28 @@ pub async fn open_external_window(
     // 否则书源脚本会挂满 30 分钟超时，后面「抓 Cookie / 上传凭证」全都不执行
     // （番茄登录的「保存失败」+ 诊断页不出现就是这么来的）。
     //
-    // 这段**无条件**注册：与 Cookie 回收无关，任何带 `awaitPanelId` 的窗口都要
-    // 通知。刻意放在 Cookie 回收之前 —— 那个分支只在传了书源地址时才走。
-    if let Some(panel_id) = await_panel_id
+    // **顺序很关键**：必须等窗口 Cookie 写回 jar **之后**再唤醒。
+    //
+    // 书源拿到唤醒信号后第一件事就是 `java.getCookie(url)` 去读 jar
+    // （番茄登录的 `_dpFqGrabCookie` 就是这样）。写回是异步的
+    // （`set_source_window_cookies(...).await`），若在 `Destroyed` 里就同步唤醒，
+    // 脚本会抢在写回之前读 jar —— 拿到空的 26 个域名，诊断页显示
+    // 「非空域名数: 0 / 26」，登录白做。
+    //
+    // 所以唤醒句柄先存起来，由 Cookie 回收分支在写回完成后再触发；没有书源
+    // 地址时（纯「看一眼就走」的窗口）退化为关窗即唤醒。
+    let wake_on_close = await_panel_id
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .map(str::to_string)
-    {
+        .map(str::to_string);
+    // 兜底：不回收 Cookie（没传书源地址）时，关窗就唤醒。
+    if let Some(panel_id) = wake_on_close.clone().filter(|_| {
+        book_source_url.as_deref().map(str::trim).unwrap_or("").is_empty()
+    }) {
         let watched = window.clone();
-        let panel_at_close = panel_id.clone();
         let notified = Arc::new(std::sync::atomic::AtomicBool::new(false));
         window.on_window_event(move |event| {
-            // `Destroyed` 覆盖所有关闭路径（用户点 X、`destroy()`、程序退出）；
-            // 它也可能是 `CloseRequested` 之后才到，所以用标志位保证只通知一次。
             if !matches!(event, tauri::WindowEvent::Destroyed) {
                 return;
             }
@@ -775,7 +783,7 @@ pub async fn open_external_window(
                 return;
             }
             let url = watched.url().map(|u| u.to_string()).unwrap_or_default();
-            crate::service::source_browser::complete_external_window(&panel_at_close, &url);
+            crate::service::source_browser::complete_external_window(&panel_id, &url);
         });
     }
 
@@ -785,6 +793,10 @@ pub async fn open_external_window(
         if !source_url.is_empty() {
             let service = Arc::clone(&state.book_service);
             let watched = window.clone();
+            // 关窗后要把「唤醒等待方」的信息带到 Cookie 写回完成之后。
+            // 用 Arc<Mutex<..>> 是因为 `on_window_event` 的闭包是 `Fn`（可能被
+            // 多次触发），而唤醒只能发生一次。
+            let wake_slot = Arc::new(std::sync::Mutex::new(wake_on_close.clone()));
             // 「已经处理过关闭」的标志。
             //
             // 有它兜底：即使某条路径仍然用 `close()`（会再触发一次
@@ -828,6 +840,7 @@ pub async fn open_external_window(
                 let target_for_read = source_url.clone();
                 let closing = watched.clone();
                 let cookies_for_read = std::sync::Arc::clone(&cookies);
+                let wake_for_read = std::sync::Arc::clone(&wake_slot);
                 let spawned = crate::service::webview_cookies::read_local_storage_async(
                     &watched,
                     move |storage| {
@@ -838,19 +851,38 @@ pub async fn open_external_window(
                         let _ = closing.destroy();
                         let cookies = std::sync::Arc::try_unwrap(cookies_for_read)
                             .unwrap_or_else(|shared| shared.as_ref().clone());
-                        persist_window_session(service_for_read, target_for_read, cookies, storage);
+                        let page_url = closing.url().map(|u| u.to_string()).unwrap_or_default();
+                        let wake = wake_for_read
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .take()
+                            .map(|panel_id| (panel_id, page_url));
+                        persist_window_session(
+                            service_for_read,
+                            target_for_read,
+                            cookies,
+                            storage,
+                            wake,
+                        );
                     },
                 );
                 if let Err(err) = spawned {
                     tracing::warn!(%err, "读取登录窗口 localStorage 失败");
+                    let page_url = watched.url().map(|u| u.to_string()).unwrap_or_default();
                     let _ = watched.destroy();
                     let fallback = std::sync::Arc::try_unwrap(cookies)
                         .unwrap_or_else(|shared| shared.as_ref().clone());
+                    let wake = wake_slot
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take()
+                        .map(|panel_id| (panel_id, page_url));
                     persist_window_session(
                         Arc::clone(&service),
                         source_url.clone(),
                         fallback,
                         Vec::new(),
+                        wake,
                     );
                 }
             });
@@ -861,13 +893,22 @@ pub async fn open_external_window(
 }
 
 /// 把独立窗口收到的 Cookie / localStorage 写回书源会话。
+///
+/// `wake_await` 非空时，写回**完成之后**唤醒阻塞中的书源脚本
+/// （`startBrowserAwait` 的等待方）。顺序不能颠倒：脚本被唤醒后立刻
+/// `java.getCookie(url)` 读 jar，早一步唤醒就会读到空会话。
 fn persist_window_session(
     service: Arc<crate::service::book_service::BookService>,
     source_url: String,
     cookies: Vec<crate::service::webview_cookies::CookieRecord>,
     storage: Vec<(String, String)>,
+    wake_await: Option<(String, String)>,
 ) {
     if cookies.is_empty() && storage.is_empty() {
+        // 没有可写的东西也要唤醒，否则脚本要空等 30 分钟。
+        if let Some((panel_id, url)) = wake_await {
+            crate::service::source_browser::complete_external_window(&panel_id, &url);
+        }
         return;
     }
     tauri::async_runtime::spawn(async move {
@@ -878,6 +919,10 @@ fn persist_window_session(
             Ok(0) => tracing::warn!("登录窗口未产生可写入的 Cookie"),
             Ok(count) => tracing::info!(count, "已把登录窗口的 Cookie 写回书源"),
             Err(err) => tracing::warn!(%err, "写入书源 Cookie 失败"),
+        }
+        // **写回之后**才唤醒等待方，保证脚本读到的是刚写进去的会话。
+        if let Some((panel_id, page_url)) = wake_await {
+            crate::service::source_browser::complete_external_window(&panel_id, &page_url);
         }
     });
 }

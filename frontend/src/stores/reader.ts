@@ -67,6 +67,11 @@ import {
   type ReadingPositionSnapshot,
 } from '../utils/readingPosition'
 import { compileReplaceRule, toSandboxRuleStep } from '../utils/replaceRuleRegex'
+import {
+  normalizeClickAreas,
+  scrollClickAreas,
+  type ClickAreaMap,
+} from '../utils/readerClickAreas'
 
 const READER_SESSION_KEY = 'reader-last-session'
 const READER_READ_HISTORY_PREFIX = 'reader-read-history:'
@@ -128,6 +133,13 @@ export interface ReadConfig {
   /** 自动阅读滚动速度, 像素/秒。 */
   autoScrollSpeed: number
   clickAction: 'next' | 'auto' | 'none'
+  /**
+   * 点击区域模式：`auto` 沿用「上下/左右三分区」的老手感，`custom` 用下面的
+   * `clickAreas` 九宫格。老存档没有这两个字段，读出来就是 `auto`，行为不变。
+   */
+  clickAreaMode: 'auto' | 'custom'
+  /** 九宫格每格的动作。`auto` 模式下不生效，但仍完整保存，切回 `custom` 不用重配。 */
+  clickAreas: ClickAreaMap
   selectAction: 'popup' | 'ignore'
   /** 简繁转换档位。'off' 表示原文直出（与手机端 legado 的「关闭」一致）。 */
   chineseMode: 'off' | 'simplified' | 'traditional'
@@ -164,6 +176,9 @@ const defaultConfig: ReadConfig = {
   animateDuration: 300,
   autoScrollSpeed: 30,
   clickAction: 'auto',
+  clickAreaMode: 'auto',
+  // 默认给「上下滚动」预设：默认阅读方式就是「上下滑动」，两者分区方向一致。
+  clickAreas: scrollClickAreas(),
   selectAction: 'ignore',
   chineseMode: 'simplified',
   enablePreload: true,
@@ -244,10 +259,18 @@ function loadConfig(): ReadConfig {
           || (typeof savedConfig.readerBackgroundImage === 'string' ? savedConfig.readerBackgroundImage : ''),
         readerImageOpacity: normalizeReaderBackgroundOpacity(savedConfig.readerImageOpacity),
         panelOpacity: normalizeReaderPanelOpacity(savedConfig.panelOpacity),
+        // 九宫格按当前底稿兜底：存档里缺格/脏值只影响那一格，不会整张失效。
+        clickAreaMode: savedConfig.clickAreaMode === 'custom' ? 'custom' : 'auto',
+        clickAreas: normalizeClickAreas(
+          savedConfig.clickAreas,
+          savedConfig.clickAreaMode === 'custom' ? scrollClickAreas() : defaultConfig.clickAreas,
+        ),
       }
     }
   } catch { /* ignore */ }
-  return { ...defaultConfig }
+  // clickAreas 是对象：浅拷贝 defaultConfig 会让这个实例和默认值指向同一份，
+  // 一旦有人就地改 config.clickAreas 就会污染所有后续实例。
+  return { ...defaultConfig, clickAreas: { ...defaultConfig.clickAreas } }
 }
 
 /* ─── Theme presets ─── */
@@ -852,9 +875,16 @@ export const useReaderStore = defineStore('reader', () => {
       readerImageOpacity: config.readerImageOpacity,
       panelOpacity: config.panelOpacity,
       fontColor: config.fontColor,
+      // 点击区域是「手感」偏好，和配色一样不属于排版参数：重置排版不该把用户
+      // 认真配好的九宫格打回默认。
+      clickAreaMode: config.clickAreaMode,
+      clickAreas: config.clickAreas,
     }
     Object.assign(config, defaultConfig)
     Object.assign(config, backgroundPreferences)
+    // clickAreas 是对象，Object.assign 会连引用一起带过来；深拷一份，避免设置面板
+    // 里逐格编辑时改到旧对象又被 resetConfig 读回去。
+    config.clickAreas = { ...backgroundPreferences.clickAreas }
     saveConfig()
   }
 

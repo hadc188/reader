@@ -516,20 +516,34 @@
             <label>点击翻页</label>
             <div class="segmented">
               <button
-                :class="{ on: config.clickAction === 'auto' }"
+                :class="{ on: config.clickAction === 'auto' && config.clickAreaMode === 'auto' }"
                 title="点击上方后退，点击下方前进，到章节边界时自动切换章节"
-                @click="store.updateConfig('clickAction', 'auto')"
+                @click="useDefaultClickArea('auto')"
               >自动</button>
               <button
-                :class="{ on: config.clickAction === 'next' }"
+                :class="{ on: config.clickAction === 'next' && config.clickAreaMode === 'auto' }"
                 title="点击正文上方或下方，都只向后阅读"
-                @click="store.updateConfig('clickAction', 'next')"
+                @click="useDefaultClickArea('next')"
               >仅下滚</button>
               <button
-                :class="{ on: config.clickAction === 'none' }"
+                :class="{ on: config.clickAction === 'none' && config.clickAreaMode === 'auto' }"
                 title="点击正文不执行翻页或滚动"
-                @click="store.updateConfig('clickAction', 'none')"
+                @click="useDefaultClickArea('none')"
               >禁用</button>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <label>点击区域</label>
+            <div class="click-area-entry">
+              <button
+                class="opt-btn wide"
+                type="button"
+                @click="emit('openClickArea')"
+              >{{ config.clickAreaMode === 'custom' ? '九宫格（自定义）' : '默认三分区' }}</button>
+              <span class="field-hint">
+                九宫格会铺满整个阅读页逐格指定动作；用它时上面的「点击翻页」不再生效。
+              </span>
             </div>
           </div>
 
@@ -1361,7 +1375,6 @@
     />
   </div>
 </template>
-
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useReaderStore, themePresets, nightThemeIndex, fontPresets } from '../../stores/reader'
@@ -1943,6 +1956,25 @@ const speechTestText = ref('他推开门，看见她站在窗边。“你来了�
 const httpTtsList = ref<HttpTts[]>([])
 const httpTtsLoading = ref(false)
 const showHttpTtsManager = ref(false)
+
+/**
+ * 「点击区域设置」是全屏铺在正文上的（手机端就是 `MATCH_PARENT` 对话框），
+ * 所以不能像引擎管理那样开在设置抽屉里 —— 抽屉本身只占侧边一条，看不出
+ * "点在屏幕哪个位置会命中哪格"。这里只负责请求，真正打开由 ReaderView 处理：
+ * 它会先收起抽屉，再挂上遮罩。
+ */
+const emit = defineEmits<{ openClickArea: [] }>()
+
+/**
+ * 「点击翻页」三个档位只在默认三分区下生效；用户点它们意味着想回默认分区，
+ * 所以顺手把 clickAreaMode 切回 auto，否则点了没反应（九宫格优先命中）。
+ */
+function useDefaultClickArea(action: 'auto' | 'next' | 'none') {
+  store.updateConfig('clickAction', action)
+  if (store.config.clickAreaMode !== 'auto') {
+    store.updateConfig('clickAreaMode', 'auto')
+  }
+}
 
 /** select 的 value 必须是字符串：存储里 id 可能是 number（后端下发）或 string。 */
 const selectedHttpTtsId = computed(() => (
@@ -3262,6 +3294,27 @@ onMounted(async () => {
   line-height: 1.55;
   color: var(--sk-muted);
 }
+
+/* 「点击区域」入口：按钮在上、说明在下，和宽度不受限的 setting-row 右列对齐。 */
+.click-area-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 0;
+}
+
+.click-area-entry .opt-btn.wide {
+  width: 100%;
+  text-align: center;
+}
+
+.field-hint {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--sk-muted);
+}
+
 
 .shortcut-hint {
   margin-top: -8px;

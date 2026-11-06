@@ -618,6 +618,33 @@ describe('reader local txt chapters', () => {
     expect(localStorage.removeItem).toHaveBeenCalledWith('reader-background-image')
   })
 
+  it('persists the click-area grid and keeps it across a layout reset', () => {
+    const readerStore = useReaderStore()
+    // 默认是「默认三分区」：老用户升级后手感不变。
+    expect(readerStore.config.clickAreaMode).toBe('auto')
+    expect(readerStore.config.clickAreas.mc).toBe('menu')
+
+    const custom = { ...readerStore.config.clickAreas, tl: 'bookmark' as const, br: 'tts' as const }
+    readerStore.updateConfig('clickAreas', custom)
+    readerStore.updateConfig('clickAreaMode', 'custom')
+
+    // 落盘的是普通 JSON，不带响应式代理。
+    const saved = JSON.parse(vi.mocked(localStorage.setItem).mock.calls.at(-1)![1] as string)
+    expect(saved.clickAreaMode).toBe('custom')
+    expect(saved.clickAreas.tl).toBe('bookmark')
+    expect(saved.clickAreas.br).toBe('tts')
+
+    // 重置排版参数不该把用户配好的点击区域打回默认。
+    readerStore.updateConfig('fontSize', 30)
+    readerStore.resetConfig()
+    expect(readerStore.config.fontSize).toBe(18)
+    expect(readerStore.config.clickAreaMode).toBe('custom')
+    expect(readerStore.config.clickAreas.tl).toBe('bookmark')
+    expect(readerStore.config.clickAreas.br).toBe('tts')
+    // 深拷过：改 config 里的对象不会改到之前那份。
+    expect(custom.tl).toBe('bookmark')
+  })
+
   it('updates the open-position snapshot when accepting newer Legado progress', async () => {
     const appStore = useAppStore()
     const readerStore = useReaderStore()

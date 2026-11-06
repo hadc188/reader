@@ -53,7 +53,10 @@
             :mini="appStore.miniMode"
             @jump-chapter="jumpFromCatalog"
           />
-          <ReadSettings v-else-if="store.activePanel === 'settings'" />
+          <ReadSettings
+            v-else-if="store.activePanel === 'settings'"
+            @open-click-area="openClickAreaSettings"
+          />
           <ReaderBookshelf v-else-if="store.activePanel === 'bookshelf'" />
           <ReaderSource v-else-if="store.activePanel === 'source'" />
           <ReplaceRuleManager v-else-if="store.activePanel === 'rule'" />
@@ -417,6 +420,12 @@
       :book="bookInfoBook"
     />
 
+    <!-- 点击区域设置：全屏九宫格直接铺在正文上（对齐手机端 MATCH_PARENT 对话框）。 -->
+    <ClickAreaSettings
+      v-if="showClickAreaSettings"
+      @close="showClickAreaSettings = false"
+    />
+
     <SourceBrowserPanel :request="sourceBrowser" :background="chromeTheme.popup" :color="chromeTheme.fontColor" @close="sourceBrowser = null" @toast="(message: string) => appStore.showToast(message)" @import-link="importFromLink" />
   </div>
 </template>
@@ -432,6 +441,10 @@ import { evalSourceClick, openExternalWindow, type ShowBrowserRequest } from '..
 import { applySystemTheme } from '../utils/systemUi'
 import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
+import {
+  clickAreaZoneAt,
+  type ClickAreaAction,
+} from '../utils/readerClickAreas'
 import {
   READER_HOVER_HIDE_DELAY_MS,
   isReaderHoverPointInZone,
@@ -491,6 +504,9 @@ const ReaderSource = defineAsyncComponent(() => import('../components/reader/Rea
 const ReplaceRuleManager = defineAsyncComponent(() => import('../components/reader/ReplaceRuleManager.vue'))
 const CacheManager = defineAsyncComponent(() => import('../components/reader/CacheManager.vue'))
 const BookDetailModal = defineAsyncComponent(() => import('../components/BookDetailModal.vue'))
+// 点击区域是全屏铺在正文上的面板，一进阅读页就要能秒开（从设置抽屉里点出来时
+// 抽屉会先收起，异步 chunk 还在路上会闪一下空屏），所以同步引入。
+import ClickAreaSettings from '../components/reader/ClickAreaSettings.vue'
 const ReaderTtsPanel = defineAsyncComponent(() => import('../components/reader/ReaderTtsPanel.vue'))
 /** 面板三态的运行时类型只用于本地状态标注, 与组件里的定义保持字面量一致即可。 */
 type TtsPanelState = 'expanded' | 'bar' | 'bubble'
@@ -630,7 +646,11 @@ function scheduleHoverHide() {
 
 /** 搜索/朗读/书详情/书源面板等浮层打开时不自动展开。 */
 function readerOverlayOpen() {
-  return showSearch.value || showTTSPanel.value || showBookInfo.value || !!sourceBrowser.value
+  return showSearch.value
+    || showTTSPanel.value
+    || showBookInfo.value
+    || !!sourceBrowser.value
+    || showClickAreaSettings.value
 }
 
 function handleReaderPointerMove(event: PointerEvent) {
@@ -853,6 +873,20 @@ const touchState = ref({
 })
 const showBookInfo = ref(false)
 const bookInfoBook = ref<Book | null>(null)
+/** 全屏「点击区域设置」是否展开。 */
+const showClickAreaSettings = ref(false)
+
+/**
+ * 从设置抽屉里请求打开点击区域设置。
+ *
+ * 先把抽屉收起来再挂面板：面板是半透明黑遮罩铺满整屏，抽屉还开着的话右半边会
+ * 露出设置页，看不到"点这里会命中哪一格"的真实布局（手机端这个对话框本来就是
+ * 从「更多设置」点出来后整屏盖住正文的）。
+ */
+function openClickAreaSettings() {
+  store.closePanel()
+  showClickAreaSettings.value = true
+}
 
 /* ─── 「加入书架」（issue #28 第 1 点）───
  *  场景：从书源搜索/发现页直接点进来阅读，这本书并没有进书架。
@@ -2900,6 +2934,17 @@ function handleGlobalClick(e: MouseEvent) {
   }
   if (store.isAutoScrolling) return
   
+  // 自定义九宫格优先：每格的动作由用户配置，命中后直接分派，不再走下面的
+  // 「上/下三分区」老逻辑。
+  if (config.value.clickAreaMode === 'custom') {
+    const zone = clickAreaZoneAt(
+      e.clientX / window.innerWidth,
+      e.clientY / window.innerHeight,
+    )
+    runClickAreaAction(config.value.clickAreas[zone])
+    return
+  }
+
   // 左右分页模式: 全平台按横向分区(左 30% 上一页, 右 30% 下一页),
   // 竖向分区只适用于滚动模式。
   if (isHorizontalPageMode.value) {
@@ -2920,6 +2965,57 @@ function handleGlobalClick(e: MouseEvent) {
     } else {
       clickZoneAction('menu')
     }
+  }
+}
+
+/**
+ * 九宫格动作分派。
+ *
+ * 与手机端 `ReadView.click(action)` 的 action 表对应（菜单/上一页/下一页/上一章/
+ * 下一章/书签/目录/搜索/听书/无操作）。这里刻意**复用**已有函数，不重写一套翻页
+ * 逻辑：`pageForward` 自己会处理左右分页、章节边界与自动滚动中断，直接调它即可。
+ */
+function runClickAreaAction(action: ClickAreaAction) {
+  switch (action) {
+    case 'menu':
+      if (showControls.value) collapseControlsByClick()
+      else showControls.value = true
+      return
+    case 'prevPage':
+      // 自动滚动中点击翻页区: 先中断补间并暂停自动滚动，静止后自动恢复
+      // (与老三分区的 clickZoneAction 走同一个入口)。
+      handleManualReadingInput()
+      pageBackward()
+      return
+    case 'nextPage':
+      handleManualReadingInput()
+      pageForward()
+      return
+    case 'prevChapter':
+      handleManualReadingInput()
+      void prevChapter()
+      return
+    case 'nextChapter':
+      handleManualReadingInput()
+      void nextChapter()
+      return
+    case 'bookmark':
+      void store.addBookmark(scrollContainerRef.value?.scrollTop || 0)
+        .then(() => appStore.showToast('已添加当前页书签', 'success'))
+        .catch(() => appStore.showToast('加入书签失败', 'error'))
+      return
+    case 'catalog':
+      store.openPanel('catalog')
+      return
+    case 'search':
+      openSearch()
+      return
+    case 'tts':
+      handleTTS()
+      return
+    case 'none':
+    default:
+      return
   }
 }
 
@@ -3154,6 +3250,12 @@ function handleTouchEnd(event: TouchEvent) {
       suppressNextTapUntil = Date.now() + 350
       if (showControls.value && !store.activePanel) {
         collapseControlsByClick()
+      } else if (config.value.clickAreaMode === 'custom') {
+        const zone = clickAreaZoneAt(
+          touch.clientX / window.innerWidth,
+          touch.clientY / window.innerHeight,
+        )
+        runClickAreaAction(config.value.clickAreas[zone])
       } else {
         const x = touch.clientX / window.innerWidth
         if (x < 0.3) {
@@ -3221,7 +3323,11 @@ function handleReaderBack() {
     searchOpen: showSearch.value,
     ttsOpen: showTTSPanel.value,
     bookInfoOpen: showBookInfo.value,
+    clickAreaOpen: showClickAreaSettings.value,
   })) {
+    case 'clickArea':
+      showClickAreaSettings.value = false
+      return
     case 'panel':
       store.closePanel()
       return

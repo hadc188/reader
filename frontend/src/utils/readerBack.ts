@@ -16,6 +16,8 @@ export interface ReaderBackLayers {
   ttsOpen: boolean
   /** 书籍详情浮层已打开。 */
   bookInfoOpen: boolean
+  /** 全屏「点击区域设置」九宫格已打开。 */
+  clickAreaOpen?: boolean
 }
 
 export type ReaderBackTarget =
@@ -24,6 +26,7 @@ export type ReaderBackTarget =
   | 'search'
   | 'tts'
   | 'bookInfo'
+  | 'clickArea'
   | 'leave'
 
 /**
@@ -40,9 +43,14 @@ export type ReaderBackTarget =
  * 工具栏会自己弹出(可配置), 那时同一串按键会时好时坏, 更难理解。
  *
  * 真正需要「先关掉」的是会挡住正文、并且必须显式关闭的层(抽屉、搜索、朗读、
- * 详情、划词菜单)—— 这些保持原顺序。
+ * 详情、划词菜单、全屏点击区域设置)—— 这些保持原顺序。
+ *
+ * 「点击区域设置」排在最前: 它是从设置抽屉里再打开的一层, 也是用户**最后**打开
+ * 的那个界面, 所以"按 Esc 关掉最近打开的东西"要求先关它; 否则一次按键会直接
+ * 连着把抽屉和阅读页都退掉。
  */
 export function resolveReaderBackTarget(layers: ReaderBackLayers): ReaderBackTarget {
+  if (layers.clickAreaOpen) return 'clickArea'
   if (layers.panelOpen) return 'panel'
   if (layers.selectionMenuVisible) return 'selectionMenu'
   if (layers.searchOpen) return 'search'

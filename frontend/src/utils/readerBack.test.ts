@@ -42,4 +42,19 @@ describe('resolveReaderBackTarget', () => {
   it('still leaves immediately after an overlay was dismissed', () => {
     expect(resolveReaderBackTarget({ ...idle, panelOpen: false })).toBe('leave')
   })
+
+  /** 点击区域设置是从设置抽屉里再打开的一层全屏面板：它是最后打开的东西，
+   *  所以 Esc 必须先关它，而不是一次把抽屉和阅读页都退掉。 */
+  it('closes the fullscreen click-area grid first', () => {
+    expect(resolveReaderBackTarget({ ...idle, clickAreaOpen: true })).toBe('clickArea')
+    // 抽屉早已被收起来（打开九宫格时会先 closePanel），此时仍然先关九宫格。
+    expect(resolveReaderBackTarget({ ...idle, clickAreaOpen: true, panelOpen: true }))
+      .toBe('clickArea')
+  })
+
+  it('treats a missing clickAreaOpen as closed', () => {
+    const legacy = { ...idle } as ReaderBackLayers
+    delete (legacy as { clickAreaOpen?: boolean }).clickAreaOpen
+    expect(resolveReaderBackTarget({ ...legacy, searchOpen: true })).toBe('search')
+  })
 })

@@ -133,14 +133,10 @@
           <div v-if="!isLocal && !appStore.isWebMode" class="source-section">
             <div class="section-heading">
               <h3>{{ singleSourceOnly ? '书源' : '可读书源' }}</h3>
-              <!-- 有缓存时给一枚小角标, 说明列表不是刚搜的; 没缓存就什么都不显示,
-                   避免「未搜索」这类字样喧宾夺主。 -->
-              <span v-if="sourcesHaveCache && !sourcesLoading" class="section-hint" :title="sourcesCacheHint">
-                缓存结果
-              </span>
               <!-- 与手机端详情页的 menu_refresh 对齐：随时重搜可用书源。
-                   **现在这是搜源的唯一入口** —— 打开弹窗不再自动并发搜索
-                   （书源清单变动除外，那种情况会自动重搜一次）。
+                   打开弹窗时本来就会自动搜一次（旧缓存先铺出来垫底），
+                   这里是「再搜一次」的入口，会带上 refresh=1 让后端丢掉自己的
+                   源列表缓存重查。
                    搜索中则变成「停止」—— 与换源面板和手机端一致，
                    某个源卡住时不必等所有源都超时。 -->
               <button
@@ -394,11 +390,6 @@ import {
  * 不能退回刷新前的 4 个。所以落库时用的是「旧缓存 ∪ 当前列表」的并集。
  */
 const sourceCandidateCache = getSourceCandidateCache()
-/** 当前列表是否有缓存垫底（决定标题旁边显示「缓存结果」还是「未搜索」）。 */
-const sourcesCachedAt = ref(0)
-/** 这份缓存的年龄是否已超过保质期（仅用于提示，不阻止显示）。 */
-const sourcesCacheExpired = ref(false)
-const sourcesHaveCache = computed(() => sourcesCachedAt.value > 0)
 
 const props = defineProps<{
   modelValue: boolean
@@ -540,18 +531,6 @@ const chapterSourceName = computed(() => {
   return source ? sourceNameByOrigin(source.origin) : ''
 })
 
-/** 「缓存结果」角标的悬停说明：告诉用户这份结果是什么时候的、怎么更新。 */
-const sourcesCacheHint = computed(() => {
-  if (!sourcesHaveCache.value) return '还没有搜索过其他书源，点右侧按钮开始搜索'
-  const minutes = Math.max(0, Math.floor((Date.now() - sourcesCachedAt.value) / 60000))
-  const when = minutes < 1 ? '刚刚' : `${minutes} 分钟前`
-  // 过期只提示、不自动重搜：issue #28 第 2 点明确要求打开详情别自动刷新。
-  if (sourcesCacheExpired.value) {
-    return `结果记于 ${when}，可能已过时，点右侧按钮获取最新`
-  }
-  return `结果记于 ${when}，点右侧按钮获取最新`
-})
-
 const shownCatalogSourceName = computed(() => {
   const identity = loadedCatalogIdentity.value
   if (!identity) return ''
@@ -609,6 +588,34 @@ function sourceCatalogSignature(): string {
   return sourceCatalogSignatureOf(sourceStore.sources)
 }
 
+/** 用当前 `sourceStore.sources` 重建「源 -> 名称」表，并保证本书自己的源一定在内。
+ *
+ *  拆出来是因为打开详情页时要**先后用两次**：一次用题面已有的清单先把界面铺出来
+ *  （避免等 IPC 期间列表空着闪一下），一次在清单刷新回来后重建。
+ *
+ *  @param extraOrigins 额外放行的 origin（清单还没加载到时，让缓存里的源先显示） */
+function rebuildSourceCatalog(extraOrigins: readonly string[] = []) {
+  const b = props.book
+  sourceCatalog.value = new Map(
+    sourceStore.sources
+      .filter((source) => source.enabled !== false)
+      .map((source) => [sourceKey(source.bookSourceUrl), source.bookSourceName]),
+  )
+  if (b && !sourceCatalog.value.has(sourceKey(b.origin))) {
+    // 保留当前书籍自身的源，避免书源列表加载失败时详情页完全没有可选项。
+    sourceCatalog.value.set(sourceKey(b.origin), (b as Book).originName || b.origin)
+  }
+  // 冷启动后第一次打开详情页时清单还是空的：此时若只保留本书自身的源，
+  // 缓存里的其他源会被 `setSourceCandidates` 整批过滤掉 —— 首帧只剩一个源，
+  // 等清单回来再补齐，看起来就是「闪一下」。先按缓存自身的 origin 放行，
+  // 清单回来后（`sourceStore.sources` 非空）这里就不再额外放行，该过滤的照常过滤。
+  if (sourceStore.sources.length === 0) {
+    for (const origin of extraOrigins) {
+      sourceCatalog.value.set(sourceKey(origin), sourceCatalog.value.get(sourceKey(origin)) || origin)
+    }
+  }
+}
+
 function canonicalSourceOrigin(origin: string): string {
   const found = sourceStore.sources.find((source) => (
     sourceKey(source.bookSourceUrl) === sourceKey(origin)
@@ -627,8 +634,6 @@ function resetDetailState() {
   sourcesLoading.value = false
   sourcesStopped.value = false
   sourcesIncomplete.value = false
-  sourcesCachedAt.value = 0
-  sourcesCacheExpired.value = false
   catalogTarget.value = ''
   chapterError.value = ''
   loadedCatalogIdentity.value = ''
@@ -678,10 +683,37 @@ function commitSourceCandidates(
   sourceCandidateCache.set(bookKey, sourceCatalogSignature(), merged, complete)
 }
 
+/** 只用缓存把列表铺出来，不发请求。
+ *
+ *  打开详情页时在 `await fetchSources()` **之前**调用：那一步要等一次 IPC，
+ *  期间界面不能空着（否则就是用户看到的「缓存闪一下才显示」）。
+ *  真正的搜索由 `loadSourceCandidates` 负责。 */
+function renderCachedCandidates(loadId: number, bookKey: string) {
+  const b = props.book
+  if (!b || !b.name || appStore.isWebMode) return
+  const current = toSearchBook(b)
+  const storedCandidates = b.sourceCandidates || []
+  const cached = sourceCandidateCache.get(bookKey)
+  // 清单还没加载到（冷启动后第一次打开）时，把缓存里的源一并放行，
+  // 否则它们会被 `setSourceCandidates` 按 `sourceCatalog` 全部过滤掉。
+  rebuildSourceCatalog((cached?.books || []).map((candidate) => candidate.origin))
+  if (!isCurrentDetail(loadId, bookKey)) return
+  setSourceCandidates([current, ...storedCandidates, ...(cached?.books || [])])
+}
+
 /** 填充「可读书源」列表。
  *
- *  `refresh = false`（打开弹窗）：读缓存，不发请求；若书源清单变过则自动重搜。
- *  `refresh = true`（用户点刷新 / 部分源失败后重试）：强制并发搜索。
+ *  打开弹窗时**总是**先摆出缓存里的旧结果（有的话），同时在后台重搜一遍；
+ *  搜索结果逐批并进来。用户不必等搜索跑完就能看到上次的列表。
+ *
+ *  为什么每次都搜：早先靠「书源清单签名」判断要不要重搜，但签名只记录
+ *  当时用的是哪份清单 —— 缓存里若只有 A/B 两个源的结果、而清单后来变成
+ *  A~E，签名可能恰好一致（C/D/E 当时不在清单里），于是判成「没变」，
+ *  只显示 2 个源，而且启停 C/D/E 也不会刷新。判断条件越堆越多、边界越多，
+ *  还不如统一成一条：打开就搜，旧结果垫底。
+ *
+ *  `refresh = true`（用户点刷新按钮）会额外带 `refresh: 1`，让后端丢掉
+ *  自己的源列表缓存重查。
  */
 function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) {
   const b = props.book
@@ -699,57 +731,22 @@ function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) 
   sourcesIncomplete.value = false
   sourcesStopped.value = false
 
-  const current = toSearchBook(b)
-  const storedCandidates = b.sourceCandidates || []
-  const initialCandidates = [current, ...storedCandidates]
-
-  // 缓存按「书」存一条，签名只是记录当时用的是哪份书源清单。
+  // 旧缓存只作为「先给用户看点东西」的垫底，不参与要不要搜的决策。
   const cached = sourceCandidateCache.get(bookKey)
-  const signature = sourceCatalogSignature()
-  // 书源增删/停启用后，旧结果里可能有已删除源的条目，不可信 → 自动重搜。
-  const catalogChanged = !!cached && !sourceCandidateCache.matches(cached, signature)
-  // 过期但**仍然可用**：按设计「超时后仍可读，由调用方决定怎么提示」。
-  // 直接丢掉会让用户以为之前搜到的源没了，所以照样摆出来，只是角标按过期时间
-  // 显示（`sourcesCacheHint`），由用户自己决定要不要点刷新。
-  const cacheExpired = !!cached && sourceCandidateCache.isStale(cached)
-  // 上次**没搜完**（中途停止 / 部分源失败）→ 照样自动重搜一次。
-  //
-  // 这条很关键：`commitSourceCandidates` 无论完整与否都会写入**当前**签名，
-  // 所以光比签名看不出「这份缓存其实只搜了一半」。用户刷新到一半退出，缓存里
-  // 就是半份结果 + 与清单相符的签名 → 下次打开判成「没变」，永远不再补搜，
-  // 表现正是「刷新中途退出后再打开加载的是旧缓存」。
-  // 重搜时旧结果会作为 `previousBooks` 垫底，已看到的源不会丢。
-  const cacheIncomplete = !!cached && !cached.complete
-
-  if (!refresh && !catalogChanged && !cacheIncomplete) {
-    if (cached) {
-      if (!isCurrentDetail(loadId, bookKey)) return
-      sourcesCachedAt.value = cached.savedAt
-      sourcesCacheExpired.value = cacheExpired
-      // 旧缓存里的候选可能包含已禁用/已删除的源；`setSourceCandidates` 会按
-      // 当前 `sourceCatalog` 过滤，所以这里直接并进去即可。
-      setSourceCandidates([...initialCandidates, ...cached.books])
-      sourcesIncomplete.value = !cached.complete
-      sourcesLoading.value = false
-      return
-    }
-    // 没有缓存: 只摆出本书自己的源, 不发请求 —— 这正是 issue #28 第 2 点要的
-    // 「点进详情别自动刷新」。用户要别的源就点标题右边的刷新按钮。
-    sourcesCachedAt.value = 0
-    sourcesCacheExpired.value = false
-    setSourceCandidates(initialCandidates)
-    sourcesLoading.value = false
-    return
-  }
-
-  // 走到这里说明要真正发请求：用户点了刷新，或书源清单变了。
-  sourcesLoading.value = true
-  // 刷新时保留旧结果在界面上（下面 finish 时还会并进缓存），只是重新搜一遍；
-  // 清空列表会让用户以为「之前搜到的源丢了」。
+  // 旧缓存里的候选可能包含已禁用/已删除的源；`setSourceCandidates` 会按
+  // 当前 `sourceCatalog` 过滤，所以这里直接并进去即可。
   const previousBooks = (cached?.books || []).filter((candidate) => (
     sourceCatalog.value.has(sourceKey(candidate.origin))
   ))
-  setSourceCandidates([...initialCandidates, ...previousBooks])
+  // 打开路径上缓存已经由 `renderCachedCandidates` 铺过了，这里再设一次是无害的
+  // 幂等操作（手动刷新路径下就靠它）。
+  setSourceCandidates([toSearchBook(b), ...(b.sourceCandidates || []), ...previousBooks])
+
+  sourcesLoading.value = true
+
+  // 跨分页累积「这一轮是否出过错」。放在分页链外面，`requestPage` 递归时
+  // 不会各页各清一次；新一轮搜索开始时（函数入口已经复位过）从 false 起算。
+  let hadErrors = false
 
   const requestPage = (lastIndex: number) => {
     const stream = getAvailableBookSourceSSE({
@@ -787,6 +784,18 @@ function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) 
       const data = event.data as { data?: SearchBook[] }
       if (Array.isArray(data.data) && data.data.length > 0) {
         setSourceCandidates([...sourceCandidates.value, ...data.data])
+        // **每搜到一批就落一次缓存**（标记为未完成）。
+        //
+        // 只在 `finish()` 里写的话，用户搜到一半关掉弹窗（或直接退出应用）时
+        // 磁盘上还是搜索前那份旧缓存 —— 再打开看到的就是旧的，明明已经搜到了
+        // 好几个源却白丢了。`complete = false` 表明这一轮没跑完，界面照旧提示
+        // 「部分书源访问失败」；跑完了 `finish()` 会用权威结果覆盖成 true。
+        commitSourceCandidates(
+          bookKey,
+          sourceCandidates.value.slice(),
+          false,
+          previousBooks,
+        )
       }
     }
 
@@ -796,7 +805,9 @@ function loadSourceCandidates(loadId: number, bookKey: string, refresh = false) 
         return
       }
       const payload = event.data as { hasMore?: boolean; lastIndex?: number; hasErrors?: boolean }
-      sourcesIncomplete.value ||= payload.hasErrors === true
+      // 跨页累积：任一页出过错，整轮就算「部分源访问失败」。
+      if (payload.hasErrors === true) hadErrors = true
+      sourcesIncomplete.value = hadErrors
       if (
         payload.hasMore === true
         && typeof payload.lastIndex === 'number'
@@ -962,9 +973,6 @@ function stopSourceCandidates() {
       false,
       sourceCandidateCache.get(bookKey)?.books || [],
     )
-    sourcesCachedAt.value = sourceCandidateCache.get(bookKey)?.savedAt || Date.now()
-    // 刚落库的结果一定是最新的，把可能残留的过期标记清掉。
-    sourcesCacheExpired.value = false
   }
   // 搜索可能一个结果都还没回来，界面上原本只有一行转圈；给一个明确回执，
   // 否则用户分不清是"停了"还是"卡住没动"。
@@ -999,13 +1007,27 @@ watch([() => props.modelValue, detailKey], async ([visible, bookKey]) => {
   // 详情页的简介比搜索结果的摘要完整，先补拉（不阻塞目录加载）。
   void loadDetailIntro(loadId, bookKey)
 
-  // **每次打开都重新读一遍书源清单**，不能只在为空时读。
-  // 缓存是否可信是靠「书源清单签名」判断的，如果沿用一份过期的 store，
-  // 用户刚启用的新书源不会出现在签名里 → 被判成「书源没变」→ 不自动刷新。
-  // 这正是「启动新书源后打开详情页也不刷新」的原因。读的是本地库，开销可忽略。
+  // ── 先把缓存铺出来，再刷新书源清单 ──
+  //
+  // 早先是「await fetchSources() 之后才铺界面」。那段时间界面已经被
+  // `resetDetailState()` 清空、又还没有新内容，于是列表先空一下再出现，
+  // 看起来就是「缓存闪一下才显示」。
+  // 现在用 `sourceStore.sources` 里已有的清单**同步**铺出缓存（纯内存操作），
+  // 清单刷新放到后面 await。
+  if (props.singleSourceOnly) {
+    // 发现页的书只认自己的源，不需要等清单：直接用题面信息摆出来。
+    sourceCatalog.value = new Map([[sourceKey(b.origin), b.originName || b.origin]])
+    setSourceCandidates([toSearchBook(b)])
+    sourcesLoading.value = false
+  } else {
+    renderCachedCandidates(loadId, bookKey)
+  }
+
+  // **每次打开都重新读一遍书源清单**，不能只在为空时读：用户刚启用的新书源
+  // 得出现在清单里，否则候选会被 `sourceCatalog` 过滤掉。
   await sourceStore.fetchSources().catch(() => undefined)
-  // 这次读清单引起的版本变化由本 watch 自己处理（下面 loadSourceCandidates
-  // 会按新签名判断要不要搜），别再让 availabilityVersion 的 watch 搜第二遍。
+  // 这次读清单引起的版本变化由本 watch 自己处理，别再让 availabilityVersion
+  // 的 watch 搜第二遍。
   handledAvailabilityVersion = sourceStore.availabilityVersion
   if (!isCurrentDetail(loadId, bookKey)) return
 
@@ -1023,16 +1045,11 @@ watch([() => props.modelValue, detailKey], async ([visible, bookKey]) => {
     return
   }
 
-  sourceCatalog.value = new Map(
-    sourceStore.sources
-      .filter((source) => source.enabled !== false)
-      .map((source) => [sourceKey(source.bookSourceUrl), source.bookSourceName]),
-  )
-  if (!sourceCatalog.value.has(sourceKey(b.origin))) {
-    // 保留当前书籍自身的源，避免书源列表加载失败时详情页完全没有可选项。
-    sourceCatalog.value.set(sourceKey(b.origin), (b as Book).originName || b.origin)
-  }
+  // 清单刷新回来了 → 用权威清单再重建一次（期间可能增删停启过书源），
+  // 然后开始搜索。
+  rebuildSourceCatalog()
   void loadSourceCandidates(loadId, bookKey)
+
   await loadChaptersFor(b.bookUrl, b.origin, loadId, bookKey)
 }, { immediate: true })
 
@@ -1040,27 +1057,17 @@ watch(() => sourceStore.availabilityVersion, async () => {
   if (!props.modelValue || !props.book || isLocal.value) return
   // 打开弹窗时自己读清单引起的那次版本变化，上面那个 watch 已经处理过了。
   if (sourceStore.availabilityVersion === handledAvailabilityVersion) return
-  // 书源增删/停启用后：缓存里的候选可能属于已被删除（或禁用）的源，必须重搜。
-  // 注意**不要**在这里整份清空缓存 —— 清空等于把「用户刷出来但还没搜完」的
-  // 结果也一起丢掉。让签名对不上、走 `catalogChanged` 分支即可：那里会保留
-  // 旧结果（按当前清单过滤）并自动发一次请求。
+  // 书源增删/停启用后，已列出的候选可能属于被删除/被禁用的源，得重搜一遍
+  // （`setSourceCandidates` 也会按新 `sourceCatalog` 过滤，但结果本身要重新拿）。
+  // 打开弹窗时的重搜由上面那个 watch 负责；这里只处理「弹窗开着时清单变了」。
   const loadId = ++detailLoadId
   chapterLoadId += 1
   const bookKey = detailKey.value
   resetDetailState()
   if (!isCurrentDetail(loadId, bookKey)) return
-  sourceCatalog.value = new Map(
-    sourceStore.sources
-      .filter((source) => source.enabled !== false)
-      .map((source) => [sourceKey(source.bookSourceUrl), source.bookSourceName]),
-  )
+  rebuildSourceCatalog()
   const b = props.book as Book
-  if (!sourceCatalog.value.has(sourceKey(b.origin))) {
-    sourceCatalog.value.set(sourceKey(b.origin), b.originName || b.origin)
-  }
-  // 这里传 `false`（不是 true）：让 `loadSourceCandidates` 自己根据签名判断
-  // 该不该搜、要不要带 `refresh: 1`。书源清单确实变了 → catalogChanged 为真
-  // → 自动重搜；否则就是一次普通打开，不该发请求。
+  // 不带 `refresh: 1`：本地这份候选要重跑，但后端的源列表缓存仍有效。
   void loadSourceCandidates(loadId, bookKey)
   await loadChaptersFor(b.bookUrl, b.origin, loadId, bookKey)
 }, { flush: 'post' })
@@ -1565,17 +1572,6 @@ async function removeFromShelf() {
 
 .section-heading h3 {
   flex: 0 0 auto;
-}
-
-/* 「缓存结果 / 未搜索」角标：解释列表里为什么只有一条。 */
-.section-hint {
-  flex: 0 0 auto;
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-sunken);
-  color: var(--color-text-tertiary);
-  font-size: var(--text-xs);
-  line-height: 1.6;
 }
 
 /* 「可读书源」标题右侧的刷新/停止按钮：与手机端详情页工具栏图标同一语义。

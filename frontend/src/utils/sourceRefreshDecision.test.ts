@@ -1,155 +1,148 @@
 import { describe, expect, it } from 'vitest'
-import { createSourceCandidateCache, sourceCatalogSignatureOf } from './sourceCandidateCache'
+import {
+  createSourceCandidateCache,
+  sourceCatalogSignatureOf,
+  type SourceCandidateStorage,
+} from './sourceCandidateCache'
 
 /**
- * 「打开详情页要不要自动重搜可读书源」的判定，以及「启用了书源却不刷新」的成因。
+ * 详情页 / 换源面板如何对待已有缓存。
  *
- * 用户报告的完整现象（issue #31 后续）：
- *  1. 应用刚启动后第一次打开详情页不刷新；
- *  2. 手动刷新过一次之后就正常了；
- *  3. 手动刷新必须**完整跑完**，中途退出的话下次打开还是旧缓存。
+ * 早先靠「书源清单签名」判断要不要重搜，但签名只记录**当时**用的是哪份清单：
+ * 用户升级版本后，缓存里可能只含 A/B 两个源的结果，而实际清单有 A~E ——
+ * 若 C/D/E 当时不在清单里，算出来的签名与缓存里那份**恰好相同**，于是判成
+ * 「没变」→ 只显示 2 个源，而且启停 C/D/E 也不会刷新。
  *
- * 三者是同一个根因的三种表现：`commitSourceCandidates` 无论本次搜索是否完整，
- * 都会把**当前书源清单签名**写进缓存。于是「半份结果」和「完整结果」在签名上
- * 完全一样，光比签名分不出来。
+ * 现在统一成一条规则：**打开就搜，旧缓存垫底先显示**。下面这些用例锁住
+ * 替代它的那部分行为（缓存仍然要能用于首屏、中断结果不能丢、写入仍记签名）。
  */
 
-interface CacheLike {
-  catalogSignature: string
-  complete: boolean
-}
-
-/** 与 BookDetailModal.loadSourceCandidates 里那段判断同构。 */
-function shouldSearchOnOpen(params: {
-  cached: CacheLike | undefined
-  currentSignature: string
-  refresh?: boolean
-}): boolean {
-  const { cached, currentSignature, refresh = false } = params
-  if (refresh) return true
-  if (!cached) return false // 无缓存：按 issue #28 的要求不自动搜
-  if (cached.catalogSignature !== currentSignature) return true // 书源清单变了
-  // 上次没搜完 → 补搜。少了这一条就会「中途退出后永远加载旧缓存」。
-  if (!cached.complete) return true
-  return false
-}
-
-const SIG_A = sourceCatalogSignatureOf([
-  { bookSourceUrl: 'https://a.com', enabled: true },
-])
 const SIG_AB = sourceCatalogSignatureOf([
   { bookSourceUrl: 'https://a.com', enabled: true },
   { bookSourceUrl: 'https://b.com', enabled: true },
 ])
 
-describe('打开详情页是否自动重搜可读书源', () => {
-  it('does not search when there is no cache (issue #28)', () => {
-    expect(shouldSearchOnOpen({ cached: undefined, currentSignature: SIG_A })).toBe(false)
+function bookOf(origin: string): {
+  name: string
+  author: string
+  bookUrl: string
+  origin: string
+} {
+  return { name: '书', author: '作者', bookUrl: `/${origin}`, origin }
+}
+
+/** 内存版 localStorage：用来模拟「关掉应用再打开」。 */
+function memoryStorage() {
+  const data = new Map<string, string>()
+  const storage: SourceCandidateStorage = {
+    getItem: (key) => data.get(key) ?? null,
+    setItem: (key, value) => { data.set(key, value) },
+    removeItem: (key) => { data.delete(key) },
+  }
+  return { storage, data }
+}
+
+describe('旧缓存用于首屏渲染（搜索在后台同时进行）', () => {
+  it('exposes the cached list so the panel can render before the search finishes', () => {
+    // 方案 A 的体验前提：打开时先摆出上次的结果，用户不必空等一次全量搜索。
+    // 这条锁住「缓存仍然可读」—— 如果哪天为了简化把缓存也删了，首屏会白屏。
+    const cache = createSourceCandidateCache({ storage: null })
+    const key = '书::作者::/b/1::https://a.com'
+    cache.set(key, SIG_AB, [bookOf('https://a.com'), bookOf('https://b.com')], true)
+
+    expect(cache.get(key)!.books).toHaveLength(2)
   })
 
-  it('does not search when the cache is complete and the catalog is unchanged', () => {
-    expect(shouldSearchOnOpen({
-      cached: { catalogSignature: SIG_A, complete: true },
-      currentSignature: SIG_A,
-    })).toBe(false)
-  })
+  it('does not require the cached signature to match the current catalog', () => {
+    // 关键：方案 A 下签名不参与「要不要搜」的决策，所以签名对不上时缓存照样
+    // 可以用于首屏。旧实现会在这里判定「清单变了」——方向是对的，但仍会漏掉
+    // 「签名碰巧相同、结果却只含一部分源」的那种情况。
+    const cache = createSourceCandidateCache({ storage: null })
+    const key = '书::作者::/b/1::https://a.com'
+    const otherSig = sourceCatalogSignatureOf([
+      { bookSourceUrl: 'https://z.com', enabled: true },
+    ])
+    cache.set(key, otherSig, [bookOf('https://a.com')], true)
 
-  it('searches when a source was enabled after the cache was written', () => {
-    // 用户主诉：启用书源后打开详情页不刷新。缓存签名是旧清单（只有 a），
-    // 当前清单多了 b → 必须重搜。
-    expect(shouldSearchOnOpen({
-      cached: { catalogSignature: SIG_A, complete: true },
-      currentSignature: SIG_AB,
-    })).toBe(true)
-  })
-
-  it('searches when a source was disabled after the cache was written', () => {
-    expect(shouldSearchOnOpen({
-      cached: { catalogSignature: SIG_AB, complete: true },
-      currentSignature: SIG_A,
-    })).toBe(true)
-  })
-
-  it('re-searches after an interrupted refresh even though the signature matches', () => {
-    // 这是「刷新中途退出就加载旧缓存」的直接回归：
-    // 半份结果写进去时带的是**当时**的清单签名，与当前清单一致，
-    // 光比签名会判成「没变」→ 永远不补搜。
-    expect(shouldSearchOnOpen({
-      cached: { catalogSignature: SIG_AB, complete: false },
-      currentSignature: SIG_AB,
-    })).toBe(true)
-  })
-
-  it('always searches when the user explicitly refreshes', () => {
-    expect(shouldSearchOnOpen({
-      cached: { catalogSignature: SIG_AB, complete: true },
-      currentSignature: SIG_AB,
-      refresh: true,
-    })).toBe(true)
+    const entry = cache.get(key)!
+    expect(cache.matches(entry, SIG_AB)).toBe(false) // 签名确实对不上
+    expect(entry.books).toHaveLength(1)              // 但缓存依然可读、可用
   })
 })
 
-describe('为什么「完整刷新一次之后就一直正常」', () => {
-  it('a completed refresh writes the current signature, so the next open is stable', () => {
-    // 完整刷完 → complete: true + 当前签名 → 下次打开不再重搜（符合预期）。
+describe('中断的搜索不会丢掉已有结果', () => {
+  it('keeps partial results and marks the round incomplete', () => {
+    // 中途停止 / 部分源失败：结果要留着（用户想要的正是「就这些」），
+    // 但 complete 必须是 false，好让界面如实提示「部分书源访问失败」。
+    // 「下次打开会不会补搜」不再依赖这个标记 —— 打开就搜，必然补上。
     const cache = createSourceCandidateCache({ storage: null })
     const key = '书::作者::/b/1::https://a.com'
-    cache.set(key, SIG_AB, [
-      { name: '书', author: '作者', bookUrl: '/b/1', origin: 'https://a.com' },
-      { name: '书', author: '作者', bookUrl: '/b/2', origin: 'https://b.com' },
-    ], true)
+    cache.set(key, SIG_AB, [bookOf('https://a.com')], false)
 
     const entry = cache.get(key)!
-    expect(shouldSearchOnOpen({ cached: entry, currentSignature: SIG_AB })).toBe(false)
-  })
-
-  it('an interrupted refresh keeps partial results but is still marked incomplete', () => {
-    // 中途停止：结果要留着（不能丢已看到的源），但 complete 必须是 false，
-    // 否则就回到「永远加载旧缓存」的老 bug。
-    const cache = createSourceCandidateCache({ storage: null })
-    const key = '书::作者::/b/1::https://a.com'
-    cache.set(key, SIG_AB, [
-      { name: '书', author: '作者', bookUrl: '/b/1', origin: 'https://a.com' },
-    ], false)
-
-    const entry = cache.get(key)!
-    expect(entry.books).toHaveLength(1)      // 半份结果保留
-    expect(entry.complete).toBe(false)       // 但标记为不完整
-    expect(shouldSearchOnOpen({
-      cached: entry,
-      currentSignature: SIG_AB,
-    })).toBe(true)                            // → 下次打开会补搜
+    expect(entry.books).toHaveLength(1)
+    expect(entry.complete).toBe(false)
   })
 })
 
-describe('书源清单基线要跨会话持久化', () => {
-  it('a fresh session must still detect a change against a persisted baseline', () => {
-    // 回归：`sourceStateSignature` 曾是纯内存变量，应用重启后为空，
-    // 首次 fetch 走 `if (baseline && ...)` 守卫 → 只记录基线、不判定变化。
-    // 而候选缓存跨会话存活，于是「上次会话启用了书源但详情页没刷新成功」
-    // 这件事永远补不上。持久化基线后，重启后第一次 fetch 就能发现差异。
-    const STORAGE_KEY = 'source-state-signature'
-    const store: Record<string, string> = { [STORAGE_KEY]: SIG_A }
+describe('写入仍然记录书源清单签名', () => {
+  it('records the signature alongside the results', () => {
+    // 签名不再决定「要不要搜」，但仍写进条目：它描述「这份结果是对哪份清单搜的」，
+    // 是排查问题时唯一能还原当时上下文的信息。
+    const cache = createSourceCandidateCache({ storage: null })
+    const key = '书::作者::/b/1::https://a.com'
+    cache.set(key, SIG_AB, [bookOf('https://a.com')], true)
 
-    // 模拟「重启后首次 fetch」：从存储里读回上次会话的基线
-    const baselineFromLastSession = store[STORAGE_KEY] || ''
-    const nextSignature = SIG_AB
-
-    // 有基线 → 能判定出变化（旧实现在这里拿到空串，判不出来）
-    expect(baselineFromLastSession).toBe(SIG_A)
-    expect(nextSignature !== baselineFromLastSession).toBe(true)
+    expect(cache.get(key)!.catalogSignature).toBe(SIG_AB)
   })
+})
 
-  it('falls back to an empty baseline when storage is unavailable', () => {
-    // 隐私模式 / 配额满：读不到就当首次运行，退化成原来的纯内存行为，不报错。
-    const readBaseline = (storage: { getItem(k: string): string } | null) => {
-      try {
-        return storage?.getItem('source-state-signature') || ''
-      } catch {
-        return ''
-      }
+describe('搜到一个就写一次缓存（不再等全部跑完）', () => {
+  it('persists each batch so an interrupted search keeps what was already found', () => {
+    // 用户报的问题：搜索必须**彻底跑完**才会写缓存。搜到一半关掉详情页再打开，
+    // 磁盘上还是搜索前那份 —— 明明已经搜到 3 个源，却全丢了。
+    // 修法：`onmessage` 每收到一批就 commit 一次（complete=false）。
+    const { storage, data } = memoryStorage()
+    const cache = createSourceCandidateCache({ storage })
+    const key = '书::作者::/b/1::https://a.com'
+
+    // 搜索前的旧缓存：只有 1 条（本书自己），按设计不写入 —— 这里先模拟
+    // 「之前搜到过 2 个源」的旧状态。
+    cache.set(key, SIG_AB, [bookOf('https://a.com'), bookOf('https://b.com')], true)
+
+    // ── 新一轮搜索，逐批到达 ──
+    const received: ReturnType<typeof bookOf>[] = []
+    const onBatch = (batch: ReturnType<typeof bookOf>[]) => {
+      received.push(...batch)
+      cache.set(key, SIG_AB, [...received], false) // onmessage 里的 commit
     }
-    expect(readBaseline(null)).toBe('')
-    expect(readBaseline({ getItem: () => { throw new Error('denied') } })).toBe('')
+
+    onBatch([bookOf('https://c.com')])
+    // 第一批就已落盘：此刻模拟「用户直接关掉详情页」
+    let entry = createSourceCandidateCache({ storage }).get(key)!
+    expect(entry.books.map((b) => b.origin)).toEqual(['https://c.com'])
+    expect(entry.complete).toBe(false)
+
+    onBatch([bookOf('https://d.com')])
+    entry = createSourceCandidateCache({ storage }).get(key)!
+    expect(entry.books).toHaveLength(2)
+    expect(entry.complete).toBe(false)
+
+    // 存储里确实有内容（不是只改了内存）
+    expect(data.has('source-candidates-cache')).toBe(true)
+  })
+
+  it('a finished run overwrites the provisional entry with the authoritative one', () => {
+    // 中途写的是「未完成」，跑完后 `finish()` 用权威结果覆盖成 complete=true。
+    const { storage } = memoryStorage()
+    const cache = createSourceCandidateCache({ storage })
+    const key = '书::作者::/b/1::https://a.com'
+
+    cache.set(key, SIG_AB, [bookOf('https://a.com')], false)  // 中途
+    cache.set(key, SIG_AB, [bookOf('https://a.com'), bookOf('https://b.com')], true) // 跑完
+
+    const entry = cache.get(key)!
+    expect(entry.complete).toBe(true)
+    expect(entry.books).toHaveLength(2)
   })
 })

@@ -28,8 +28,6 @@ export interface SourceCandidateCacheEntry {
   complete: boolean
 }
 
-export const DEFAULT_SOURCE_CANDIDATE_TTL_MS = 30 * 60 * 1000
-export const DEFAULT_SOURCE_CANDIDATE_LIMIT = 20
 /** localStorage 里存这份缓存的键。 */
 export const SOURCE_CANDIDATE_STORAGE_KEY = 'source-candidates-cache'
 
@@ -41,10 +39,6 @@ export interface SourceCandidateStorage {
 }
 
 export interface SourceCandidateCacheOptions {
-  /** 最多保留多少本书的缓存，超出按最久未使用淘汰。 */
-  limit?: number
-  /** 缓存有效期。超时后仍可读，但会被标记为过期 —— 由调用方决定怎么提示。 */
-  ttlMs?: number
   /** 注入时钟，便于测试。 */
   now?: () => number
   /** 持久化后端；传 null 表示只在内存里（默认读 localStorage）。 */
@@ -64,41 +58,28 @@ export interface SourceCandidateCache {
   clear(): void
   /** 判断一条缓存是否与当前书源清单相符。 */
   matches(entry: SourceCandidateCacheEntry, catalogSignature: string): boolean
-  isStale(entry: SourceCandidateCacheEntry): boolean
-  /** 当前有效的条目数（已剔除过期项）。 */
+  /** 当前条目数（不做任何清理）。 */
   size(): number
 }
 
 export function createSourceCandidateCache(
   options: SourceCandidateCacheOptions = {},
 ): SourceCandidateCache {
-  const limit = Math.max(1, options.limit ?? DEFAULT_SOURCE_CANDIDATE_LIMIT)
-  const ttlMs = Math.max(0, options.ttlMs ?? DEFAULT_SOURCE_CANDIDATE_TTL_MS)
   const now = options.now ?? (() => Date.now())
   const storage = options.storage === undefined ? defaultStorage() : options.storage
   const storageKey = options.storageKey ?? SOURCE_CANDIDATE_STORAGE_KEY
 
+  /** 缓存条目。**没有数量上限**，也不会按时间过期删除。
+   *
+   *  只有下面三种显式操作会移除条目：
+   *    1. 书被删除 / 移出书架（`delete()`，见 bookshelf store）；
+   *    2. 书源被整表清空（`clear()`，见 WebDAV 恢复）；
+   *    3. 写法覆盖：同一本书再搜一次，用新结果顶掉旧的（`set()`）。
+   *
+   *  为什么不做 LRU 上限：每条只有几条到十几条搜索结果，量级很小；
+   *  而用户删掉的缓存不该因为「点开过 21 本书」就悄悄消失 —— 那正是
+   *  「几小时前的缓存打开就没了」的同类问题。 */
   const entries = new Map<string, SourceCandidateCacheEntry>()
-
-  /** 清掉所有过期记录。
-   *
-   *  之前只有 LRU（20 条）一个上限，`isStale()` 算出来的过期只用于改提示文案，
-   *  数据本身永远不删 —— 于是几个月前点开过的书会一直躺在 localStorage 里，
-   *  直到被第 21 本挤掉。这里在启动（hydrate）与写入（set）时顺手回收，
-   *  保证「存在缓存里的一定还在保质期内」，口径与 `searchSessionCache` 一致。
-   *
-   *  没有定时器：不需要为此养一个 `setInterval` 拖住事件循环，这两个时机足够。 */
-  function pruneExpired() {
-    const cutoff = now() - ttlMs
-    let removed = false
-    for (const [key, entry] of entries) {
-      if (entry.savedAt <= cutoff) {
-        entries.delete(key)
-        removed = true
-      }
-    }
-    return removed
-  }
 
   /** 把内存里的内容整份写回存储。
    *
@@ -147,17 +128,7 @@ export function createSourceCandidateCache(
           complete: entry.complete !== false,
         })
       }
-      // 恢复时先清过期项，再按 LRU 上限裁一刀（旧版本可能留下超量记录）。
-      // 顺序不能反：过期的旧记录不该占着名额把还有效的挤掉。
-      let pruned = pruneExpired()
-      while (entries.size > limit) {
-        const oldest = entries.keys().next().value
-        if (oldest === undefined) break
-        entries.delete(oldest)
-        pruned = true
-      }
-      // 删过东西就落一次盘，免得 localStorage 里继续留着这些已失效的条目。
-      if (pruned) persist()
+      // 原样读回：不按 TTL 清、也不按数量裁。
     } catch {
       entries.clear()
     }
@@ -179,8 +150,6 @@ export function createSourceCandidateCache(
       // 只缓存非空结果：一条都没搜到通常意味着当时的网络/源站异常，缓存它
       // 会让用户下次打开看到「未找到其他书源」，反而更困惑。
       if (!books.length) return
-      // 先清过期项，别让它们占着 LRU 名额把刚搜到的结果挤出去。
-      pruneExpired()
       entries.delete(bookKey)
       entries.set(bookKey, {
         bookKey,
@@ -189,11 +158,6 @@ export function createSourceCandidateCache(
         savedAt: now(),
         complete,
       })
-      while (entries.size > limit) {
-        const oldest = entries.keys().next().value
-        if (oldest === undefined) break
-        entries.delete(oldest)
-      }
       persist()
     },
 
@@ -218,13 +182,7 @@ export function createSourceCandidateCache(
       return entry.catalogSignature === catalogSignature
     },
 
-    isStale(entry) {
-      return now() - entry.savedAt > ttlMs
-    },
-
     size() {
-      // 语义是「当前有效条目数」，所以先清过期项。
-      if (pruneExpired()) persist()
       return entries.size
     },
   }
@@ -250,7 +208,7 @@ function defaultStorage(): SourceCandidateStorage | null {
 let sharedCache: SourceCandidateCache | null = null
 
 export function getSourceCandidateCache(): SourceCandidateCache {
-  sharedCache ??= createSourceCandidateCache({ limit: DEFAULT_SOURCE_CANDIDATE_LIMIT })
+  sharedCache ??= createSourceCandidateCache()
   return sharedCache
 }
 

@@ -4,8 +4,6 @@
       <div class="header-left">
         <h3>切换书源</h3>
         <span class="source-count" v-if="preparedResults.length">{{ preparedResults.length }} 个结果</span>
-        <!-- 有缓存时标一下, 说明列表不是刚搜的（与详情页同一套提示）。 -->
-        <span v-if="resultsFromCache && !searching" class="cache-badge">缓存</span>
       </div>
       <div class="header-actions">
         <!-- 与手机端换源弹窗的 menu_start_stop 对齐: 搜索中显示「停止」,
@@ -244,8 +242,6 @@ let availableSourceSSE: SseLike | null = null
  * 就自动失效重搜。
  */
 const sourceCandidateCache = getSourceCandidateCache()
-/** 这份列表是不是直接来自缓存（决定要不要把「缓存结果」提示挂出来）。 */
-const resultsFromCache = ref(false)
 
 const currentSource = computed(() => {
   if (!store.book) return null
@@ -309,15 +305,15 @@ const preparedResults = computed<CandidateItem[]>(() => {
 })
 
 onMounted(async () => {
-  // 每次打开都刷新一遍书源清单: 缓存是否可信靠清单签名判断, 沿用过期清单会
-  // 把「刚启用的新书源」误判成「书源没变」，从而不自动刷新。
-  await sourceStore.fetchSources().catch(() => undefined)
-  if (sourceStore.sources.length === 0) {
-    sourceStore.fetchSources().catch(() => undefined)
-  }
-  // 和详情页一致: 打开面板先读缓存, 没有缓存就只摆出书架记住的候选,
-  // 不自动并发搜源。要最新的点右上角刷新。
+  // 先把缓存/已有候选**同步**铺出来，再刷新书源清单。
+  // 早先是 await 完才 hydrate，IPC 那段时间面板是空的 —— 与详情页同样的
+  // 「内容闪一下才出现」观感。
   hydrateFromCache()
+  // 每次打开都刷新一遍书源清单：候选会被 `enabledSourceOrigins` 过滤，
+  // 沿用过期清单会把刚启用的源误剔除。
+  await sourceStore.fetchSources().catch(() => undefined)
+  // `watch(enabledSourceOrigins)` 会在清单到位后重新过滤并补选首项，
+  // 这里不用再做一遍。
 })
 
 // 首次进入应用直接打开阅读页时, 书源列表往往晚于本面板就绪: 那一次合并因为
@@ -349,30 +345,10 @@ onUnmounted(() => {
 function startSearch(refresh = false) {
   if (!store.book || isLocal.value) return
   closeAvailableSourceSSE()
+  // 与详情页同一口径：打开就搜，旧缓存只作为垫底先显示出来。
+  // 之前靠「签名是否变化」判断要不要搜，但签名只描述当时那份书源清单，
+  // 缓存里若只含部分源、而清单恰好没变过，就会永远显示残缺结果。
   const cached = sourceCandidateCache.get(sourceCandidateCacheKey())
-  // 书源增删/停启用后，旧缓存里可能有已删除源的候选 → 自动重搜一次。
-  const catalogChanged = !!cached && !sourceCandidateCache.matches(cached, sourceCatalogSignature())
-
-  if (!refresh && !catalogChanged) {
-    searching.value = false
-    sourcesIncomplete.value = false
-    loadingMore.value = false
-    results.value = []
-    lastIndex.value = -1
-    hasMoreSources.value = false
-    selectedCandidate.value = null
-    candidatePreview.value = null
-    resultsFromCache.value = false
-    mergeCandidates(store.book.sourceCandidates || [])
-    if (cached) {
-      mergeCandidates(cached.books)
-      resultsFromCache.value = true
-      // 上次是中断/部分失败 → 如实提示，让用户自己决定要不要重试。
-      sourcesIncomplete.value = !cached.complete
-    }
-    if (preparedResults.value.length) void selectCandidate(preparedResults.value[0])
-    return
-  }
 
   searching.value = true
   sourcesIncomplete.value = false
@@ -382,9 +358,8 @@ function startSearch(refresh = false) {
   hasMoreSources.value = true
   selectedCandidate.value = null
   candidatePreview.value = null
-  resultsFromCache.value = false
   mergeCandidates(store.book.sourceCandidates || [])
-  // 刷新时把旧缓存垫在下面：一边搜一边还在显示上次的结果，不会瞬间清空。
+  // 旧缓存垫在下面：一边搜一边还在显示上次的结果，不会瞬间清空。
   if (cached) mergeCandidates(cached.books)
 
   openAvailableSourceSSE('initial', refresh)
@@ -519,6 +494,10 @@ function openAvailableSourceSSE(mode: AvailableSourceMode, refresh = false) {
   stream.onmessage = (event) => {
     if (availableSourceSSE !== stream) return
     applyAvailableSourcePayload(parseAvailableSourcePayload(event))
+    // 每搜到一批就落一次缓存（标记未完成）：用户搜到一半直接关面板/退出应用时
+    // 磁盘上不会还停留在搜索前那份旧缓存。跑完后 `finishAvailableSourceSSE`
+    // 会用权威结果覆盖成 `complete = true`。
+    commitResults(false, previousResults)
   }
 
   stream.addEventListener('end', (event) => {
@@ -668,16 +647,6 @@ async function handleSwitch(res: SearchBook) {
 .header-left { display: flex; align-items: baseline; gap: 8px; }
 .source-header h3 { font-size: 16px; margin: 0; }
 .source-count { font-size: 11px; opacity: 0.5; }
-
-/* 「缓存」角标：与详情页的「缓存结果」同义，说明这份列表不是刚搜的。 */
-.cache-badge {
-  padding: 1px 6px;
-  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-  border-radius: 9999px;
-  font-size: 10px;
-  opacity: 0.65;
-  white-space: nowrap;
-}
 
 .header-actions { display: flex; align-items: center; gap: 2px; }
 

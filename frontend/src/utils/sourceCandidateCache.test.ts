@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  DEFAULT_SOURCE_CANDIDATE_TTL_MS,
   SOURCE_CANDIDATE_STORAGE_KEY,
   createSourceCandidateCache,
   getSourceCandidateCache,
@@ -73,38 +72,27 @@ describe('sourceCandidateCache', () => {
     expect(entry.complete).toBe(false)
   })
 
-  it('evicts least recently used entries past the limit', () => {
-    const cache = createSourceCandidateCache({ limit: 2 })
-    cache.set('k1', 'sig', [book('https://a.com')])
-    cache.set('k2', 'sig', [book('https://a.com')])
-    cache.set('k3', 'sig', [book('https://a.com')])
+  it('keeps every entry — there is no LRU limit', () => {
+    // 用户明确要求：不要数量上限，只有删书时才清理。
+    const cache = createSourceCandidateCache()
+    for (let i = 0; i < 30; i += 1) {
+      cache.set(`k${i}`, 'sig', [book('https://a.com')])
+    }
 
-    expect(cache.size()).toBe(2)
-    expect(cache.get('k1')).toBeUndefined()
-    expect(cache.get('k3')).toBeDefined()
+    expect(cache.size()).toBe(30)
+    expect(cache.get('k0')).toBeDefined()   // 最早的也不会被挤掉
+    expect(cache.get('k29')).toBeDefined()
   })
 
-  it('treats a read as recent so hot entries survive eviction', () => {
-    const cache = createSourceCandidateCache({ limit: 2 })
+  it('reads do not matter — entries never expire by use order', () => {
+    const cache = createSourceCandidateCache()
     cache.set('k1', 'sig', [book('https://a.com')])
     cache.set('k2', 'sig', [book('https://a.com')])
-    cache.get('k1')
     cache.set('k3', 'sig', [book('https://a.com')])
 
     expect(cache.get('k1')).toBeDefined()
-    expect(cache.get('k2')).toBeUndefined()
-  })
-
-  it('reports staleness against the injected clock', () => {
-    let clock = 1000
-    const cache = createSourceCandidateCache({ ttlMs: 500, now: () => clock })
-    cache.set('k', 'sig', [book('https://a.com')])
-
-    const entry = cache.get('k')!
-    expect(cache.isStale(entry)).toBe(false)
-
-    clock += 501
-    expect(cache.isStale(entry)).toBe(true)
+    expect(cache.get('k2')).toBeDefined()
+    expect(cache.get('k3')).toBeDefined()
   })
 
   it('clear() drops everything, which is how source edits invalidate the cache', () => {
@@ -113,10 +101,6 @@ describe('sourceCandidateCache', () => {
     cache.set('k2', 'sig', [book('https://a.com')])
     cache.clear()
     expect(cache.size()).toBe(0)
-  })
-
-  it('defaults to a 30 minute ttl', () => {
-    expect(DEFAULT_SOURCE_CANDIDATE_TTL_MS).toBe(30 * 60 * 1000)
   })
 
   it('survives an app restart through the storage backend', () => {
@@ -161,9 +145,8 @@ describe('sourceCandidateCache', () => {
         ],
       }),
     })
-    // 注入时钟：这条只关心「结构不合法」的记录被丢弃，与 TTL 无关。
-    // 用真实时钟的话 savedAt: 1 早就过期了，会顺便被过期清理删掉而误判。
-    const cache = createSourceCandidateCache({ storage, now: () => 1, ttlMs: 1000 })
+    // 这条只关心「结构不合法」的记录被丢弃。
+    const cache = createSourceCandidateCache({ storage })
     expect(cache.size()).toBe(1)
     expect(cache.get('ok')!.books).toHaveLength(1)
   })
@@ -185,41 +168,48 @@ describe('sourceCandidateCache', () => {
   })
 })
 
-describe('过期与删除（issue: 这缓存的清理是否及时）', () => {
-  it('prunes expired entries on write so they stop taking LRU slots', () => {
-    // 之前只有 LRU 上限，`isStale()` 只用来改提示文案、数据永远不删，
-    // 于是几个月前点开过的书会一直躺在 localStorage 里。
+describe('缓存只增不减，只有删书才清理（issue: 几小时前的缓存打开就没了）', () => {
+  it('keeps an old entry on write — no time-based eviction', () => {
+    // 用户实报：几小时前缓存了 5 个可读书源，下次打开应用时全没了。
+    // 现在任何时间跨度都不会让条目消失。
     let clock = 0
     const { storage, data } = memoryStorage()
-    const cache = createSourceCandidateCache({ storage, ttlMs: 1000, now: () => clock })
+    const cache = createSourceCandidateCache({ storage, now: () => clock })
 
     cache.set('旧书', 'sig', [book('https://old.com')])
     clock = 5000
     cache.set('新书', 'sig', [book('https://new.com')])
 
-    expect(cache.get('旧书')).toBeUndefined()
+    expect(cache.get('旧书')).toBeDefined()
     expect(cache.get('新书')).toBeDefined()
-    // 过期项也要从存储里消失，不能只在内存里删。
+
     const persisted = JSON.parse(data.get(SOURCE_CANDIDATE_STORAGE_KEY)!)
-    expect(persisted.entries.map((e: { bookKey: string }) => e.bookKey)).toEqual(['新书'])
+    expect(persisted.entries.map((e: { bookKey: string }) => e.bookKey)).toEqual(['旧书', '新书'])
   })
 
-  it('drops expired entries when hydrating from storage', () => {
-    // 关掉应用放几天再打开：启动时就把过期项清掉，并回写存储。
+  it('keeps entries when hydrating from storage, no matter how old', () => {
+    // 关掉应用放几天再打开：数据要原样读回来，不能启动时就被清空。
     const old = { bookKey: '旧书', catalogSignature: 's', savedAt: 0, books: [book('https://a.com')], complete: true }
-    const { storage, data } = memoryStorage({
+    const { storage } = memoryStorage({
       [SOURCE_CANDIDATE_STORAGE_KEY]: JSON.stringify({ version: 1, entries: [old] }),
     })
 
-    const cache = createSourceCandidateCache({
-      storage,
-      ttlMs: 1000,
-      now: () => 999999,
-    })
+    const cache = createSourceCandidateCache({ storage, now: () => 999999 })
 
-    expect(cache.size()).toBe(0)
-    // hydrate 时删过东西就要回写，否则过期条目会一直躺在 localStorage 里。
-    expect(JSON.parse(data.get(SOURCE_CANDIDATE_STORAGE_KEY)!).entries).toHaveLength(0)
+    expect(cache.size()).toBe(1)
+    expect(cache.get('旧书')!.books).toHaveLength(1)
+  })
+
+  it('never evicts by count either — 50 books all survive', () => {
+    // 「无上限」：不再有 20 本的 LRU 上限。
+    const cache = createSourceCandidateCache({ storage: null })
+    for (let i = 0; i < 50; i += 1) {
+      cache.set(`书${i}`, 'sig', [book(`https://s${i}.com`)])
+    }
+
+    expect(cache.size()).toBe(50)
+    expect(cache.get('书0')).toBeDefined()
+    expect(cache.get('书49')).toBeDefined()
   })
 
   it('delete() removes one book and persists immediately', () => {

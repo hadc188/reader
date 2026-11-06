@@ -4,6 +4,12 @@
       <div class="header-left">
         <h3>切换书源</h3>
         <span class="source-count" v-if="preparedResults.length">{{ preparedResults.length }} 个结果</span>
+        <!-- 换源落库（含后端回填新源详情）可能十几秒。提示放在标题旁而不是盖
+             一层遮罩：列表、刷新、关闭全程都能点，慢源时也不会有「卡住」的观感。 -->
+        <span v-if="isSwitchingSource" class="switching-hint" role="status">
+          <span class="switching-hint-spinner" aria-hidden="true"></span>
+          正在切换…
+        </span>
       </div>
       <div class="header-actions">
         <!-- 与手机端换源弹窗的 menu_start_stop 对齐: 搜索中显示「停止」,
@@ -174,20 +180,20 @@
           <button
             class="switch-btn primary"
             type="button"
-            :disabled="store.loading"
+            :disabled="isSwitchingSource"
             @click="handleSwitch(selectedCandidate.book)"
-          >切换到此书源</button>
+          >{{ isSwitchingSource ? '切换中…' : '切换到此书源' }}</button>
         </div>
       </div>
     </Transition>
 
-    <!-- Switching Overlay -->
-    <Transition name="fade">
-      <div v-if="store.loading" class="switch-overlay" :style="{ background: theme.popup }">
-        <div class="spinner"></div>
-        <p>正在切换书源，请稍候...</p>
-      </div>
-    </Transition>
+    <!--
+      换源不再盖全屏遮罩。
+      换源实际要「抓详情页 → 抓目录 → 抓第一章正文」，慢源上能跑几十秒；旧版把
+      这段挂在 `store.loading` 上，于是遮罩亮着的时候连「关闭」和换选另一个源都
+      点不动 —— 用户看到的就是「切换书源页面一直加载中」。现在进度只体现在标题栏
+      那个小提示上，列表、刷新、关闭全程可操作。
+    -->
   </div>
 </template>
 
@@ -615,14 +621,21 @@ function loadMoreSources() {
   openAvailableSourceSSE('loadMore')
 }
 
+/**
+ * 换源进度。**不能**用 `store.loading`：那个标志覆盖「抓详情 → 抓目录 → 抓正文」
+ * 整条链，慢源上会持续几十秒，把面板锁成一直加载中的样子。store 里单独用一个
+ * 标记，面板只据此置灰按钮、给一条不挡点击的状态行。
+ */
+const isSwitchingSource = computed(() => !!(store.switchingSource))
+
 async function handleSwitch(res: SearchBook) {
-  if (store.loading) return
+  if (store.switchingSource) return
   try {
-    const nextBook = await store.switchSource(res.bookUrl, res.origin)
-    store.closePanel()
-    appStore.showToast(`已切换到 ${nextBook?.originName || nextBook?.origin || res.origin}`, 'success')
-  } catch (e: any) {
-    appStore.showToast(`切换失败: ${e?.message || '未知错误'}`, 'error')
+    // 成功/失败提示都由 store.switchSource 负责（失败分「切换失败」与
+    // 「已切换但目录/正文加载失败」两种），这里不再重复弹一次。
+    await store.switchSource(res.bookUrl, res.origin)
+  } catch {
+    // 已由 store 提示，吞掉避免未处理的 Promise 拒绝。
   }
 }
 </script>
@@ -1166,15 +1179,31 @@ async function handleSwitch(res: SearchBook) {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.switch-overlay {
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  z-index: 20;
+/* 标题栏里的「正在切换」提示：只是一个 inline 小徽标，不占位、不挡点击。 */
+.switching-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* header-left 是 baseline 对齐（标题与计数按文字基线对齐），这个带 padding 的
+     胶囊必须自己居中，否则会被基线拉到比标题高半行。 */
+  align-self: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-primary, #c97f3a);
+  background: color-mix(in srgb, var(--color-primary, #c97f3a) 12%, transparent);
+  white-space: nowrap;
 }
 
-.switch-overlay p { margin-top: 16px; font-size: 14px; opacity: 0.8; }
+.switching-hint-spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 
 @media (max-width: 640px) {
   /* 窄屏下让按钮独占第二行右侧，信息行仍然保持单行不换行。 */

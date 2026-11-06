@@ -1790,8 +1790,18 @@ pub async fn get_shelf_book(
 }
 
 /// `get_shelf_book_with_cache_info` 的共享实现 (Tauri command 与 Web HTTP handler 共用)。
+///
+/// `allow_prefetch` 控制"目录缓存缺失时顺带联网抓一遍目录"：
+///
+/// - 书架页需要它 —— 第一次浏览书架时把各书目录缓存建起来，后续的缓存统计与
+///   打开书才不用等网络。
+/// - **阅读页不需要**：那里只用一个数字（离线横幅里的"已缓存 N 章"），而书架
+///   几十本书会各自发起一次详情/目录请求；这些请求与用户正在等的章节正文抢
+///   同一个连接池和同一份书源限速额度，是"翻页忽然变慢"的一个来源。手机端也没有
+///   这种开销：它的缓存计数是本地 SQLite 的一次索引查询。
 pub async fn get_shelf_book_with_cache_info_core(
     state: &AppState,
+    allow_prefetch: bool,
 ) -> Result<ApiResponse<Value>, AppError> {
     let user_ns = "default";
     let books = state.book_service.get_bookshelf(&user_ns).await?;
@@ -1851,7 +1861,7 @@ pub async fn get_shelf_book_with_cache_info_core(
         result.push(val);
     }
 
-    if !prefetch_books.is_empty() {
+    if allow_prefetch && !prefetch_books.is_empty() {
         let state_clone = state.clone();
         let user_ns_clone = user_ns;
         tokio::spawn(async move {
@@ -1888,11 +1898,14 @@ pub async fn get_shelf_book_with_cache_info_core(
 }
 
 /// `get_shelf_book_with_cache_info` 的 Tauri 入口: 只是 core 的薄壳。
+///
+/// `prefetch` 由前端按场景传（缺省 true 保持书架页原有行为）。
 #[tauri::command]
 pub async fn get_shelf_book_with_cache_info(
     state: tauri::State<'_, AppState>,
+    prefetch: Option<bool>,
 ) -> Result<ApiResponse<Value>, AppError> {
-    get_shelf_book_with_cache_info_core(&state).await
+    get_shelf_book_with_cache_info_core(&state, prefetch.unwrap_or(true)).await
 }
 
 #[tauri::command]

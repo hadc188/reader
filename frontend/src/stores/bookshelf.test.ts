@@ -323,4 +323,17 @@ describe('书架排序', () => {
     expect(store.sortMode).toBe(0)
     expect(localStorage.setItem).toHaveBeenCalledWith('bookshelf-sort', '0')
   })
+
+  it('让后端跳过目录预抓取, 阅读页才用它', async () => {
+    // 阅读页调用时必须带 prefetch: false —— 否则后端会把书架里每本缺目录缓存的
+    // 书都联网抓一遍, 和在读章节的正文抢连接池。书架页则保持缺省(undefined),
+    // 仍会顺带预热目录缓存。
+    const store = useBookshelfStore()
+
+    await store.fetchBooks({ prefetch: false })
+    expect(getBookshelfWithCacheInfo).toHaveBeenLastCalledWith({ prefetch: false })
+
+    await store.fetchBooks()
+    expect(getBookshelfWithCacheInfo).toHaveBeenLastCalledWith({})
+  })
 })

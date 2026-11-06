@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core'
-import { get, post, invokeUpload } from './invoke'
+import { get, post, invokeEnvelope, invokeUpload } from './invoke'
 import { isTauriRuntime } from './transport'
 import { readerOrigin } from './scheme'
 import { FILE_NAME_HEADER, encodeFileName } from './uploadHeader'
@@ -9,8 +9,26 @@ export function getBookshelf() {
   return get<Book[]>('/getBookshelf').then((r) => r.data)
 }
 
-export function getBookshelfWithCacheInfo() {
-  return get<Book[]>('/getShelfBookWithCacheInfo').then((r) => r.data)
+/**
+ * 书架 + 缓存章数。
+ *
+ * `prefetch` 控制「目录缓存缺失时后端顺带联网抓一遍目录」：
+ * - 书架/缓存管理页需要（true，缺省）—— 顺便把各书目录缓存建起来；
+ * - 阅读页只要一个数字（离线横幅的"已缓存 N 章"），传 false，避免几十本书
+ *   各自发起详情/目录请求、和在读章节的正文抢连接池与书源限速额度。
+ *
+ * 两侧传参方式不同：桌面端这个命令的参数是**顶层** `prefetch`（没有 `req`
+ * 包装），要走 `invokeEnvelope`；Web 端是 GET query（与其它读接口一致），
+ * 走 `get()`。用通用 `get()` 塞给桌面端会变成 `{ req: {...} }`，命令会报
+ * 缺少参数；反过来在 Web 端用 `invokeEnvelope` 会以 POST 发出，而这条路由
+ * 只注册了 GET，直接 405（只有真实浏览器会踩到）。
+ */
+export function getBookshelfWithCacheInfo(options: { prefetch?: boolean } = {}) {
+  const prefetch = options.prefetch !== false
+  if (isTauriRuntime()) {
+    return invokeEnvelope<Book[]>('get_shelf_book_with_cache_info', { prefetch })
+  }
+  return get<Book[]>('/getShelfBookWithCacheInfo', { params: { prefetch } }).then((r) => r.data)
 }
 
 export function saveBook(book: Partial<Book>) {

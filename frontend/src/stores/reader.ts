@@ -741,6 +741,19 @@ export const useReaderStore = defineStore('reader', () => {
   const currentIndex = ref(0)
   const content = ref('')
   const loading = ref(false)
+  /**
+   * 正在切换书源（null 表示没有切换在跑）。
+   *
+   * 换源要依次抓详情页、目录和第一章正文，慢源上每一步都可能吃满请求超时，
+   * 整条链几十秒都有可能。它**不能**复用 `loading`：那个标志是「正文正在加载」，
+   * 换源面板和阅读页工具栏都靠它做全屏加载态 —— 拿它罩住整条换源链，用户就只
+   * 能对着「正在切换书源，请稍候...」干等，连面板都关不掉（issue：切换书源
+   * 页面一直加载中）。这里单独记一份进度，面板据此只把按钮置灰，阅读页顶部
+   * 用一条不拦截点击的浮条说明正在换源。
+   */
+  const switchingSource = ref<{ origin: string; bookUrl: string } | null>(null)
+  /** 换源代次：新的换源或打开别的书都会 +1，旧流程在各个 await 点据此退出。 */
+  let sourceSwitchGeneration = 0
   /** 当前章节加载到哪一步（空串表示未在加载）；用于显示「正在解析段评」这类长耗时 */
   const loadStage = ref<ContentLoadStage | ''>('')
   // 阶段提示的持有者：并发加载（预加载 / 连续模式）时只有最后设置提示的那次调用
@@ -3452,7 +3465,34 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   /* ─── Book / chapter ops ─── */
-  async function loadBook(b: Book, syncProgress = true) {
+  /**
+   * 打开/重载一本书：取详情（缺 tocUrl 时）、取目录、再加载初始章正文。
+   *
+   * 两个选项都服务于 switchSource：
+   *
+   * - `keepSourceSwitch`：别作废这次换源的代次。换源落库成功后就把「切换中」标记
+   *   交给阅读页的加载态，这条链还要继续跑目录和正文；此时若把代次 +1，switchSource
+   *   自己的 `generation` 立刻失效，后面的步骤全部静默退出。
+   * - `initialChapterTitle` / `initialChapterIndex` / `initialProgressOverride`：
+   *   换源的目标章节要按**标题**在新目录里定位（章号在换源后没有可比性），进度也
+   *   要沿用旧源那份。不传的话这里会按 `durChapterIndex` 先抓一章正文，
+   *   switchSource 再按标题抓一次 —— 慢源上等于把最贵的那步做两遍。
+   */
+  async function loadBook(
+    b: Book,
+    syncProgress = true,
+    options: {
+      keepSourceSwitch?: boolean
+      initialChapterTitle?: string
+      initialChapterIndex?: number
+      initialProgressOverride?: number
+    } = {},
+  ) {
+    if (!options.keepSourceSwitch) {
+      // 打开另一本书必须作废在跑的换源链，否则它返回后会把这本书的 book 覆盖掉。
+      sourceSwitchGeneration += 1
+      switchingSource.value = null
+    }
     loading.value = true
     bookLoadError.value = ''
     const requestId = ++bookLoadRequestId
@@ -3540,16 +3580,25 @@ export const useReaderStore = defineStore('reader', () => {
       if (requestId !== bookLoadRequestId || book.value?.bookUrl !== b.bookUrl) return
       chapters.value = chapterList
 
-      const initialIndex = chapters.value.length
+      let initialIndex = chapters.value.length
         ? Math.max(0, Math.min(chapters.value.length - 1, currentIndex.value))
         : 0
+      let initialProgress = localPosition?.chapterIndex === initialIndex
+        ? localPosition.progress
+        : undefined
+      if (chapters.value.length && (options.initialChapterTitle || options.initialChapterIndex != null)) {
+        // 换源：章号在新目录里没有可比性，按「上次读到的章节标题」重新定位，
+        // 找不到才退回章号。
+        initialIndex = resolveChapterIndexByTitle(
+          chapters.value,
+          options.initialChapterTitle,
+          options.initialChapterIndex ?? initialIndex,
+        )
+        initialProgress = options.initialProgressOverride
+      }
       currentIndex.value = initialIndex
       if (!chapters.value.length) throw new Error('目录为空，无法加载正文')
-      await loadChapter(
-        initialIndex,
-        false,
-        localPosition?.chapterIndex === initialIndex ? localPosition.progress : undefined,
-      )
+      await loadChapter(initialIndex, false, initialProgress)
       if (requestId !== bookLoadRequestId || book.value?.bookUrl !== b.bookUrl) return
       if (syncProgress) {
         await restoreCurrentBookProgressFromLegado(undefined, b.bookUrl, requestId)
@@ -3604,7 +3653,17 @@ export const useReaderStore = defineStore('reader', () => {
       saveRecentReadBook(book.value)
     }
     localStorage.setItem('reader-currentIndex', String(index))
-    saveReaderSession()
+    // 这里**只写轻量进度**，不能写全量快照。
+    //
+    // 全量快照包含整个目录（`chapters`），一本 3000 章的书序列化出来有几 MB，
+    // 且 `localStorage.setItem` 是同步写 —— 每翻一章都做一次会让换章明显发顿
+    // （正文已经渲染完，主线程却还在 JSON.stringify + 落盘）。手机端也没有这个
+    // 开销：它的章节表与进度都在 SQLite，翻章只更新一行。
+    //
+    // 目录只在真正变化时落盘（`refreshChapters` / `refreshTocFromSource` /
+    // `loadBook` 收尾都各自调了 `saveReaderSession`），而 `restorePersistedSession`
+    // 恢复进度时优先用轻量快照，所以少写这一次不影响"下次打开落在原处"。
+    saveReaderProgress()
     markProgressDirty()
   }
 
@@ -3913,14 +3972,29 @@ export const useReaderStore = defineStore('reader', () => {
    *
    * `options.forwardOnly` 用于「隐藏已读」形态: 身后章节会被立即裁掉, 预载它
    * 既不会被读到、还要占一格缓存并把真正要用的下一章挤出去。
+   *
+   * 顺序是 +1 → +2 → -1, 且等 +1 有结果后才发后面的。书源的 `concurrentRate`
+   * (如 `"2000"`) 在后端是**串行**限速(`wait_for_serial_rate` 用 `in_flight`
+   * 保证同一书源同一时刻只有一个请求), 同时发三个预载并不会真的并行, 而是三个
+   * 任务在锁上排队 —— 排队顺序由调度决定,「上一章」完全可能抢在「下一章」前面,
+   * 于是用户翻到下一章时那次正文请求要排在两个用不上的预载后面, 慢源上就是好几秒
+   * 干等。手机端同样先下 `durChapterIndex+2..N` 再下身后章节, `preDownloadSemaphore`
+   * 也只给 2 个许可。对没配限速的源最多少一点并行, 换来「下一章永远最先到」。
    */
   async function preloadAroundChapter(index: number, options: { forwardOnly?: boolean } = {}) {
     if (!book.value || !config.enablePreload) return
     const candidates = options.forwardOnly ? [index + 1, index + 2] : [index + 1, index + 2, index - 1]
     const targets = candidates
       .filter((target, pos, list) => target >= 0 && target < chapters.value.length && list.indexOf(target) === pos)
-    // 并发预载, 不等彼此
-    await Promise.allSettled(targets.map((target) => preloadNextChapter(target)))
+    const [first, ...rest] = targets
+    const bookUrl = book.value.bookUrl
+    if (first === undefined) return
+    await preloadNextChapter(first).catch(() => null)
+    for (const target of rest) {
+      // 换书 / 关掉预载后不再继续: 剩下的目标已经属于旧的阅读位置。
+      if (!config.enablePreload || book.value?.bookUrl !== bookUrl) return
+      await preloadNextChapter(target).catch(() => null)
+    }
   }
 
   async function preloadNextChapter(index: number) {
@@ -3976,43 +4050,100 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   /* ─── Switch Source ─── */
+  /**
+   * 切换书源。
+   *
+   * 换源是一条「抓详情页 → 抓目录 → 抓第一章正文」的长链，慢源上每一步都能吃满
+   * 请求超时。早先这里用全局 `loading` 罩住整条链，于是阅读页的整屏加载动画和
+   * 换源面板的全屏遮罩会一直亮到第一章正文回来为止 —— 表现就是「切换书源页面
+   * 一直加载中」，面板既关不掉、也无法改选别的源。
+   *
+   * 现在只把「切换中」记在 `switchingSource` 上，而且只在**落库**这段用：面板
+   * 标题旁显示一个小徽标、只置灰那一个按钮，列表/刷新/关闭全程可操作；落库成功
+   * 就立刻收起面板并释放标记，后面的目录/正文交给阅读页自己的加载态（`loading`
+   * 仍由 loadBook / loadChapter 管，那是"正文正在加载"，语义本来就不同）。
+   */
   async function switchSource(newUrl: string, sourceUrl: string) {
-    if (!book.value) return
-    const previousChapterTitle = currentChapter.value?.title || book.value.durChapterTitle
+    const previousBook = book.value
+    if (!previousBook) return null
+    // 换源会改写书架记录，并发两次会互相覆盖，正在切换时直接忽略新的请求。
+    if (switchingSource.value) return null
+    const generation = ++sourceSwitchGeneration
+    const previousChapterTitle = currentChapter.value?.title || previousBook.durChapterTitle
     const previousIndex = currentIndex.value
     const previousProgress = chapterScrollProgress.value
-    loading.value = true
-    bookLoadError.value = ''
+    switchingSource.value = { origin: sourceUrl, bookUrl: newUrl }
+    // 这里不清 `bookLoadError`：换源落库可能失败，失败时面板还开着、阅读页仍要
+    // 保留「上一本打不开」的原因与重试/换源按钮。成功后 loadBook 会自己清掉。
+    let switched = false
     try {
       const updatedBook = await apiSetBookSource({
-        bookUrl: book.value.bookUrl,
+        bookUrl: previousBook.bookUrl,
         newUrl,
         bookSourceUrl: sourceUrl,
-        name: book.value.name,
-        author: book.value.author,
-        coverUrl: book.value.coverUrl,
-        intro: book.value.intro,
-        kind: book.value.kind,
-        latestChapterTitle: book.value.latestChapterTitle,
-        durChapterIndex: book.value.durChapterIndex,
-        durChapterTitle: book.value.durChapterTitle,
-        durChapterPos: book.value.durChapterPos,
-        durChapterTime: book.value.durChapterTime,
+        name: previousBook.name,
+        author: previousBook.author,
+        coverUrl: previousBook.coverUrl,
+        intro: previousBook.intro,
+        kind: previousBook.kind,
+        latestChapterTitle: previousBook.latestChapterTitle,
+        durChapterIndex: previousBook.durChapterIndex,
+        durChapterTitle: previousBook.durChapterTitle,
+        durChapterPos: previousBook.durChapterPos,
+        durChapterTime: previousBook.durChapterTime,
       })
-      if (!updatedBook) return null
+      if (generation !== sourceSwitchGeneration) return null
+      if (!updatedBook) {
+        // 正常路径不会走到这里（后端保存成功才会返回 Book）。真出现时也必须给
+        // 用户一句话，否则面板像被点了一下什么都没发生。
+        appStore.showToast('切换书源失败：没有收到新书信息', 'error')
+        return null
+      }
 
-      await loadBook(updatedBook, false)
-      const targetIndex = resolveChapterIndexByTitle(
-        chapters.value,
-        previousChapterTitle,
-        typeof updatedBook.durChapterIndex === 'number' ? updatedBook.durChapterIndex : previousIndex,
-      )
-      await loadChapter(targetIndex)
-      setChapterScrollProgress(previousProgress)
-      await shelfStore.fetchBooks().catch(() => undefined)
+      // 书架记录已经指向新源 = 换源已经生效。立刻收起换源面板、释放「切换中」
+      // 标记并给出结果，目录与正文放到阅读页继续加载（跟详情页「先跳转、后加载」
+      // 是同一套做法）。
+      //
+      // 这两步必须在**这里**做，而不是等整条链跑完：切换是否成功只取决于这次
+      // 落库，后面抓目录/正文是慢源才耗时的部分。让它们把面板按在加载态里，
+      // 等于剥夺用户改选别的源的机会 —— 而「换源随时可用」正是这个面板的意义。
+      switched = true
+      switchingSource.value = null
+      if (activePanel.value === 'source') closePanel()
+      const sourceName = updatedBook.originName || updatedBook.origin || sourceUrl
+      appStore.showToast(`已切换到 ${sourceName}，正在加载目录…`, 'success')
+      // 目录 + 正文一次性在 loadBook 里做完：它本来就要取目录并加载初始章，把
+      // 「按标题定位 + 复用旧进度」作为参数传下去，慢源上就不会把最贵的正文抓取
+      // 做两遍（旧实现先按章号抓一次，再按标题抓一次）。
+      await loadBook(updatedBook, false, {
+        keepSourceSwitch: true,
+        initialChapterTitle: previousChapterTitle,
+        initialChapterIndex: previousIndex,
+        initialProgressOverride: previousProgress,
+      })
+      if (generation !== sourceSwitchGeneration) return null
+      // 落位进度由 loadChapter 内部经 setActiveChapterState 写入（它在正文真的
+      // 到手时才写），这里不再补一次 —— 换源失败时不该把旧源的位置写成新书的
+      // 阅读进度。
+      // 换源后刷新书架记录（origin / bookUrl 都变了）。这里同样传
+      // prefetch: false —— 阅读页不需要后端顺手把整个书架的目录缓存重抓一遍，
+      // 当前这本书的目录刚刚才抓完，其它书等用户回书架时再说。
+      await shelfStore.fetchBooks({ prefetch: false }).catch(() => undefined)
       return updatedBook
+    } catch (error) {
+      // 已经换了别的源（或换书）时，这条链的错误不再属于当前这本书：既不该
+      // 覆盖新一次换源的结果，也不该弹出误导性的提示。
+      if (generation !== sourceSwitchGeneration) return null
+      const message = (error instanceof Error ? error.message : String(error ?? '')).trim()
+      appStore.showToast(
+        switched
+          ? `已切换书源，但目录或正文加载失败：${message || '未知错误'}`
+          : `切换失败: ${message || '未知错误'}`,
+        'error',
+      )
+      throw error
     } finally {
-      loading.value = false
+      if (generation === sourceSwitchGeneration) switchingSource.value = null
     }
   }
 
@@ -4066,7 +4197,17 @@ export const useReaderStore = defineStore('reader', () => {
     } catch { /* 存储写入失败时静默放弃节流记录 */ }
   }
 
-  /** 强制重抓目录; 分页目录余下页由后端后台写入缓存, 轮询读取直到长度稳定。 */
+  /**
+   * 强制重抓目录; 分页目录余下页由后端后台写入缓存, 轮询读取直到长度稳定。
+   *
+   * 轮询间隔是**递增**的 (300 → 900 → 1500ms)，而不是固定 1200ms：
+   *
+   * - 绝大多数目录只有一页，后端没有 `pending_urls`，第一次复查就会看到
+   *   「长度没有增长」并退出。原先固定 1200ms 意味着这类书永远白等 1.2 秒。
+   * - 真有分页时，第一页之外的抓取在后端是 tokio 任务，通常几百毫秒就开始
+   *   写缓存，300ms 起步能更早拿到；真慢的站再退到 900/1500ms，总时长与原先
+   *   (3 × 1200ms) 相当。
+   */
   async function fetchTocListWithStabilizing(): Promise<BookChapter[]> {
     const b = book.value
     if (!b) return []
@@ -4077,9 +4218,10 @@ export const useReaderStore = defineStore('reader', () => {
       ...(normalizeOptionalUrl(b.tocUrl) ? { tocUrl: b.tocUrl } : {}),
     }
     let list = await getChapterList({ ...base, refresh: 1 })
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    const pollDelays = [300, 900, 1500]
+    for (const delay of pollDelays) {
       if (!list.length) break
-      await new Promise((resolve) => setTimeout(resolve, 1200))
+      await new Promise((resolve) => setTimeout(resolve, delay))
       const cached = await getChapterList({ ...base })
       if (cached.length <= list.length) break
       list = cached
@@ -4232,6 +4374,8 @@ export const useReaderStore = defineStore('reader', () => {
   function clear() {
     bookLoadRequestId += 1
     chapterLoadRequestId += 1
+    sourceSwitchGeneration += 1
+    switchingSource.value = null
     restoringLegadoProgress.value = false
     legadoPositionRestore.value = null
     legadoPositionRestoreCompleted.value = null
@@ -4288,6 +4432,7 @@ export const useReaderStore = defineStore('reader', () => {
 
   return {
     book, chapters, currentIndex, content, loading, loadStage, refreshing, contentRefreshToken, chaptersLoading, openPosition, restoringLegadoProgress,
+    switchingSource,
     bookLoadError,
     legadoPositionRestore,
     legadoPositionRestoreCompleted,

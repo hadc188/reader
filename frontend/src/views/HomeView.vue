@@ -397,7 +397,10 @@ async function handleBookClick(book: Book | SearchBook) {
 
   openingBookUrl.value = b.bookUrl
   try {
-    await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
+    // 置顶只是书架排序，与"打开这本书"无关；await 它等于把一次书架整表写盘
+    // 插在打开链路前面 —— 手机端同样是先开书、排序在后台做。并行发起，失败
+    // 也不影响阅读（原来就是 catch 掉的）。
+    void shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
     const loadBookTask = readerStore.loadBook(b)
     await router.push('/reader')
     await loadBookTask

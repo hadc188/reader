@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { readerOrigin } from './scheme'
-import { getCoverUrl } from './bookshelf'
+import { get, invokeEnvelope } from './invoke'
+import { getBookshelfWithCacheInfo, getCoverUrl } from './bookshelf'
 
 // bookshelf.ts 依赖 invoke 层, 这里只测纯函数 getCoverUrl, 不需要真的发请求。
 vi.mock('./invoke', () => ({
@@ -65,5 +66,37 @@ describe('getCoverUrl', () => {
    *  这里确认前缀判断没有宽松到吞掉任意相对路径。 */
   it('does not treat an arbitrary relative path as a local asset', () => {
     expect(getCoverUrl('covers/local.png')).toBe('covers/local.png')
+  })
+})
+
+describe('getBookshelfWithCacheInfo', () => {
+  it('passes prefetch=false in the browser so the reader skips the source sweep', async () => {
+    // 单测环境不是 Tauri, 走 HTTP 分支: prefetch 必须作为 query 参数发出。
+    vi.mocked(get).mockResolvedValue({ data: [] } as never)
+
+    await getBookshelfWithCacheInfo({ prefetch: false })
+
+    expect(get).toHaveBeenCalledWith('/getShelfBookWithCacheInfo', { params: { prefetch: false } })
+  })
+
+  it('defaults to prefetch=true so the shelf page still warms the toc cache', async () => {
+    vi.mocked(get).mockResolvedValue({ data: [] } as never)
+
+    await getBookshelfWithCacheInfo()
+
+    expect(get).toHaveBeenCalledWith('/getShelfBookWithCacheInfo', { params: { prefetch: true } })
+  })
+
+  it('uses the top-level prefetch argument on desktop, not the generic req wrapper', async () => {
+    // 桌面端的命令签名是 `prefetch: Option<bool>`(顶层参数)。塞进 `{req: …}`
+    // 会让 invoke 反序列化失败, 所以这里断言参数形状。
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} })
+    vi.mocked(invokeEnvelope).mockResolvedValue([] as never)
+    try {
+      await getBookshelfWithCacheInfo({ prefetch: false })
+      expect(invokeEnvelope).toHaveBeenCalledWith('get_shelf_book_with_cache_info', { prefetch: false })
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

@@ -199,8 +199,27 @@ async fn get_bookshelf(State(state): State<AppState>) -> Response {
     envelope(book_cmd::get_bookshelf_core(&state).await)
 }
 
-async fn get_shelf_book_with_cache_info(State(state): State<AppState>) -> Response {
-    envelope(book_cmd::get_shelf_book_with_cache_info_core(&state).await)
+/// 书架 + 缓存章数。
+///
+/// `?prefetch=false` 关闭「缺目录缓存就后台联网抓一遍」—— 阅读页只要那个
+/// 数字，不需要为此向几十个站点发请求（见 core 的说明）。缺省保持 true，
+/// 与桌面端 `get_shelf_book_with_cache_info` 的默认值一致。
+async fn get_shelf_book_with_cache_info(State(state): State<AppState>, uri: Uri) -> Response {
+    let allow_prefetch = uri
+        .query()
+        .and_then(|query| {
+            serde_urlencoded::from_str::<Vec<(String, String)>>(query)
+                .ok()
+                .and_then(|pairs| {
+                    pairs.into_iter().find_map(|(key, value)| {
+                        (key == "prefetch").then(|| {
+                            !matches!(value.trim().to_ascii_lowercase().as_str(), "false" | "0")
+                        })
+                    })
+                })
+        })
+        .unwrap_or(true);
+    envelope(book_cmd::get_shelf_book_with_cache_info_core(&state, allow_prefetch).await)
 }
 
 // ───────────────────────── 书籍 ─────────────────────────

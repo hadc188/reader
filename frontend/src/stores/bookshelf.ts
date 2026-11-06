@@ -93,18 +93,24 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     await refreshRecentBooks()
   }
 
-  async function fetchBooks() {
+  /** 重新拉书架。
+   *
+   *  `prefetch: false` 用于**阅读页**：那里只为判断"这本书在不在书架"，
+   *  而缺省行为会让后端把书架里每本没有目录缓存的书都联网抓一遍目录 ——
+   *  几十个请求会和正在读的这章正文抢连接池与书源限速额度。书架/探索/详情
+   *  这些"以书架为主角"的页面仍用缺省值，顺带把目录缓存建起来。 */
+  async function fetchBooks(options: { prefetch?: boolean } = {}) {
     loading.value = true
     try {
-      await loadBooks()
+      await loadBooks(options)
     } finally {
       loading.value = false
     }
   }
 
   /// 共用的书架加载逻辑: 读取书架及应用本地缓存信息后刷新最近阅读。
-  async function loadBooks() {
-    books.value = await getBookshelfWithCacheInfo()
+  async function loadBooks(options: { prefetch?: boolean } = {}) {
+    books.value = await getBookshelfWithCacheInfo(options)
     // 只有真正拿到数据才算「已加载」: 抛错时保持 false, 阅读页便不会据此判定。
     loaded.value = true
     await refreshRecentBooks()

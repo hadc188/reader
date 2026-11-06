@@ -7,6 +7,7 @@ import {
   getBookInfo,
   getChapterList,
   saveBookProgress,
+  setBookSource,
   type ContentLoadStage,
 } from '../api/bookshelf'
 import { syncLegadoBookProgress, uploadLegadoBookProgress } from '../api/webdav'
@@ -686,7 +687,6 @@ describe('reader local txt chapters', () => {
     expect(dirty.config.clickAreaProfiles.paged.tl).toBe('prevPage')
     expect(dirty.config.clickAreaProfiles.scroll.mc).toBe('menu')
   })
-
 
   it('updates the open-position snapshot when accepting newer Legado progress', async () => {
     const appStore = useAppStore()
@@ -1860,6 +1860,23 @@ describe('reader page background image', () => {
     expect(payload).not.toHaveProperty('book')
   })
 
+  it('does not rewrite the whole chapter list when switching chapters', () => {
+    // 换章只更新进度快照。整份目录序列化是同步 JSON.stringify + localStorage
+    // 写入 —— 几千章的书每翻一页做一次，正文渲染完主线程还要卡一下。
+    const readerStore = useReaderStore()
+    readerStore.book = { name: '大书', author: '作者', origin: 'https://example.com', bookUrl: 'https://example.com/book/1' }
+    readerStore.chapters = bigChapters(300)
+    // 打开书收尾会写一次全量快照，作为基线。
+    readerStore.setChapterScrollProgress(0)
+    const baseline = sessionWrites().length
+
+    readerStore.setActiveChapterState(5, '正文', 0)
+    readerStore.setActiveChapterState(6, '正文', 0)
+
+    expect(sessionWrites().length).toBe(baseline)
+    expect(progressWrites().at(-1)?.[1]).toContain('"currentIndex":6')
+  })
+
   it('restores the newer progress snapshot over a stale full session', async () => {
     // 全量快照停留在旧进度, 轻量快照更新 —— 恢复时必须取轻量那个。
     //
@@ -2063,5 +2080,197 @@ describe('reader opening a book restored from a phone backup', () => {
 
     expect(readerStore.bookLoadError).toContain('目录为空')
     expect(readerStore.loading).toBe(false)
+  })
+})
+
+/**
+ * 换源曾经用全局 `loading` 罩住「落库 → 抓详情 → 抓目录 → 抓第一章正文」整条链，
+ * 于是慢源上换源面板会一直停在「正在切换书源」的全屏遮罩里，连关掉面板或改选
+ * 另一个源都做不到（用户报的现象：切换书源页面一直加载中）。
+ *
+ * 现在的契约：**换源落库成功 = 切换已生效**，面板立刻收起、切换标记立刻释放；
+ * 后面目录/正文的等待只属于阅读页自己的加载态，不再占用换源界面。
+ */
+describe('reader switching book source', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+      clear: vi.fn(() => storage.clear()),
+    })
+    vi.mocked(getChapterList).mockReset()
+    vi.mocked(getBookInfo).mockReset()
+    vi.mocked(getBookContent).mockReset()
+    vi.mocked(saveBookProgress).mockReset()
+    vi.mocked(saveBookProgress).mockResolvedValue('ok')
+    vi.mocked(setBookSource).mockReset()
+    vi.stubGlobal('window', {
+      setTimeout: (handler: () => void, ms?: number) => setTimeout(handler, ms),
+      clearTimeout: (id: number) => clearTimeout(id),
+    })
+  })
+
+  it('releases the switching state and closes the panel before the slow toc returns', async () => {
+    const appStore = useAppStore()
+    appStore.setOnlineStatus(true)
+    const readerStore = useReaderStore()
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'https://old.test',
+      bookUrl: 'https://old.test/book',
+      tocUrl: 'https://old.test/book/toc',
+    }
+    readerStore.chapters = [{ title: '第一章', url: 'chapter-0', index: 0 }]
+    readerStore.content = '旧源正文'
+    readerStore.openPanel('source')
+    vi.mocked(setBookSource).mockResolvedValue({
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'https://new.test',
+      bookUrl: 'https://new.test/book',
+      tocUrl: 'https://new.test/book/toc',
+    })
+
+    // 新源目录请求挂住不返回：模拟「该书源目录加载很慢」。
+    //
+    // 用数组收集**每一次**调用的 resolver：换源落库后 loadBook 会取一次目录，
+    // 收尾的 refreshTocFromSource 还会再取一次（后台任务）。只记住最后一个
+    // resolver 会让第一次调用永远挂住，await 整条换源链时直接超时。
+    const pendingTocResolvers: ((value: { title: string; url: string; index: number }[]) => void)[] = []
+    vi.mocked(getChapterList).mockImplementation(
+      () => new Promise((resolve) => {
+        pendingTocResolvers.push(resolve as typeof pendingTocResolvers[number])
+      }) as never,
+    )
+
+    const switching = readerStore.switchSource('https://new.test/book', 'https://new.test')
+    await vi.waitFor(() => {
+      expect(getChapterList).toHaveBeenCalled()
+    })
+
+    // 目录仍在路上时：面板必须已经收起、切换标记必须已经释放，
+    // 否则用户又只能对着加载中的换源页面干等。
+    expect(readerStore.activePanel).toBeNull()
+    expect(readerStore.switchingSource).toBeNull()
+    expect(appStore.toasts.some((toast) => toast.message.includes('已切换到'))).toBe(true)
+
+    const chapterList = [{ title: '第一章', url: 'https://new.test/book/1', index: 0 }]
+    for (const resolve of pendingTocResolvers) resolve(chapterList)
+    await switching
+
+    expect(readerStore.book?.origin).toBe('https://new.test')
+    expect(readerStore.chapters).toHaveLength(1)
+  })
+
+  it('relocates the chapter by title in the new source and keeps the scroll progress', async () => {
+    const appStore = useAppStore()
+    appStore.setOnlineStatus(true)
+    const readerStore = useReaderStore()
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'https://old.test',
+      bookUrl: 'https://old.test/book',
+      tocUrl: 'https://old.test/book/toc',
+      durChapterIndex: 2,
+    }
+    // 旧源读到「第三章」（index 2），滚动到 40%。新源目录多了「序章」，章号
+    // 整体后移 —— 沿用旧章号 2 会落到「第二章」，只能按标题重新定位。
+    readerStore.chapters = [
+      { title: '第一章', url: 'old-0', index: 0 },
+      { title: '第二章', url: 'old-1', index: 1 },
+      { title: '第三章', url: 'old-2', index: 2 },
+    ]
+    readerStore.currentIndex = 2
+    readerStore.content = '旧源第三章正文'
+    readerStore.setChapterScrollProgress(0.4)
+    vi.mocked(setBookSource).mockResolvedValue({
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'https://new.test',
+      bookUrl: 'https://new.test/book',
+      tocUrl: 'https://new.test/book/toc',
+    })
+    vi.mocked(getChapterList).mockResolvedValue([
+      { title: '序章', url: 'new-0', index: 0 },
+      { title: '第一章', url: 'new-1', index: 1 },
+      { title: '第二章', url: 'new-2', index: 2 },
+      { title: '第三章', url: 'new-3', index: 3 },
+    ])
+    vi.mocked(getBookContent).mockResolvedValue('新源正文')
+
+    await readerStore.switchSource('https://new.test/book', 'https://new.test')
+
+    expect(readerStore.chapters[readerStore.currentIndex].title).toBe('第三章')
+    expect(readerStore.currentIndex).toBe(3)
+    expect(readerStore.chapterScrollProgress).toBeCloseTo(0.4)
+    expect(readerStore.content).toBe('新源正文')
+    // 换源不该「先按旧章号抓一次、再按标题抓正确的那章」：慢源上重复这一次就是
+    // 几十秒。第一次正文请求就必须已经落在按标题定位出的 new-3 上（之后的
+    // new-2 是预加载取相邻章，属于正常行为）。
+    const requested = vi.mocked(getBookContent).mock.calls.map(([req]) => req.chapterUrl)
+    expect(requested[0]).toBe('new-3')
+  })
+
+  it('ignores a second switch while one is still running', async () => {
+    const appStore = useAppStore()
+    appStore.setOnlineStatus(true)
+    const readerStore = useReaderStore()
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'https://old.test',
+      bookUrl: 'https://old.test/book',
+    }
+    let resolveSetSource: ((value: Awaited<ReturnType<typeof setBookSource>>) => void) | undefined
+    vi.mocked(setBookSource).mockImplementation(
+      () => new Promise((resolve) => {
+        resolveSetSource = resolve
+      }) as never,
+    )
+
+    const first = readerStore.switchSource('https://new.test/book', 'https://new.test')
+    await vi.waitFor(() => {
+      expect(readerStore.switchingSource?.origin).toBe('https://new.test')
+    })
+
+    // 第二次点击必须被挡在入口，避免两个换源流程互相覆盖书架记录。
+    await expect(readerStore.switchSource('https://third.test/book', 'https://third.test')).resolves.toBeNull()
+    expect(setBookSource).toHaveBeenCalledTimes(1)
+
+    resolveSetSource?.(null as never)
+    await first
+    expect(readerStore.switchingSource).toBeNull()
+  })
+
+  it('keeps the switching state when the shelf write itself fails', async () => {
+    const appStore = useAppStore()
+    appStore.setOnlineStatus(true)
+    const readerStore = useReaderStore()
+    readerStore.book = {
+      name: '测试书籍',
+      author: '测试作者',
+      origin: 'https://old.test',
+      bookUrl: 'https://old.test/book',
+    }
+    readerStore.openPanel('source')
+    vi.mocked(setBookSource).mockRejectedValue(new Error('书源不存在'))
+
+    await expect(
+      readerStore.switchSource('https://new.test/book', 'https://new.test'),
+    ).rejects.toThrow('书源不存在')
+
+    expect(readerStore.switchingSource).toBeNull()
+    // 没换成：面板还开着，用户可以继续挑别的源。
+    expect(readerStore.activePanel).toBe('source')
+    expect(appStore.toasts.some((toast) => toast.message.includes('切换失败'))).toBe(true)
   })
 })

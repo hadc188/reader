@@ -544,6 +544,10 @@ const config = computed(() => store.config)
  * 后端只在**真正发起网络请求**时才推阶段，缓存命中不会有任何阶段，
  * 所以这里为空即表示「没在加载」，不需要额外判断 `store.loading`。
  * 「解析」一步通常最慢（书源脚本 + 段评请求）。
+ *
+ * 换源（`switchingSource`）单列一条：它先要抓新源的详情页，那一步在
+ * `loadStage` 里没有对应的阶段。面板开着时由面板自己显示「正在切换…」，
+ * 只有用户把面板关掉（换源仍在跑）才由这条浮条接管提示。
  */
 const loadStageText = computed(() => {
   switch (store.loadStage) {
@@ -554,7 +558,7 @@ const loadStageText = computed(() => {
     case 'caching':
       return '正在保存到本地…'
     default:
-      return ''
+      return store.switchingSource && !store.activePanel ? '正在切换书源…' : ''
   }
 })
 const theme = computed(() => store.readerTheme)
@@ -1057,12 +1061,27 @@ const offlineBannerText = computed(() => {
   return '离线模式：当前书没有本地缓存，未缓存章节将无法打开'
 })
 
+/**
+ * 刷新「当前书已缓存多少章」。
+ *
+ * 只服务离线横幅 —— 在线时 `offlineBannerText` 恒为空串，这个数字根本不会被
+ * 显示。而它背后是一次 `get_shelf_book_with_cache_info`：整本书架逐本 `read_dir`
+ * + 对每本没有目录缓存的书**后台重新抓目录**（后端 prefetch 分支）。原先它挂在
+ * `store.content` 的 watcher 上 —— 也就是**每翻一章**都跑一遍，一本 3000 章的书
+ * 翻两章就要把整本书架扫两遍，还会顺手向十几个站点发起目录请求，正好和当前章
+ * 的正文请求抢连接池。手机端也没有这个开销：缓存计数是本地 SQLite 的
+ * `getChapterCount`，一次索引查询。
+ *
+ * 因此在线时直接跳过（数值保持 0，不影响任何可见 UI），只有真正离线才去查。
+ */
 async function refreshOfflineCacheState() {
-  if (!store.book) {
+  if (appStore.isOnline || !store.book) {
     offlineCachedCount.value = 0
     return
   }
-  const books = await getBookshelfWithCacheInfo().catch(() => [])
+  // prefetch: false —— 阅读页只要这个数字，不该为此让后端把整个书架里缺目录的书
+  // 都抓一遍（那会和正在读的这章的正文请求抢连接池与书源限速额度）。
+  const books = await getBookshelfWithCacheInfo({ prefetch: false }).catch(() => [])
   offlineCachedCount.value = books.find((book) => book.bookUrl === store.book?.bookUrl)?.cachedChapterCount || 0
 }
 
@@ -1074,6 +1093,11 @@ function scheduleRefreshOfflineCacheState() {
     void refreshOfflineCacheState()
   }, 120)
 }
+
+/** 断网后才需要这个数字：进入离线时补查一次，恢复在线时清空。 */
+watch(() => appStore.isOnline, (online) => {
+  if (!online) scheduleRefreshOfflineCacheState()
+})
 
 /** resize 后的重新分页要防抖: 拖拽窗口会连续触发 resize, 每次重建都是重量级
  *  (逐段二分测量)。不防抖会有多个重建并发, 先完成的那个可能读到后一次写入的
@@ -3827,7 +3851,9 @@ onMounted(async () => {
   // 「加入书架」入口要判断这本书在不在书架。直接开书进来时书架可能还没拉过，
   // 这里补一次；失败也无所谓 —— 判定会保持 `unknown`，入口不显示。
   if (!shelfStore.loaded) {
-    void shelfStore.fetchBooks().catch(() => undefined)
+    // prefetch: false —— 这里只为判断「这本书在不在书架」，不需要顺带让后端
+    // 联网补抓整个书架的目录缓存（见 bookshelf store 的说明）。
+    void shelfStore.fetchBooks({ prefetch: false }).catch(() => undefined)
   }
   await waitForChapterListReady()
   if (readerViewUnmounted) return

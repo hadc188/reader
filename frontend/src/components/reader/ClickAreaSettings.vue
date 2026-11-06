@@ -17,20 +17,20 @@
         <div class="click-area-modes" role="group" aria-label="点击区域模式">
           <button
             type="button"
-            :class="{ on: draftMode === 'auto' }"
+            :class="{ on: currentMode === 'auto' }"
             title="沿用原来的三分区：两端翻页、中间呼出菜单"
-            @click="draftMode = 'auto'"
+            @click="currentMode = 'auto'"
           >默认分区</button>
           <button
             type="button"
-            :class="{ on: draftMode === 'custom' }"
+            :class="{ on: currentMode === 'custom' }"
             title="每格动作自己定"
             @click="enableCustom"
           >九宫格</button>
         </div>
       </header>
 
-      <div class="click-area-grid" :class="{ readonly: draftMode !== 'custom' }">
+      <div class="click-area-grid" :class="{ readonly: currentMode !== 'custom' }">
         <button
           v-for="zone in CLICK_AREA_ZONES"
           :key="zone"
@@ -40,7 +40,7 @@
             editing: editorZone === zone,
             idle: shownAreas[zone] === 'none',
           }"
-          :disabled="draftMode !== 'custom'"
+          :disabled="currentMode !== 'custom'"
           @click="editorZone = zone"
         >
           <span class="click-area-cell-action">{{ clickAreaActionLabel(shownAreas[zone]) }}</span>
@@ -49,12 +49,23 @@
       </div>
 
       <footer class="click-area-bar click-area-bar--footer">
-        <div class="click-area-presets">
-          <button type="button" class="click-area-chip" @click="applyPreset('paged')">左右翻页</button>
-          <button type="button" class="click-area-chip" @click="applyPreset('scroll')">上下滚动</button>
-          <button type="button" class="click-area-chip" @click="resetToDefault">恢复默认</button>
+        <div class="click-area-profiles" role="group" aria-label="切换到另一种阅读模式的九宫格">
+          <span class="click-area-profiles-label">正在设置</span>
+          <button
+            v-for="profile in CLICK_AREA_PROFILES"
+            :key="profile"
+            type="button"
+            class="click-area-chip"
+            :class="{ on: draftProfile === profile }"
+            :title="profileHint(profile)"
+            @click="switchProfile(profile)"
+          >
+            {{ CLICK_AREA_PROFILE_LABELS[profile] }}
+            <span v-if="draftModes[profile] === 'custom'" class="click-area-chip-dot" aria-hidden="true"></span>
+          </button>
         </div>
         <div class="click-area-confirm">
+          <button type="button" class="click-area-btn" @click="resetToDefault">恢复本套默认</button>
           <button type="button" class="click-area-btn" @click="close">取消</button>
           <button type="button" class="click-area-btn primary" @click="save">保存</button>
         </div>
@@ -94,13 +105,17 @@ import { computed, ref } from 'vue'
 import { useReaderStore } from '../../stores/reader'
 import {
   CLICK_AREA_ACTIONS,
+  CLICK_AREA_PROFILES,
+  CLICK_AREA_PROFILE_LABELS,
   CLICK_AREA_ZONES,
   clickAreaActionLabel,
   presetClickAreas,
-  scrollClickAreas,
   setClickAreaAction,
   type ClickAreaAction,
   type ClickAreaMap,
+  type ClickAreaModes,
+  type ClickAreaProfile,
+  type ClickAreaProfiles,
   type ClickAreaZone,
 } from '../../utils/readerClickAreas'
 
@@ -108,9 +123,22 @@ const emit = defineEmits<{ close: [] }>()
 
 const store = useReaderStore()
 
-/** 本地草稿：改坏了点「取消」能退回去，不必手动还原九个格子。 */
-const draft = ref<ClickAreaMap>({ ...store.config.clickAreas })
-const draftMode = ref<'auto' | 'custom'>(store.config.clickAreaMode)
+/**
+ * 本地草稿：两套九宫格 + 两套开关各存一份，点「取消」整体丢弃。
+ *
+ * 两套同时留在内存里，是为了让底部的「左右翻页 / 上下滚动」能来回切着配 ——
+ * 切过去看到的是那一套已经存下的内容，而不是被另一套覆盖过的结果。
+ */
+const draftProfiles = ref<ClickAreaProfiles>({
+  paged: { ...store.config.clickAreaProfiles.paged },
+  scroll: { ...store.config.clickAreaProfiles.scroll },
+})
+const draftModes = ref<ClickAreaModes>({ ...store.config.clickAreaModes })
+
+/** 当前正在编辑哪一套。默认跟着当前阅读方式走，省得用户先切一下。 */
+const draftProfile = ref<ClickAreaProfile>(
+  store.config.readMethod === '左右翻页' ? 'paged' : 'scroll',
+)
 const editorZone = ref<ClickAreaZone | null>(null)
 const notice = ref('')
 
@@ -120,16 +148,22 @@ const ZONE_LABELS: Record<ClickAreaZone, string> = {
   bl: '左下', bc: '中下', br: '右下',
 }
 
-/**
- * 「默认分区」模式下网格显示的是**当前阅读方式真正会用的分区**，而不是空白或
- * 上一次的草稿 —— 用户切过去能直接看出"我现在点上下两端到底是翻页还是呼菜单"。
- */
-const presetForReadingMode = computed(() => presetClickAreas(
-  store.config.readMethod === '左右翻页' ? 'paged' : 'scroll',
-))
+/** 当前这一套的草稿网格。 */
+const draft = computed(() => draftProfiles.value[draftProfile.value])
+/** 当前这一套的开关。 */
+const currentMode = computed({
+  get: () => draftModes.value[draftProfile.value],
+  set: (value: 'auto' | 'custom') => { draftModes.value[draftProfile.value] = value },
+})
 
+/**
+ * 「默认分区」模式下网格显示的是**这一套对应的三分区**，而不是空白或上一次的
+ * 草稿 —— 用户切过去能直接看出"这一套现在点两端到底是翻页还是呼菜单"。
+ */
 const shownAreas = computed<ClickAreaMap>(() => (
-  draftMode.value === 'custom' ? draft.value : presetForReadingMode.value
+  currentMode.value === 'custom'
+    ? draft.value
+    : presetClickAreas(draftProfile.value)
 ))
 
 /** 浮层里打勾的那一项。单独算成 computed，模板里就不用写 `draft[editorZone!]`。 */
@@ -137,11 +171,25 @@ const editingAction = computed<ClickAreaAction | undefined>(() => (
   editorZone.value ? draft.value[editorZone.value] : undefined
 ))
 
-/** 首次切到九宫格：如果还是「全菜单」这种没配过的空壳，顺手填一套预设。 */
+function profileHint(profile: ClickAreaProfile) {
+  return draftModes.value[profile] === 'custom'
+    ? `${CLICK_AREA_PROFILE_LABELS[profile]}：已启用九宫格`
+    : `${CLICK_AREA_PROFILE_LABELS[profile]}：使用默认三分区`
+}
+
+/** 切到另一套。两套草稿互不干扰，切回来还是刚才编辑的样子。 */
+function switchProfile(profile: ClickAreaProfile) {
+  if (draftProfile.value === profile) return
+  draftProfile.value = profile
+  editorZone.value = null
+  notice.value = ''
+}
+
+/** 首次切到九宫格：如果还是「全菜单」这种没配过的空壳，顺手填这一套的预设。 */
 function enableCustom() {
-  draftMode.value = 'custom'
+  currentMode.value = 'custom'
   if (!CLICK_AREA_ZONES.some((zone) => draft.value[zone] !== 'menu')) {
-    draft.value = presetForReadingMode.value
+    draftProfiles.value[draftProfile.value] = presetClickAreas(draftProfile.value)
     notice.value = ''
   }
 }
@@ -149,7 +197,7 @@ function enableCustom() {
 function applyAction(action: ClickAreaAction) {
   if (!editorZone.value) return
   const result = setClickAreaAction(draft.value, editorZone.value, action)
-  draft.value = result.areas
+  draftProfiles.value[draftProfile.value] = result.areas
   editorZone.value = null
   // 手机端的 detectClickArea: 九格都没有菜单时把正中抢回来，否则再也呼不出工具栏。
   notice.value = result.forcedCenterMenu
@@ -157,24 +205,21 @@ function applyAction(action: ClickAreaAction) {
     : ''
 }
 
-function applyPreset(kind: 'paged' | 'scroll') {
-  draft.value = presetClickAreas(kind)
-  draftMode.value = 'custom'
-  editorZone.value = null
-  notice.value = ''
-}
-
+/** 只把**当前这一套**恢复成该模式的默认三分区，另一套不动。 */
 function resetToDefault() {
-  // 与 store 的 defaultConfig.clickAreas 一致：默认阅读方式是「上下滑动」。
-  draft.value = scrollClickAreas()
-  draftMode.value = 'auto'
+  draftProfiles.value[draftProfile.value] = presetClickAreas(draftProfile.value)
+  draftModes.value[draftProfile.value] = 'auto'
   editorZone.value = null
   notice.value = ''
 }
 
 function save() {
-  store.updateConfig('clickAreas', { ...draft.value })
-  store.updateConfig('clickAreaMode', draftMode.value)
+  // 两套一起落盘：用户可能只改了一套，另一套保持原样。
+  store.updateConfig('clickAreaProfiles', {
+    paged: { ...draftProfiles.value.paged },
+    scroll: { ...draftProfiles.value.scroll },
+  })
+  store.updateConfig('clickAreaModes', { ...draftModes.value })
   emit('close')
 }
 
@@ -345,14 +390,24 @@ function close() {
   opacity: 0.45;
 }
 
-.click-area-presets {
+.click-area-profiles {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 4px;
   min-width: 0;
 }
 
+.click-area-profiles-label {
+  margin-right: 2px;
+  font-size: 11.5px;
+  opacity: 0.5;
+}
+
 .click-area-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 5px 10px;
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 8px;
@@ -365,6 +420,23 @@ function close() {
 
 .click-area-chip:hover {
   background: rgba(255, 255, 255, 0.14);
+}
+
+/* 选中的那套：实心亮底，一眼看出「现在编辑的是这一套」。 */
+.click-area-chip.on {
+  border-color: rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.9);
+  color: #1f2430;
+  font-weight: 600;
+}
+
+/* 该套已启用九宫格的小圆点：切走之后也能看出另一套是不是自定义。 */
+.click-area-chip-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
 }
 
 .click-area-confirm {
@@ -518,7 +590,7 @@ function close() {
     align-items: stretch;
   }
 
-  .click-area-presets {
+  .click-area-profiles {
     justify-content: center;
   }
 

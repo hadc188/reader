@@ -6,14 +6,12 @@
  * 听书 / 无操作）。手机端把九个格子存在 `clickActionTopLeft` 等九个偏好里，桌面端
  * 只有一个 localStorage 的 `readConfig`，所以统一存成 `clickAreas` 对象。
  *
- * 两种预设：
- * - `paged`（左右翻页）：当前桌面行为是「左 30% 上一页、右 30% 下一页、中间菜单」，
- *   所以预设按**列**分区。
- * - `scroll`（上下滑动/滚动）：当前行为是「上 30% 上一页、下 30% 下一页、中间菜单」，
- *   所以预设按**行**分区。
+ * **两种阅读模式各有一套独立的九宫格**（`ClickAreaProfiles`）：左右翻页一套、
+ * 上下滚动一套，互不影响。这不是可有可无的拆分 —— 两种模式的分区方向本来就相反
+ * （分页按列、滚动按行），同一个网格套到另一种模式上必然变味，所以它们各有各的
+ * `custom` 开关与格子内容，用户可以在分页模式下用九宫格、滚动模式继续用默认三分区。
  *
  * 保持 `auto` 预设而不是把默认值写死成一张九宫格，是为了**不改变老用户的手感**：
- * 两种阅读模式的分区方向本来就不同，一张固定网格必然让其中一种模式变味。
  * 用户真正改过某一格之后才切到 `custom`，从那时起九宫格说了算。
  */
 
@@ -62,6 +60,23 @@ const ACTION_IDS = new Set<string>(CLICK_AREA_ACTIONS.map((action) => action.id)
 
 export type ClickAreaMap = Record<ClickAreaZone, ClickAreaAction>
 
+/** 一套九宫格属于哪种阅读模式。 */
+export type ClickAreaProfile = 'paged' | 'scroll'
+
+export const CLICK_AREA_PROFILES: readonly ClickAreaProfile[] = ['paged', 'scroll']
+
+/** 两种模式各自的九宫格内容。 */
+export type ClickAreaProfiles = Record<ClickAreaProfile, ClickAreaMap>
+
+/** 两种模式各自的「用默认三分区 / 用九宫格」开关。 */
+export type ClickAreaModes = Record<ClickAreaProfile, 'auto' | 'custom'>
+
+/** 模式的可读名（界面上的两个切换按钮）。 */
+export const CLICK_AREA_PROFILE_LABELS: Record<ClickAreaProfile, string> = {
+  paged: '左右翻页',
+  scroll: '上下滚动',
+}
+
 /** 左右翻页：左列上一页、中列菜单、右列下一页。 */
 export function pagedClickAreas(): ClickAreaMap {
   return {
@@ -80,15 +95,25 @@ export function scrollClickAreas(): ClickAreaMap {
   }
 }
 
-/** 当前阅读模式对应的预设。 */
-export function presetClickAreas(kind: 'paged' | 'scroll'): ClickAreaMap {
+/** 某个阅读模式的默认预设。 */
+export function presetClickAreas(kind: ClickAreaProfile): ClickAreaMap {
   return kind === 'paged' ? pagedClickAreas() : scrollClickAreas()
+}
+
+/** 两套预设（各自独立的新对象）。 */
+export function defaultClickAreaProfiles(): ClickAreaProfiles {
+  return { paged: pagedClickAreas(), scroll: scrollClickAreas() }
+}
+
+/** 两套都从默认三分区起步。 */
+export function defaultClickAreaModes(): ClickAreaModes {
+  return { paged: 'auto', scroll: 'auto' }
 }
 
 /**
  * 把点击坐标换算成九宫格位置。
  *
- * 入参是 0..1 的比例，调用方负责除以视口宽高。边界值（恰好 1/3、2/3）归入前
+ * 入参是 0..1 的比例，调用方负责除以视口宽高。边界值（恰好 1/3、2/3）归入后
  * 一格，和手机端 `RectF.contains` 的左闭右开一致。
  */
 export function clickAreaZoneAt(xRatio: number, yRatio: number): ClickAreaZone {
@@ -97,7 +122,7 @@ export function clickAreaZoneAt(xRatio: number, yRatio: number): ClickAreaZone {
   return `${row}${column}` as ClickAreaZone
 }
 
-/** 宽松解析 localStorage 里的九宫格：缺格/脏值一律回落预设，避免出现空动作。 */
+/** 宽松解析单套九宫格：缺格/脏值一律回落预设，避免出现空动作。 */
 export function normalizeClickAreas(raw: unknown, fallback: ClickAreaMap): ClickAreaMap {
   const result = { ...fallback }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return result
@@ -110,6 +135,48 @@ export function normalizeClickAreas(raw: unknown, fallback: ClickAreaMap): Click
   }
   return result
 }
+
+/** 宽松解析两套九宫格。缺一套就把那一套回落预设，另一套照常保留。 */
+export function normalizeClickAreaProfiles(raw: unknown, fallback: ClickAreaProfiles): ClickAreaProfiles {
+  const record = (raw && typeof raw === 'object' && !Array.isArray(raw))
+    ? raw as Record<string, unknown>
+    : {}
+  return {
+    paged: normalizeClickAreas(record.paged, fallback.paged),
+    scroll: normalizeClickAreas(record.scroll, fallback.scroll),
+  }
+}
+
+/** 宽松解析两套开关；只认 `custom`，其余一律按 `auto`（脏数据不该开启九宫格）。 */
+export function normalizeClickAreaModes(raw: unknown): ClickAreaModes {
+  const record = (raw && typeof raw === 'object' && !Array.isArray(raw))
+    ? raw as Record<string, unknown>
+    : {}
+  return {
+    paged: record.paged === 'custom' ? 'custom' : 'auto',
+    scroll: record.scroll === 'custom' ? 'custom' : 'auto',
+  }
+}
+
+/**
+ * 把老存档里「单套 clickAreas + 单个 clickAreaMode」迁移成两套。
+ *
+ * 旧版本两套共用一张网格，所以迁移时**两套都填同一份内容**，老用户手感不变。
+ * 新存档里 `clickAreas` 已经是 `{paged, scroll}` 对象，不会被这条路径碰到。
+ */
+export function migrateLegacyClickAreas(
+  legacyAreas: unknown,
+  legacyMode: unknown,
+  fallback: ClickAreaProfiles,
+): { areas: ClickAreaProfiles; modes: ClickAreaModes } {
+  const shared = normalizeClickAreas(legacyAreas, fallback.scroll)
+  const custom = legacyMode === 'custom'
+  return {
+    areas: { paged: { ...shared }, scroll: { ...shared } },
+    modes: { paged: custom ? 'custom' : 'auto', scroll: custom ? 'custom' : 'auto' },
+  }
+}
+
 
 /** 九宫格里是否还有「呼出菜单」——一个都没有就等于把自己锁在正文里。 */
 export function hasMenuZone(areas: ClickAreaMap): boolean {

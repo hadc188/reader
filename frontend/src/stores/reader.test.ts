@@ -618,32 +618,75 @@ describe('reader local txt chapters', () => {
     expect(localStorage.removeItem).toHaveBeenCalledWith('reader-background-image')
   })
 
-  it('persists the click-area grid and keeps it across a layout reset', () => {
+  it('persists both click-area grids independently and keeps them across a layout reset', () => {
     const readerStore = useReaderStore()
-    // 默认是「默认三分区」：老用户升级后手感不变。
-    expect(readerStore.config.clickAreaMode).toBe('auto')
-    expect(readerStore.config.clickAreas.mc).toBe('menu')
+    // 默认两套都是「默认三分区」：老用户升级后手感不变。
+    expect(readerStore.config.clickAreaModes).toEqual({ paged: 'auto', scroll: 'auto' })
+    expect(readerStore.config.clickAreaProfiles.paged.mc).toBe('menu')
+    expect(readerStore.config.clickAreaProfiles.scroll.mc).toBe('menu')
 
-    const custom = { ...readerStore.config.clickAreas, tl: 'bookmark' as const, br: 'tts' as const }
-    readerStore.updateConfig('clickAreas', custom)
-    readerStore.updateConfig('clickAreaMode', 'custom')
+    // 两套各配各的：左右翻页用九宫格、上下滚动继续默认三分区。
+    const paged = { ...readerStore.config.clickAreaProfiles.paged, tl: 'bookmark' as const }
+    const scroll = { ...readerStore.config.clickAreaProfiles.scroll, br: 'tts' as const }
+    readerStore.updateConfig('clickAreaProfiles', { paged, scroll })
+    readerStore.updateConfig('clickAreaModes', { paged: 'custom', scroll: 'auto' })
 
     // 落盘的是普通 JSON，不带响应式代理。
     const saved = JSON.parse(vi.mocked(localStorage.setItem).mock.calls.at(-1)![1] as string)
-    expect(saved.clickAreaMode).toBe('custom')
-    expect(saved.clickAreas.tl).toBe('bookmark')
-    expect(saved.clickAreas.br).toBe('tts')
+    expect(saved.clickAreaModes).toEqual({ paged: 'custom', scroll: 'auto' })
+    expect(saved.clickAreaProfiles.paged.tl).toBe('bookmark')
+    expect(saved.clickAreaProfiles.scroll.br).toBe('tts')
 
     // 重置排版参数不该把用户配好的点击区域打回默认。
     readerStore.updateConfig('fontSize', 30)
     readerStore.resetConfig()
     expect(readerStore.config.fontSize).toBe(18)
-    expect(readerStore.config.clickAreaMode).toBe('custom')
-    expect(readerStore.config.clickAreas.tl).toBe('bookmark')
-    expect(readerStore.config.clickAreas.br).toBe('tts')
+    expect(readerStore.config.clickAreaModes).toEqual({ paged: 'custom', scroll: 'auto' })
+    expect(readerStore.config.clickAreaProfiles.paged.tl).toBe('bookmark')
+    expect(readerStore.config.clickAreaProfiles.scroll.br).toBe('tts')
     // 深拷过：改 config 里的对象不会改到之前那份。
-    expect(custom.tl).toBe('bookmark')
+    expect(paged.tl).toBe('bookmark')
+    expect(scroll.br).toBe('tts')
   })
+
+  it('migrates the single legacy grid onto both profiles', () => {
+    // 老存档：一张网格 + 一个开关，没有 paged/scroll 之分。
+    localStorage.setItem('readConfig', JSON.stringify({
+      clickAreaMode: 'custom',
+      clickAreas: {
+        tl: 'catalog', tc: 'menu', tr: 'search',
+        ml: 'prevPage', mc: 'menu', mr: 'nextPage',
+        bl: 'bookmark', bc: 'menu', br: 'tts',
+      },
+    }))
+    // 重新建一个 store 实例才会重跑 loadConfig。
+    setActivePinia(createPinia())
+    const migrated = useReaderStore()
+    // 两套都拿到同一份内容、都算 custom —— 老用户升级后手感不变。
+    expect(migrated.config.clickAreaModes).toEqual({ paged: 'custom', scroll: 'custom' })
+    expect(migrated.config.clickAreaProfiles.paged.tl).toBe('catalog')
+    expect(migrated.config.clickAreaProfiles.scroll.tl).toBe('catalog')
+    expect(migrated.config.clickAreaProfiles.paged.br).toBe('tts')
+    expect(migrated.config.clickAreaProfiles.scroll.br).toBe('tts')
+    // 两套是各自独立的对象，改一套不会串到另一套。
+    expect(migrated.config.clickAreaProfiles.paged)
+      .not.toBe(migrated.config.clickAreaProfiles.scroll)
+  })
+
+  it('falls back to the presets when the stored grids are dirty', () => {
+    localStorage.setItem('readConfig', JSON.stringify({
+      clickAreaModes: { paged: 'custom', scroll: '嗯' },
+      clickAreaProfiles: { paged: { tl: '不存在的动作' }, scroll: null },
+    }))
+    setActivePinia(createPinia())
+    const dirty = useReaderStore()
+    // 脏值只影响那一套那一格，其余回落预设。
+    expect(dirty.config.clickAreaModes.paged).toBe('custom')
+    expect(dirty.config.clickAreaModes.scroll).toBe('auto')
+    expect(dirty.config.clickAreaProfiles.paged.tl).toBe('prevPage')
+    expect(dirty.config.clickAreaProfiles.scroll.mc).toBe('menu')
+  })
+
 
   it('updates the open-position snapshot when accepting newer Legado progress', async () => {
     const appStore = useAppStore()

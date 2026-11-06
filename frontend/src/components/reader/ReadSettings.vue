@@ -516,17 +516,17 @@
             <label>点击翻页</label>
             <div class="segmented">
               <button
-                :class="{ on: config.clickAction === 'auto' && config.clickAreaMode === 'auto' }"
+                :class="{ on: config.clickAction === 'auto' && currentClickAreaMode === 'auto' }"
                 title="点击上方后退，点击下方前进，到章节边界时自动切换章节"
                 @click="useDefaultClickArea('auto')"
               >自动</button>
               <button
-                :class="{ on: config.clickAction === 'next' && config.clickAreaMode === 'auto' }"
+                :class="{ on: config.clickAction === 'next' && currentClickAreaMode === 'auto' }"
                 title="点击正文上方或下方，都只向后阅读"
                 @click="useDefaultClickArea('next')"
               >仅下滚</button>
               <button
-                :class="{ on: config.clickAction === 'none' && config.clickAreaMode === 'auto' }"
+                :class="{ on: config.clickAction === 'none' && currentClickAreaMode === 'auto' }"
                 title="点击正文不执行翻页或滚动"
                 @click="useDefaultClickArea('none')"
               >禁用</button>
@@ -540,9 +540,9 @@
                 class="opt-btn wide"
                 type="button"
                 @click="emit('openClickArea')"
-              >{{ config.clickAreaMode === 'custom' ? '九宫格（自定义）' : '默认三分区' }}</button>
+              >{{ clickAreaSummary }}</button>
               <span class="field-hint">
-                九宫格会铺满整个阅读页逐格指定动作；用它时上面的「点击翻页」不再生效。
+                左右翻页与上下滚动各有一套九宫格，可分别设置；用九宫格时上面的「点击翻页」不再生效。
               </span>
             </div>
           </div>
@@ -1419,6 +1419,7 @@ import {
   readerOpacityToPercent,
 } from '../../utils/readerBackground'
 import { uploadBackgroundImage } from '../../api/background'
+import type { ClickAreaProfile } from '../../utils/readerClickAreas'
 import {
   HOTKEY_ACTIONS,
   HOTKEY_ACTION_MAP,
@@ -1967,14 +1968,38 @@ const emit = defineEmits<{ openClickArea: [] }>()
 
 /**
  * 「点击翻页」三个档位只在默认三分区下生效；用户点它们意味着想回默认分区，
- * 所以顺手把 clickAreaMode 切回 auto，否则点了没反应（九宫格优先命中）。
+ * 所以顺手把**当前阅读模式那一套**的 clickAreaModes 切回 auto —— 否则点了没反应
+ * （那一套的九宫格优先命中）。另一套不动：用户可能只想让当前模式回默认。
  */
 function useDefaultClickArea(action: 'auto' | 'next' | 'none') {
   store.updateConfig('clickAction', action)
-  if (store.config.clickAreaMode !== 'auto') {
-    store.updateConfig('clickAreaMode', 'auto')
+  const profile = currentClickAreaProfile.value
+  if (store.config.clickAreaModes[profile] !== 'auto') {
+    store.updateConfig('clickAreaModes', {
+      ...store.config.clickAreaModes,
+      [profile]: 'auto',
+    })
   }
 }
+
+/** 当前阅读方式对应哪一套九宫格（与 ReaderView 的判据保持一致）。 */
+const currentClickAreaProfile = computed<ClickAreaProfile>((
+  () => (store.config.readMethod === '左右翻页' ? 'paged' : 'scroll')
+))
+
+/** 当前这一套的开关：按钮选中态只看它，另一套配成什么样都不影响。 */
+const currentClickAreaMode = computed(() => store.config.clickAreaModes[currentClickAreaProfile.value])
+
+/** 入口按钮上的摘要：两套各自是否启用九宫格。 */
+const clickAreaSummary = computed(() => {
+  const modes = store.config.clickAreaModes
+  const pagedOn = modes.paged === 'custom'
+  const scrollOn = modes.scroll === 'custom'
+  if (pagedOn && scrollOn) return '九宫格（两套都自定义）'
+  if (pagedOn) return '九宫格（仅左右翻页）'
+  if (scrollOn) return '九宫格（仅上下滚动）'
+  return '默认三分区'
+})
 
 /** select 的 value 必须是字符串：存储里 id 可能是 number（后端下发）或 string。 */
 const selectedHttpTtsId = computed(() => (

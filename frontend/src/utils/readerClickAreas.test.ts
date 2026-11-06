@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import {
   CLICK_AREA_ACTIONS,
+  CLICK_AREA_PROFILES,
+  CLICK_AREA_PROFILE_LABELS,
   CLICK_AREA_ZONES,
   clickAreaActionLabel,
   clickAreaZoneAt,
+  defaultClickAreaModes,
+  defaultClickAreaProfiles,
   hasMenuZone,
+  migrateLegacyClickAreas,
+  normalizeClickAreaModes,
+  normalizeClickAreaProfiles,
   normalizeClickAreas,
   pagedClickAreas,
   presetClickAreas,
@@ -144,5 +151,88 @@ describe('标签', () => {
   it('动作 id 不重复', () => {
     const ids = CLICK_AREA_ACTIONS.map((action) => action.id)
     expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
+describe('两套九宫格（左右翻页 / 上下滚动）', () => {
+  it('两套预设各自独立，改一套不影响另一套', () => {
+    const profiles = defaultClickAreaProfiles()
+    expect(profiles.paged).toEqual(pagedClickAreas())
+    expect(profiles.scroll).toEqual(scrollClickAreas())
+    expect(profiles.paged).not.toBe(profiles.scroll)
+    profiles.paged.tl = 'bookmark'
+    expect(profiles.scroll.tl).toBe('prevPage')
+    // 再取一次仍然是干净的默认值。
+    expect(defaultClickAreaProfiles().paged.tl).toBe('prevPage')
+  })
+
+  it('两套默认都用默认三分区', () => {
+    expect(defaultClickAreaModes()).toEqual({ paged: 'auto', scroll: 'auto' })
+  })
+
+  it('每种模式都有自己的名字', () => {
+    expect(CLICK_AREA_PROFILES).toEqual(['paged', 'scroll'])
+    expect(CLICK_AREA_PROFILE_LABELS.paged).toBe('左右翻页')
+    expect(CLICK_AREA_PROFILE_LABELS.scroll).toBe('上下滚动')
+  })
+})
+
+describe('normalizeClickAreaProfiles / normalizeClickAreaModes', () => {
+  const fallback = defaultClickAreaProfiles()
+
+  it('缺一套只回落那一套，另一套照常保留', () => {
+    const result = normalizeClickAreaProfiles({
+      paged: { tl: 'catalog' },
+    }, fallback)
+    expect(result.paged.tl).toBe('catalog')
+    // paged 其余格回落预设。
+    expect(result.paged.mc).toBe('menu')
+    // scroll 整套缺失 → 回落预设。
+    expect(result.scroll).toEqual(fallback.scroll)
+  })
+
+  it('脏值与空值整张回落', () => {
+    for (const raw of [null, undefined, 'x', 42, []]) {
+      expect(normalizeClickAreaProfiles(raw, fallback)).toEqual(fallback)
+    }
+  })
+
+  it('开关只认 custom，其余按 auto', () => {
+    expect(normalizeClickAreaModes({ paged: 'custom', scroll: 'nope' }))
+      .toEqual({ paged: 'custom', scroll: 'auto' })
+    expect(normalizeClickAreaModes(null)).toEqual({ paged: 'auto', scroll: 'auto' })
+    expect(normalizeClickAreaModes({ paged: 'auto', scroll: 'custom' }))
+      .toEqual({ paged: 'auto', scroll: 'custom' })
+  })
+})
+
+describe('migrateLegacyClickAreas', () => {
+  const fallback = defaultClickAreaProfiles()
+
+  it('老存档的同一张网格铺到两套上，两套都是 custom', () => {
+    const legacy = {
+      tl: 'catalog' as const, tc: 'menu' as const, tr: 'search' as const,
+      ml: 'prevPage' as const, mc: 'menu' as const, mr: 'nextPage' as const,
+      bl: 'bookmark' as const, bc: 'menu' as const, br: 'tts' as const,
+    }
+    const { areas, modes } = migrateLegacyClickAreas(legacy, 'custom', fallback)
+    expect(modes).toEqual({ paged: 'custom', scroll: 'custom' })
+    expect(areas.paged).toEqual(legacy)
+    expect(areas.scroll).toEqual(legacy)
+    // 必须是两份独立对象，否则改一套会串到另一套。
+    expect(areas.paged).not.toBe(areas.scroll)
+  })
+
+  it('老存档是 auto 时两套都保持 auto', () => {
+    const { areas, modes } = migrateLegacyClickAreas({ tl: 'catalog' }, 'auto', fallback)
+    expect(modes).toEqual({ paged: 'auto', scroll: 'auto' })
+    expect(areas.paged.tl).toBe('catalog')
+    expect(areas.scroll.tl).toBe('catalog')
+  })
+
+  it('老存档网格本身是脏的也能拿到可用的两套', () => {
+    const { areas } = migrateLegacyClickAreas({ tl: '不存在' }, 'custom', fallback)
+    expect(areas.paged.tl).toBe('prevPage')
+    expect(areas.scroll.tl).toBe('prevPage')
   })
 })

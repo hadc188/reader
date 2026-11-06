@@ -444,6 +444,7 @@ import { isReaderInteractiveClickTarget } from '../utils/readerClick'
 import {
   clickAreaZoneAt,
   type ClickAreaAction,
+  type ClickAreaProfile,
 } from '../utils/readerClickAreas'
 import {
   READER_HOVER_HIDE_DELAY_MS,
@@ -875,6 +876,16 @@ const showBookInfo = ref(false)
 const bookInfoBook = ref<Book | null>(null)
 /** 全屏「点击区域设置」是否展开。 */
 const showClickAreaSettings = ref(false)
+
+/**
+ * 当前生效的是哪一套九宫格。
+ *
+ * 与下面的三分区分支同一个判据：左右分页模式用 `paged`，其余（上下滑动/上下滚动/
+ * 连续阅读）用 `scroll`。PDF 是单章模式、不走左右分页，因此固定归到 `scroll`。
+ */
+const activeClickAreaProfile = computed<ClickAreaProfile>((
+  () => (isHorizontalPageMode.value ? 'paged' : 'scroll')
+))
 
 /**
  * 从设置抽屉里请求打开点击区域设置。
@@ -2935,13 +2946,15 @@ function handleGlobalClick(e: MouseEvent) {
   if (store.isAutoScrolling) return
   
   // 自定义九宫格优先：每格的动作由用户配置，命中后直接分派，不再走下面的
-  // 「上/下三分区」老逻辑。
-  if (config.value.clickAreaMode === 'custom') {
+  // 「上/下三分区」老逻辑。两套九宫格按当前阅读模式各取各的 —— 左右翻页与
+  // 上下滚动的分区方向相反，不能共用一张网格。
+  const profile = activeClickAreaProfile.value
+  if (config.value.clickAreaModes[profile] === 'custom') {
     const zone = clickAreaZoneAt(
       e.clientX / window.innerWidth,
       e.clientY / window.innerHeight,
     )
-    runClickAreaAction(config.value.clickAreas[zone])
+    runClickAreaAction(config.value.clickAreaProfiles[profile][zone])
     return
   }
 
@@ -3250,12 +3263,12 @@ function handleTouchEnd(event: TouchEvent) {
       suppressNextTapUntil = Date.now() + 350
       if (showControls.value && !store.activePanel) {
         collapseControlsByClick()
-      } else if (config.value.clickAreaMode === 'custom') {
+      } else if (config.value.clickAreaModes[activeClickAreaProfile.value] === 'custom') {
         const zone = clickAreaZoneAt(
           touch.clientX / window.innerWidth,
           touch.clientY / window.innerHeight,
         )
-        runClickAreaAction(config.value.clickAreas[zone])
+        runClickAreaAction(config.value.clickAreaProfiles[activeClickAreaProfile.value][zone])
       } else {
         const x = touch.clientX / window.innerWidth
         if (x < 0.3) {

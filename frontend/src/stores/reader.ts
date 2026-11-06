@@ -68,9 +68,13 @@ import {
 } from '../utils/readingPosition'
 import { compileReplaceRule, toSandboxRuleStep } from '../utils/replaceRuleRegex'
 import {
-  normalizeClickAreas,
-  scrollClickAreas,
-  type ClickAreaMap,
+  defaultClickAreaModes,
+  defaultClickAreaProfiles,
+  migrateLegacyClickAreas,
+  normalizeClickAreaModes,
+  normalizeClickAreaProfiles,
+  type ClickAreaModes,
+  type ClickAreaProfiles,
 } from '../utils/readerClickAreas'
 
 const READER_SESSION_KEY = 'reader-last-session'
@@ -134,12 +138,12 @@ export interface ReadConfig {
   autoScrollSpeed: number
   clickAction: 'next' | 'auto' | 'none'
   /**
-   * 点击区域模式：`auto` 沿用「上下/左右三分区」的老手感，`custom` 用下面的
-   * `clickAreas` 九宫格。老存档没有这两个字段，读出来就是 `auto`，行为不变。
+   * 两套九宫格各自的分区模式：`auto` 用老的三分区，`custom` 用该模式自己的九宫格。
+   * 「左右翻页」与「上下滚动」各一套、互不影响 —— 两者分区方向本来就相反。
    */
-  clickAreaMode: 'auto' | 'custom'
-  /** 九宫格每格的动作。`auto` 模式下不生效，但仍完整保存，切回 `custom` 不用重配。 */
-  clickAreas: ClickAreaMap
+  clickAreaModes: ClickAreaModes
+  /** 两套九宫格每格的动作。`auto` 那套不生效，但仍完整保存，切回 `custom` 不用重配。 */
+  clickAreaProfiles: ClickAreaProfiles
   selectAction: 'popup' | 'ignore'
   /** 简繁转换档位。'off' 表示原文直出（与手机端 legado 的「关闭」一致）。 */
   chineseMode: 'off' | 'simplified' | 'traditional'
@@ -176,9 +180,9 @@ const defaultConfig: ReadConfig = {
   animateDuration: 300,
   autoScrollSpeed: 30,
   clickAction: 'auto',
-  clickAreaMode: 'auto',
-  // 默认给「上下滚动」预设：默认阅读方式就是「上下滑动」，两者分区方向一致。
-  clickAreas: scrollClickAreas(),
+  // 两套默认都是「默认三分区」：老用户升级后手感不变。
+  clickAreaModes: defaultClickAreaModes(),
+  clickAreaProfiles: defaultClickAreaProfiles(),
   selectAction: 'ignore',
   chineseMode: 'simplified',
   enablePreload: true,
@@ -194,6 +198,35 @@ const defaultConfig: ReadConfig = {
   panelOpacity: DEFAULT_READER_PANEL_OPACITY,
 }
 
+/**
+ * 解析存档里的点击区域配置。
+ *
+ * 分两种情况：
+ * - 新格式（有 `clickAreaProfiles`）：两套各取各的，缺一套回落那套预设。
+ * - 老格式（单套 `clickAreas` + 单个 `clickAreaMode`）：原样铺到两套上，
+ *   老用户升级后手感完全不变。
+ */
+function resolveClickAreaConfig(
+  savedConfig: Partial<ReadConfig> & { clickAreas?: unknown; clickAreaMode?: unknown },
+  parsed: { clickAreas?: unknown; clickAreaMode?: unknown },
+): { clickAreaModes: ClickAreaModes; clickAreaProfiles: ClickAreaProfiles } {
+  // 注意 `...savedConfig` 已经把老字段带进来了，这里读的是**原始存档**，
+  // 而不是被 Partial<ReadConfig> 抹掉类型后的值。
+  const legacyAreas = parsed.clickAreas
+  const hasNewFormat = legacyAreas !== null
+    && typeof legacyAreas === 'object'
+    && !Array.isArray(legacyAreas)
+    && ('paged' in (legacyAreas as Record<string, unknown>) || 'scroll' in (legacyAreas as Record<string, unknown>))
+  if (!hasNewFormat && legacyAreas !== undefined) {
+    const migrated = migrateLegacyClickAreas(legacyAreas, parsed.clickAreaMode, defaultConfig.clickAreaProfiles)
+    return { clickAreaModes: migrated.modes, clickAreaProfiles: migrated.areas }
+  }
+  return {
+    clickAreaModes: normalizeClickAreaModes(savedConfig.clickAreaModes),
+    clickAreaProfiles: normalizeClickAreaProfiles(savedConfig.clickAreaProfiles, defaultConfig.clickAreaProfiles),
+  }
+}
+
 function loadConfig(): ReadConfig {
   try {
     const saved = localStorage.getItem('readConfig')
@@ -203,6 +236,9 @@ function loadConfig(): ReadConfig {
         autoPageMode?: unknown
         scrollPixel?: number
         pageSpeed?: number
+        /** v1.6.5 之前的单套九宫格，迁移用。 */
+        clickAreas?: unknown
+        clickAreaMode?: unknown
       }
       const {
         specialMode: _legacySpecialMode,
@@ -259,18 +295,23 @@ function loadConfig(): ReadConfig {
           || (typeof savedConfig.readerBackgroundImage === 'string' ? savedConfig.readerBackgroundImage : ''),
         readerImageOpacity: normalizeReaderBackgroundOpacity(savedConfig.readerImageOpacity),
         panelOpacity: normalizeReaderPanelOpacity(savedConfig.panelOpacity),
-        // 九宫格按当前底稿兜底：存档里缺格/脏值只影响那一格，不会整张失效。
-        clickAreaMode: savedConfig.clickAreaMode === 'custom' ? 'custom' : 'auto',
-        clickAreas: normalizeClickAreas(
-          savedConfig.clickAreas,
-          savedConfig.clickAreaMode === 'custom' ? scrollClickAreas() : defaultConfig.clickAreas,
-        ),
+        // 两套九宫格：缺哪套就回落那套的预设，脏格只影响那一格。老存档里还是
+        // 单套 clickAreas + 单个 clickAreaMode，由 migrateLegacyClickAreas 原样
+        // 铺到两套上，保证老用户升级后手感不变。
+        ...resolveClickAreaConfig(savedConfig, parsed),
       }
     }
   } catch { /* ignore */ }
-  // clickAreas 是对象：浅拷贝 defaultConfig 会让这个实例和默认值指向同一份，
-  // 一旦有人就地改 config.clickAreas 就会污染所有后续实例。
-  return { ...defaultConfig, clickAreas: { ...defaultConfig.clickAreas } }
+  // 两套九宫格都是对象：浅拷贝 defaultConfig 会让实例和默认值指向同一份，
+  // 一旦有人就地改就会污染所有后续实例。
+  return {
+    ...defaultConfig,
+    clickAreaModes: { ...defaultConfig.clickAreaModes },
+    clickAreaProfiles: {
+      paged: { ...defaultConfig.clickAreaProfiles.paged },
+      scroll: { ...defaultConfig.clickAreaProfiles.scroll },
+    },
+  }
 }
 
 /* ─── Theme presets ─── */
@@ -877,14 +918,18 @@ export const useReaderStore = defineStore('reader', () => {
       fontColor: config.fontColor,
       // 点击区域是「手感」偏好，和配色一样不属于排版参数：重置排版不该把用户
       // 认真配好的九宫格打回默认。
-      clickAreaMode: config.clickAreaMode,
-      clickAreas: config.clickAreas,
+      clickAreaModes: config.clickAreaModes,
+      clickAreaProfiles: config.clickAreaProfiles,
     }
     Object.assign(config, defaultConfig)
     Object.assign(config, backgroundPreferences)
-    // clickAreas 是对象，Object.assign 会连引用一起带过来；深拷一份，避免设置面板
-    // 里逐格编辑时改到旧对象又被 resetConfig 读回去。
-    config.clickAreas = { ...backgroundPreferences.clickAreas }
+    // 两套九宫格都是对象，Object.assign 会连引用一起带过来；深拷一份，避免设置
+    // 面板里逐格编辑时改到旧对象又被 resetConfig 读回去。
+    config.clickAreaModes = { ...backgroundPreferences.clickAreaModes }
+    config.clickAreaProfiles = {
+      paged: { ...backgroundPreferences.clickAreaProfiles.paged },
+      scroll: { ...backgroundPreferences.clickAreaProfiles.scroll },
+    }
     saveConfig()
   }
 

@@ -123,7 +123,7 @@ async fn offline_cache_keeps_libraries_required_to_decode_chapters() {
         "jsLib":"function decodeChapter(){return '解码后的正文'}",
         "ruleContent":{"content":"@js:decodeChapter()"}
     })).unwrap();
-    let content=svc.get_content_with_stage("default","https://cache-library.test/book",&source,"data:text/plain,fixture",None).await.unwrap();
+    let content=svc.get_content_with_stage("default","https://cache-library.test/book",&source,"data:text/plain,fixture",None,None).await.unwrap();
     assert_eq!(content,"解码后的正文");
 }
 

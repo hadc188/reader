@@ -259,3 +259,90 @@ describe('hide-read continuous mode advancement', () => {
     })
   })
 })
+
+describe('volume chapters in continuous reading', () => {
+  function setupVolumeHarness() {
+    setActivePinia(createPinia())
+    const store = useReaderStore()
+    store.book = {
+      name: '分卷书',
+      author: '测试作者',
+      origin: 'local-txt',
+      bookUrl: 'local-txt:volume',
+    }
+    store.chapters = [
+      { title: '第一卷', url: 'chapter-0', index: 0, isVolume: true },
+      { title: '第一章 正文', url: 'chapter-1', index: 1 },
+    ]
+    vi.mocked(getBookContent).mockImplementation(async ({ chapterUrl }) => {
+      // 卷标题章没有正文 —— store 也不该把它当解析失败
+      if (chapterUrl === 'chapter-0') return ''
+      return `${chapterUrl} 内容`
+    })
+    const harness = useContinuousReading(
+      store,
+      (text) => text,
+      computed(() => true),
+      computed(() => false),
+      ref<HTMLElement | undefined>(undefined),
+    )
+    return { store, ...harness }
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    // app store 在模块级就读 localStorage，没有 stub 会在建 store 时直接抛错。
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+      clear: vi.fn(() => storage.clear()),
+    })
+    vi.mocked(getBookContent).mockReset()
+    vi.mocked(getBookContent).mockResolvedValue('正文')
+    vi.mocked(saveBookProgress).mockReset()
+    vi.mocked(saveBookProgress).mockResolvedValue('ok')
+    vi.stubGlobal('window', {
+      setTimeout: (handler: () => void, ms?: number) => setTimeout(handler, ms),
+      clearTimeout: (id: number) => clearTimeout(id),
+      requestAnimationFrame: (handler: () => void) => setTimeout(handler, 0),
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /**
+   * 卷标题章必须把 isVolume 一路带到渲染层：模板据此只画居中标题、
+   * 不画正文区。缺了这个标记，模板会先渲染一次标题、再渲染一次（空的）
+   * 正文区，用户看到的就是「第一卷」出现两遍（issue #33 截图）。
+   */
+  it('carries isVolume onto the continuous chapter item', async () => {
+    const { initializeContinuousChapters, continuousChapters } = setupVolumeHarness()
+
+    await initializeContinuousChapters(0, false)
+    await vi.waitFor(() => {
+      expect(continuousChapters.value.map((chapter) => chapter.index)).toEqual([0, 1])
+    })
+
+    const volume = continuousChapters.value.find((chapter) => chapter.index === 0)
+    expect(volume?.isVolume).toBe(true)
+    const normal = continuousChapters.value.find((chapter) => chapter.index === 1)
+    expect(normal?.isVolume).toBe(false)
+  })
+
+  /** 普通章节不能被误标成卷，否则正文整段消失。 */
+  it('does not mark ordinary chapters as volume', async () => {
+    const { initializeContinuousChapters, continuousChapters } = setupVolumeHarness()
+
+    await initializeContinuousChapters(1, false)
+    await vi.waitFor(() => {
+      expect(continuousChapters.value.length).toBeGreaterThan(0)
+    })
+    for (const chapter of continuousChapters.value) {
+      expect(chapter.isVolume).toBe(false)
+    }
+  })
+})

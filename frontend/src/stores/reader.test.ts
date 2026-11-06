@@ -104,6 +104,7 @@ describe('reader local txt chapters', () => {
       bookUrl: 'local-txt:abc123',
       chapterUrl: 'local-txt:abc123#0',
       bookSourceUrl: 'local-txt',
+      chapterTitle: '第一章',
       refresh: 0,
     })
   })
@@ -177,6 +178,7 @@ describe('reader local txt chapters', () => {
       bookUrl: 'https://example.test/book',
       chapterUrl: 'chapter-1',
       bookSourceUrl: 'test-source',
+      chapterTitle: '第二章',
       refresh: 0,
     })
   })
@@ -1342,6 +1344,7 @@ describe('reader in-place chapter refresh', () => {
       bookUrl: 'https://example.test/refresh',
       chapterUrl: 'chapter-8',
       bookSourceUrl: 'test-source',
+      chapterTitle: '第9章',
       refresh: 1,
       onStage: expect.any(Function),
     })

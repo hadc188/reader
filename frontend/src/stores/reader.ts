@@ -3667,6 +3667,10 @@ export const useReaderStore = defineStore('reader', () => {
         bookUrl: book.value.bookUrl,
         chapterUrl: chapter.url,
         bookSourceUrl: book.value.origin,
+        // 标题交给后端剥正文开头的重复标题：目录里的标题可能带空格，
+        // 正文里那行没有（`第六十七章 荒塔与绿铜` vs `第六十七章荒塔与绿铜`），
+        // 后端按 `\s*` 匹配，与 legado 的「去除重复标题」一致。
+        chapterTitle: chapter.title,
         refresh: forceRefresh ? 1 : 0,
         // 只有仍持有提示的那次加载才能更新阶段（并发加载时避免互相覆盖）
         onStage: reportStage

@@ -13,6 +13,13 @@ export interface ContinuousChapterItem {
   title: string
   content: string
   html: string
+  /**
+   * 卷标题章（`第一卷` 之类）。正文天然为空，连续阅读里只渲染居中的标题块，
+   * 不画正文区也不占滚动高度 —— 否则用户会看到一个"空章节"卡在章节之间
+   * （issue #33 截图里的重复标题就是这么来的：标题渲染一次，空正文区又把
+   * 同一行带出来）。
+   */
+  isVolume: boolean
 }
 
 export function useContinuousReading(
@@ -95,6 +102,7 @@ export function useContinuousReading(
       title: chapter.title,
       content: chapterContent,
       html: renderChapterHtml(chapterContent),
+      isVolume: Boolean(chapter.isVolume),
     } satisfies ContinuousChapterItem
   }
 

@@ -101,6 +101,13 @@ pub struct BookContentRequest {
     pub book_source: Option<BookSource>,
     pub index: Option<i32>,
     pub refresh: Option<i32>,
+    /// 本章标题，用于剥掉正文开头自带的重复标题。
+    ///
+    /// 可选：老前端/Web 端不带它时跳过纯文本去重（HTML 标题块仍会剥），
+    /// 行为与改动前一致。标题由目录给出，正文里的那行可能少个空格，见
+    /// `strip_leading_content_title`。
+    #[serde(rename = "chapterTitle")]
+    pub chapter_title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1095,6 +1102,7 @@ pub async fn get_book_content_core(
             &book_url,
             &source,
             &chapter_url,
+            req.chapter_title.as_deref(),
             Some(&notify_stage),
         )
         .await?;

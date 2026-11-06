@@ -67,6 +67,8 @@ import ContextMenu from './components/ContextMenu.vue'
 import TitleBar from './components/TitleBar.vue'
 import { resolveWindowClose } from './utils/windowClose'
 import { resolveShellBackgroundImage } from './utils/readerColor'
+import { resetFullscreenIntent, toggleAppFullscreen } from './composables/useAppFullscreen'
+import { resolveHotkeyAction, type HotkeyActionId } from './utils/readerHotkeys'
 
 const route = useRoute()
 const appStore = useAppStore()
@@ -207,10 +209,54 @@ onMounted(() => {
   })
 })
 
+/**
+ * 全局 F11 全屏兜底。
+ *
+ * 全屏是**窗口级**状态，不随路由变化，但早先它只写在 ReaderView 的 keydown
+ * 监听里：按 F11 进全屏 → 返回书架 → 监听器随组件卸载消失 → 再也按不出全屏，
+ * 必须回阅读页才能退出（issue #33 补充反馈）。
+ *
+ * 这里在应用根挂一个兜底监听，覆盖书架 / 发现 / 统计 / RSS 等所有非阅读页。
+ * 阅读页自己也会处理 F11（它要把 F11 一并纳入可换绑的快捷键矩阵，并处理弹层
+ * 打开时放行），因此：
+ *   - 只在**非阅读页**生效，避免同一次按键被处理两遍（连按语义会变成"没变化"）；
+ *   - **尊重用户的换绑结果**：设置里把 F11 改成「不操作」或别的动作时，这里
+ *     不能擅自切全屏。判定复用阅读页那份快捷键矩阵，两端行为一致。
+ *   - 输入框内不拦截，与阅读页的 isKeyboardHotkeyBlocked 保持一致。
+ */
+function handleGlobalFullscreenKey(e: KeyboardEvent) {
+  if (e.key !== 'F11' || e.repeat) return
+  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return
+  if (route.name === 'reader') return
+  let action: HotkeyActionId | null = null
+  try {
+    action = resolveHotkeyAction(readerStore.hotkeyBindings, 'F11', 'scroll')
+  } catch {
+    action = 'fullscreen'
+  }
+  if (action !== 'fullscreen') return
+  const active = document.activeElement as HTMLElement | null
+  const tagName = active?.tagName?.toLowerCase()
+  if (tagName === 'input' || tagName === 'textarea' || tagName === 'select' || active?.isContentEditable) {
+    return
+  }
+  e.preventDefault()
+  void toggleAppFullscreen().catch((error) => {
+    resetFullscreenIntent()
+    appStore.showToast((error as Error)?.message || '切换全屏失败', 'warning')
+  })
+}
+
+onMounted(() => {
+  if (typeof window === 'undefined') return
+  window.addEventListener('keydown', handleGlobalFullscreenKey)
+})
+
 onBeforeUnmount(() => {
   closeUnlisten?.()
   legadoUnlisten?.()
   stopBackgroundClassSync()
+  window.removeEventListener('keydown', handleGlobalFullscreenKey)
   if (typeof document !== 'undefined') {
     document.body.classList.remove('custom-background-active')
   }

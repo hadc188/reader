@@ -275,11 +275,16 @@
           v-for="chapter in continuousChapters"
           :key="chapter.index"
           class="chapter-content continuous-chapter"
+          :class="{ 'continuous-volume': chapter.isVolume }"
           :data-chapter-index="chapter.index"
         >
+          <!-- 卷标题章：章名照常渲染（与普通章节一致），但**不画正文区** ——
+               卷章正文天然为空，留一个空块只会多出一段诡异的空白，让人以为
+               这一章没加载出来。间隔由 `.continuous-volume` 拉大，作为分卷分隔。 -->
           <div class="chapter-title">{{ chapter.title }}</div>
 
           <div
+            v-if="!chapter.isVolume"
             class="chapter-text"
             data-role="continuous"
             :data-chapter-index="chapter.index"
@@ -422,7 +427,6 @@ import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets, TOC_END_CHECK_INTERVAL_MS } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
-import { isTauriRuntime } from '../api/transport'
 import { getBookInfo, getBookshelfWithCacheInfo } from '../api/bookshelf'
 import { evalSourceClick, openExternalWindow, type ShowBrowserRequest } from '../api/sourceClick'
 import { applySystemTheme } from '../utils/systemUi'
@@ -456,6 +460,7 @@ import {
 import { splitParagraphsAroundExisting } from '../utils/readerParagraph'
 import { resolveReaderBackground } from '../utils/readerColor'
 import { canAddCurrentBookToShelf, resolveShelfMembership } from '../utils/readerShelf'
+import { resetFullscreenIntent, toggleAppFullscreen } from '../composables/useAppFullscreen'
 import {
   hotkeyIdFromEvent,
   hotkeyIdFromMouseEvent,
@@ -1349,23 +1354,12 @@ const isPdfPageChapter = computed(
   () => isPdfBook(store.book) && (store.displayContent || '').includes(PDF_PAGE_ATTR),
 )
 
-/** 卷标题页只需要转义，不走 formatChapterHtml 的排版/清洗流程。 */
-function escapeHtml(text: string) {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
 const formattedContent = computed(() => {
   if (isPdfPageChapter.value) return store.displayContent || ''
-  // 卷标题章（`第一卷` 之类）没有正文，渲染成居中大标题页 —— 与 legado 的
-  // `isVolumeTitle` 一致，也和 issue #33 里用户的期望一致。只在**确实没有正文**
-  // 时替换：卷标题后面若还跟着一段引子，照常显示那段文字。
-  if (store.currentChapter?.isVolume && !(store.displayContent || '').trim()) {
-    return `<div class="volume-title-page">${escapeHtml(store.currentChapter.title || '')}</div>`
-  }
+  // 卷标题章（`第一卷` 之类）没有正文。**不要**在这里再渲染一次标题：
+  // 模板顶部已经有 `.chapter-title` 显示章名，多画一个居中大字就是同一个
+  // 标题连着出现两遍（issue #33 截图）。卷章只需要"正文区为空"这一件事，
+  // 顶部的章名与普通章节保持一致，读者对目录位置的心智模型也一致。
   return formatChapterHtml(store.displayContent || '')
 })
 
@@ -3190,80 +3184,27 @@ const readingModeKind = computed<'paged' | 'scroll'>(() => (
 ))
 
 /* ─── 全屏 ───
- *  必须走 Tauri 的**窗口全屏**(setFullscreen), 而不是 HTML5 的
- *  document.documentElement.requestFullscreen()。窗口是无边框的
- *  (decorations: false), 自定义标题栏由前端绘制: HTML5 全屏只把 webview
- *  铺满屏幕, 窗口本身仍是普通窗口, --app-height 与真实视口在切换期间不一致,
- *  顶部标题栏与底部就会露出错位/黑条(用户反馈的 F11 BUG)。
- *
- *  浏览器里(开发调试)没有 Tauri API, 回退到 HTML5 全屏。
- *
- *  「最大化状态下进全屏会露出任务栏高度的黑边」由 tao 修好(tauri-apps/tao#1353,
- *  tao 0.37.2 起包含; 早期用 vendor 副本, 现已改回官方版本)。
- *
- *  这里刻意**不再**用「进全屏前先 unmaximize、退出后再 maximize」的变通。那虽
- *  也能绕开黑边, 但 unmaximize/maximize 各对应一次 ShowWindow(SW_RESTORE) /
- *  SW_MAXIMIZE, 且都由 tao 异步派发到事件循环线程 —— 退出全屏时必然先看到一次
- *  窗口化动画、再来一次最大化动画, 观感很差。修好 tao 之后窗口在全屏前后始终
- *  保持最大化状态, tao 退出全屏时用 SetWindowPlacement 一次性恢复, 一步到位。 */
+ *  实现在 composables/useAppFullscreen：全屏是窗口级状态，必须独立于路由存在
+ *  （在书架页按 F11 也要能退出，见 issue #33 补充反馈）。这里只保留阅读页
+ *  特有的收尾动作 —— 切换后重新对齐阅读位置。 */
 
-/** 全屏切换后布局会重排: 立刻同步一次视口变量, 并让位置恢复重新对齐。
- *  Tauri 的全屏事件也会触发 window resize, 这里只是把首次同步提前,
- *  避免中间帧按旧高度渲染。 */
+/** 全屏切换后布局会重排：让阅读位置的恢复重新对齐。
+ *  Tauri 的全屏事件也会触发 window resize，视口尺寸的同步由 composable 负责。 */
 function afterFullscreenToggle() {
-  syncViewportSize()
   window.requestAnimationFrame(() => {
-    syncViewportSize()
     scheduleRestoreReadingPosition()
   })
 }
 
-/** 本端追踪的全屏期望状态, 仅用于连续触发时不错乱。
- *
- *  不能只依赖 `setFullscreen(!(await isFullscreen()))`: 两次 IPC 往返之间用户
- *  再按一次 F11, 第二次会读到**过期**的 isFullscreen, 于是把同一个值又设一遍 ——
- *  用户连按两下期望「进→出」, 实际停在「进」。本地记一份期望值, 并在切换后再用
- *  真实状态校准, 就能让连按变成两次真切换。 */
-let fullscreenToggleInFlight: Promise<void> | null = null
-let desiredFullscreen: boolean | null = null
-
-async function toggleTauriFullscreen() {
-  const { getCurrentWindow } = await import('@tauri-apps/api/window')
-  const appWindow = getCurrentWindow()
-  // 上一次切换还没落地就再按: 基于**期望值**取反, 而不是重新去问(可能过期的)实际状态。
-  const base = desiredFullscreen ?? (await appWindow.isFullscreen())
-  desiredFullscreen = !base
-  await appWindow.setFullscreen(desiredFullscreen)
-  // 用真实状态校准: 万一设置没生效(被系统拒、窗口已销毁), 下一次仍能正确取反。
-  try {
-    desiredFullscreen = await appWindow.isFullscreen()
-  } catch {
-    desiredFullscreen = null
-  }
-  afterFullscreenToggle()
-}
-
 function toggleFullscreen() {
-  if (isTauriRuntime()) {
-    // 串行化: 快速连按 F11 时不并发发 IPC, 否则两次 setFullscreen 的到达顺序
-    // 无法保证, 结果可能是用户不想要的那个。
-    const run = (fullscreenToggleInFlight ?? Promise.resolve()).then(toggleTauriFullscreen)
-    fullscreenToggleInFlight = run.catch(() => undefined).finally(() => {
-      if (fullscreenToggleInFlight === run) fullscreenToggleInFlight = null
-    })
-    void fullscreenToggleInFlight.catch((error) => {
-      // 原来这里是 `.catch(() => undefined)` —— 全屏失败时用户按 F11 毫无反应也
-      // 没有任何提示, 只能反复按。至少给一条 toast, 并清除期望值以免后续取反错乱。
-      desiredFullscreen = null
+  void toggleAppFullscreen()
+    .then(afterFullscreenToggle)
+    .catch((error) => {
+      // 全屏失败时用户按 F11 毫无反应也没有任何提示，只能反复按。
+      // 至少给一条 toast，并清除期望值以免后续取反错乱。
+      resetFullscreenIntent()
       appStore.showToast((error as Error)?.message || '切换全屏失败', 'warning')
     })
-    return
-  }
-  if (document.fullscreenElement) {
-    void document.exitFullscreen().then(afterFullscreenToggle).catch(() => undefined)
-  } else {
-    void document.documentElement.requestFullscreen().then(afterFullscreenToggle).catch(() => undefined)
-  }
 }
 
 /** 「返回」: 按弹层 → 选区菜单 → 搜索 → 朗读面板 → 书详情的顺序逐层退出,
@@ -4461,20 +4402,11 @@ watch(
   line-height: 1.4;
 }
 
-/* 卷标题章（`第一卷` 之类）的空白页：正文区居中放大标题。
-   阅读页顶部本来就会显示章名，这里再居中强调一次是刻意的 —— 卷标题是一段
-   阅读的"封面"，与 legado 的 isVolumeTitle 渲染一致。 */
-.volume-title-page {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 55vh;
-  text-align: center;
-  font-size: 1.9em;
-  font-weight: 700;
-  line-height: 1.6;
-  letter-spacing: 0.08em;
-  opacity: 0.9;
+/* 卷标题章（`第一卷` 之类）在连续阅读里的分隔块。
+   章名照常由 `.chapter-title` 渲染（与普通章节一致），这里只把上下间隔拉开，
+   让"进入新一卷"在长滚动里看得出来；卷章不画正文区，见模板。 */
+.continuous-volume {
+  margin: 2.5em 0 1.5em;
 }
 
 /* 净化脚本未执行时的降级提示：低调但看得见，跟着正文字号走。 */

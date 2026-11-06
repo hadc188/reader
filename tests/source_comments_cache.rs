@@ -188,7 +188,7 @@ async fn cached_content_is_served_without_refetch_and_fresh_content_carries_comm
     // 缓存命中即返回本地正文, 不再联网 —— 与 legado 的 BookHelp.getContent 一致。
     assert_eq!(
         service
-            .get_content_with_stage("test", book_url, &source, &chapter_url, None)
+            .get_content_with_stage("test", book_url, &source, &chapter_url, None, None)
             .await
             .unwrap(),
         "已有正文"

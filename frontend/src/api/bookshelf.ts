@@ -68,6 +68,8 @@ export function getBookContent(params: {
   bookUrl?: string
   chapterUrl?: string
   bookSourceUrl?: string
+  /** 本章标题：后端据此剥掉正文开头自带的重复标题（见 strip_leading_content_title） */
+  chapterTitle?: string
   index?: number
   refresh?: number
   /** 加载阶段回调：让「书源脚本 / 段评解析」这类长耗时可见 */

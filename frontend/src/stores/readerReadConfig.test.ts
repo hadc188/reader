@@ -79,9 +79,12 @@ describe('per-book replace rules', () => {
   it('keeps Chinese conversion active when purification is disabled', async () => {
     const reader = setupReader({ useReplaceRule: false })
     reader.updateConfig('chineseMode', 'traditional')
+    // 词典是 ~1.2MB 的懒加载分块，全量并发跑时首次 import 偶尔超过 waitFor
+    // 默认的 1s 上限（单独跑稳定通过）。放宽到 5s，避免这条与功能无关的用例
+    // 把整套测试拖成"每次都有 1 个失败"。
     await vi.waitFor(() => {
       expect(reader.displayContent).toBe('廣告\n正文漢字<img src="comment.png"/>')
-    })
+    }, { timeout: 5000 })
   })
 
   it('loads source reading configuration before displaying a book opened from search', async () => {

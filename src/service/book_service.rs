@@ -429,9 +429,83 @@ async fn source_state_dir_is_empty(dir: &std::path::Path) -> bool {
     true
 }
 
-/// 阅读页统一渲染章节标题；正文若自带 `<h1>` 等标题块会重复显示。
-/// 只剥离开头第一个明确标题元素，保留图片和普通正文。
-fn strip_leading_content_title(content: &str) -> String {
+/// 阅读页统一渲染章节标题；正文若自带标题会重复显示。
+///
+/// 两条路径，对应 legado `ContentProcessor` 的「去除重复标题」：
+///
+/// 1. **HTML 标题块**（`<h1>`、`class="title"` 等）—— 只剥离第一个明确标题元素。
+/// 2. **纯文本标题行** —— 一类书源的正文规则把标题一起交回来了（`class.con@text`
+///    之类），正文第一行就是「第六十七章 荒塔与绿铜」。
+///
+/// 第 2 条的关键是**标题里的空格要当 `\s*`**：书源目录里的标题常带空格
+/// （`第六十七章 荒塔与绿铜`），而正文里的那行可能没空格
+/// （`第六十七章荒塔与绿铜`）。按字面比较会漏掉，用户就看到标题显示两遍。
+/// legado 的做法是 `chapter.title.escapeRegex().replace(spaceRegex, "\\s*")`，
+/// 这里照搬。
+///
+/// 只剥离开头一处，且必须整行匹配（标题后紧跟换行或正文），避免把以标题
+/// 开头的正文行整段吃掉。
+fn strip_leading_content_title(content: &str, chapter_title: Option<&str>) -> String {
+    let stripped_html = strip_leading_html_title(content);
+    if stripped_html != content {
+        return stripped_html;
+    }
+    match chapter_title {
+        Some(title) => strip_leading_text_title(&stripped_html, title),
+        None => stripped_html,
+    }
+}
+
+/// 纯文本路径：正文开头若是「本章标题」则剥掉这一行。
+///
+/// 前缀允许空白、标点与书名（书源常把 `《书名》` 也塞在标题前），与 legado 的
+/// `^(\s|\p{P}|书名)*标题(\s)*` 一致。
+fn strip_leading_text_title(content: &str, chapter_title: &str) -> String {
+    let title = chapter_title.trim();
+    if title.is_empty() {
+        return content.to_string();
+    }
+    // 去掉标题里的全部空白，逐字符构造 `c\s*` —— 这样「标题带空格、正文不带」
+    // 与「标题不带、正文带」两个方向都能匹配。legado 的做法是只把标题里的
+    // 空白替换成 `\s*`（`第六十七章\s*荒塔与绿铜`），那要求正文的空格位置与
+    // 目录完全一致；实测书源两边经常不一致，因此这里放宽到"任意位置可有空白"。
+    //
+    // 收尾与行首的 `[^\S\r\n\p{P}]*` **必须排除换行**：`\s` 含 `\n`，贪婪匹配
+    // 会一路吃掉行尾换行甚至下一行缩进，于是后面的「必须整行结束」判定永远不
+    // 成立，整个去标题静默失效。
+    // 行首前缀：空白、纯标点，以及**成对书名号包住的短书名**
+    // （`《剑来》第六十七章 标题`）。书名长度限制在 30 字内，避免把
+    // 「《长书名》开头就是正文」这种误当标题行。
+    let mut pattern = String::from(r"^\s*(?:《[^》\r\n]{1,30}》\s*)?(?:[^\s\p{L}\p{N}]{1,6}\s*)*");
+    for ch in title.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        pattern.push_str(&regex::escape(&ch.to_string()));
+        pattern.push_str(r"\s*");
+    }
+    // 行尾允许空白与标点（`第六十七章 标题。` 之类），但不许跨行。
+    // `(?m)` 让 `$` 匹配**行尾**而不是整个串的结尾 —— 正文是多行文本，
+    // 不加它就只能剥"整章只有标题一行"的情形。
+    pattern.push_str(r"[^\S\r\n\p{L}\p{N}]*$");
+    let Ok(re) = Regex::new(&format!("(?m){pattern}")) else {
+        return content.to_string();
+    };
+    let Some(matched) = re.find(content) else {
+        return content.to_string();
+    };
+    // `$` 已保证匹配止于行尾（多行模式下即本行结束），这里只需跳过随后的
+    // 换行符。`(?m)` 下 `$` 也能匹配在 `\n` 之前，故再兜一次显式判断。
+    let rest = &content[matched.end()..];
+    let after_break = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+        .unwrap_or(rest);
+    after_break.trim_start_matches(['\r', '\n']).to_string()
+}
+
+/// HTML 路径：剥离开头第一个明确的标题元素，保留图片和普通正文。
+fn strip_leading_html_title(content: &str) -> String {
     let trimmed_start = content.trim_start_matches(|ch: char| {
         ch.is_whitespace() || matches!(ch, '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}')
     });
@@ -466,7 +540,7 @@ fn strip_leading_content_title(content: &str) -> String {
         };
         let inner_end = opening_end + 1 + close_offset;
         let inner = &trimmed_start[opening_end + 1..inner_end];
-        let stripped_inner = strip_leading_content_title(inner);
+        let stripped_inner = strip_leading_html_title(inner);
         if stripped_inner == inner {
             return content.to_string();
         }
@@ -2481,7 +2555,7 @@ impl BookService {
         source: &BookSource,
         chapter_url: &str,
     ) -> Result<String, AppError> {
-        self.get_content_with_stage(user_ns, book_url, source, chapter_url, None)
+        self.get_content_with_stage(user_ns, book_url, source, chapter_url, None, None)
             .await
     }
 
@@ -2498,6 +2572,7 @@ impl BookService {
         book_url: &str,
         source: &BookSource,
         chapter_url: &str,
+        chapter_title: Option<&str>,
         on_stage: Option<&(dyn Fn(ContentLoadStage) + Send + Sync)>,
     ) -> Result<String, AppError> {
         let notify = |stage: ContentLoadStage| {
@@ -2523,7 +2598,7 @@ impl BookService {
             .filter(|hit| !hit.trim().is_empty());
         if let Some(hit) = cached {
             tracing::debug!("get_content returning cached content, len={}", hit.len());
-            return Ok(strip_leading_content_title(&hit));
+            return Ok(strip_leading_content_title(&hit, chapter_title));
         }
         tracing::debug!("get_content cache miss, fetching from network");
 
@@ -2584,7 +2659,7 @@ impl BookService {
         tracing::debug!("get_content final content len={}", all_content.len());
         // 阅读页会统一渲染章节标题；书源正文若自带开头标题会重复显示。
         // 与 Legado 的“去除重复标题”对应，只剥离开头第一个标题块。
-        all_content = strip_leading_content_title(&all_content);
+        all_content = strip_leading_content_title(&all_content, chapter_title);
         if !all_content.is_empty() {
             notify(ContentLoadStage::Caching);
             let _ = self
@@ -3197,7 +3272,7 @@ impl BookService {
         // 缓存命中后阅读不再联网, 所以这里存的必须就是"之后要读到的那份正文";
         // 为省时间跳过书源脚本会让段评标记缺失, 而且这份纯正文会被当成最终结果。
         let content = self
-            .get_content_with_stage(user_ns, book_url, source, chapter_url, None)
+            .get_content_with_stage(user_ns, book_url, source, chapter_url, None, None)
             .await?;
         // 以「缓存是否真的落盘」为准：空正文不会被写入缓存（见 get_content_with_stage
         // 里的非空判断）。若仍未落盘就报错计入失败数，否则进度会把没缓存的
@@ -5798,20 +5873,21 @@ mod tests {
     #[test]
     fn strips_a_leading_heading_from_source_content() {
         assert_eq!(
-            strip_leading_content_title("<h1>第二十七章 荒古禁</h1><p>正文</p>"),
+            strip_leading_content_title("<h1>第二十七章 荒古禁</h1><p>正文</p>", None),
             "<p>正文</p>",
         );
         assert_eq!(
-            strip_leading_content_title("<p>第二十七章 荒古禁</p><p>正文</p>"),
+            strip_leading_content_title("<p>第二十七章 荒古禁</p><p>正文</p>", None),
             "<p>正文</p>",
         );
         assert_eq!(
-            strip_leading_content_title("&nbsp;<p>第七十二章心中的希望</p><p>正文</p>"),
+            strip_leading_content_title("&nbsp;<p>第七十二章心中的希望</p><p>正文</p>", None),
             "<p>正文</p>",
         );
         assert_eq!(
             strip_leading_content_title(
                 "<div class=\"con\"><p>第七十二章心中的希望</p><p>正文</p></div>",
+                None,
             ),
             "<div class=\"con\"><p>正文</p></div>",
         );
@@ -5820,7 +5896,99 @@ mod tests {
     #[test]
     fn keeps_ordinary_source_content() {
         let content = "<p>他抬头看向远处的星空。</p><p>正文</p>";
-        assert_eq!(strip_leading_content_title(content), content);
+        assert_eq!(strip_leading_content_title(content, None), content);
+    }
+
+    /// 正文规则把标题一起交回来时，开头那行是纯文本而不是 HTML 标题块。
+    /// 阅读页上方已经渲染了章节标题，这里不去重就会看到标题显示两遍。
+    #[test]
+    fn strips_a_leading_plain_text_title() {
+        assert_eq!(
+            strip_leading_content_title(
+                "第六十七章 荒塔与绿铜\n正文第一段。",
+                Some("第六十七章 荒塔与绿铜"),
+            ),
+            "正文第一段。",
+        );
+    }
+
+    /// 目录标题带空格、正文那行不带（或反过来）是最常见的一种，必须也能剥：
+    /// legado 的处理是把标题里的空白换成 `\s*`，这里对齐同一语义。
+    #[test]
+    fn strips_plain_text_title_ignoring_space_differences() {
+        assert_eq!(
+            strip_leading_content_title(
+                "第六十七章荒塔与绿铜\n正文。",
+                Some("第六十七章 荒塔与绿铜"),
+            ),
+            "正文。",
+        );
+        assert_eq!(
+            strip_leading_content_title(
+                "第六十七章 荒塔与绿铜\n正文。",
+                Some("第六十七章荒塔与绿铜"),
+            ),
+            "正文。",
+        );
+        assert_eq!(
+            strip_leading_content_title(
+                "第六十七章\u{3000}荒塔与绿铜\n正文。",
+                Some("第六十七章 荒塔与绿铜"),
+            ),
+            "正文。",
+        );
+    }
+
+    /// 标题前可能有书名、标点或空白（书源常写成 `《书名》第六十七章 标题`）。
+    #[test]
+    fn strips_plain_text_title_with_prefix_noise() {
+        assert_eq!(
+            strip_leading_content_title(
+                "《剑来》第六十七章 荒塔与绿铜\n正文。",
+                Some("第六十七章 荒塔与绿铜"),
+            ),
+            "正文。",
+        );
+        assert_eq!(
+            strip_leading_content_title(
+                "\u{3000}\u{3000}第六十七章 荒塔与绿铜\n正文。",
+                Some("第六十七章 荒塔与绿铜"),
+            ),
+            "正文。",
+        );
+    }
+
+    /// 正文以标题开头但同一行还有后续文字 —— 那是正文，不是标题行，不能剥。
+    #[test]
+    fn keeps_prose_that_merely_starts_with_the_title() {
+        let content = "第六十七章 荒塔与绿铜的传说还在继续，他合上了书。";
+        assert_eq!(
+            strip_leading_content_title(content, Some("第六十七章 荒塔与绿铜")),
+            content,
+            "标题后面还有正文，说明这行本身就是正文，不能剥",
+        );
+    }
+
+    /// 没传章节标题（老前端 / Web 端）时纯文本去重整体跳过，
+    /// 但 HTML 标题块仍要剥 —— 与改动前行为一致。
+    #[test]
+    fn plain_text_title_stripping_is_opt_in() {
+        let content = "第六十七章 荒塔与绿铜\n正文。";
+        assert_eq!(strip_leading_content_title(content, None), content);
+        assert_eq!(
+            strip_leading_content_title("<h1>标题</h1><p>正文</p>", None),
+            "<p>正文</p>",
+        );
+    }
+
+    /// 开头是正常正文、与标题无关时不能误剥。
+    #[test]
+    fn keeps_content_when_leading_line_is_not_the_title() {
+        let content = "他推开门，风雪灌了进来。\n正文。";
+        assert_eq!(
+            strip_leading_content_title(content, Some("第六十七章 荒塔与绿铜")),
+            content,
+        );
     }
 
     /// 缓存命中必须直接返回本地正文, 且**一次网络请求都不发**。
@@ -5874,7 +6042,7 @@ mod tests {
         .unwrap();
 
         let content = service
-            .get_content_with_stage("default", &book_url, &source, &chapter_url, None)
+            .get_content_with_stage("default", &book_url, &source, &chapter_url, None, None)
             .await
             .unwrap();
 

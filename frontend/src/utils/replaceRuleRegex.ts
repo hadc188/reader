@@ -191,10 +191,11 @@ export function compileReplaceRule(
   const converted = convertJavaRegexToJs(pattern)
   if (converted.error) return { kind: 'error', error: converted.error }
   try {
+    const regex = new RegExp(converted.source, converted.flags)
     return {
       kind: 'regex',
-      regex: new RegExp(converted.source, converted.flags),
-      replacement: toJsReplacement(replacement),
+      regex,
+      replacement: toJsReplacement(replacement, captureGroups(converted.source, converted.flags)),
     }
   } catch (error) {
     return {
@@ -202,6 +203,38 @@ export function compileReplaceRule(
       error: (error as Error).message.replace(/^Invalid regular expression:\s*/, ''),
     }
   }
+}
+
+/** 正则里可用的捕获组：编号 1..count，外加命名分组名。 */
+export interface ReplacementGroups {
+  count: number
+  names: Set<string>
+}
+
+/**
+ * 数出正则里的捕获组，供替换串解析用。
+ *
+ * 为什么不在源码上数左括号：`\(`、`(?:`、`(?=`、字符类里的 `(` 都不是捕获组，
+ * 手写扫描器很容易数错。这里用引擎自己报数 —— `(?:源码)|` 一定能匹配空串，
+ * 匹配结果数组的长度减一就是捕获组个数，`groups` 的键就是命名分组。
+ * `g` / `y` 必须去掉：带 `g` 的 `exec` 会记忆 `lastIndex`，第二次调用结果就错了。
+ */
+export function captureGroups(source: string, flags: string): ReplacementGroups {
+  const probe = new RegExp(`(?:${source})|`, flags.replace(/[gy]/g, ''))
+  const match = probe.exec('')
+  return {
+    count: match ? match.length - 1 : 0,
+    names: new Set(match?.groups ? Object.keys(match.groups) : []),
+  }
+}
+
+function isAsciiDigit(char: string | undefined): boolean {
+  return char !== undefined && char >= '0' && char <= '9'
+}
+
+/** 替换串里的字面量：JS 只把 `$` 当特殊字符，`\` 原样输出。 */
+function literalText(text: string): string {
+  return text.replaceAll('$', () => '$$')
 }
 
 /** 拆出 Java 正则里的内联旗标并做语法降级。导出以便单测直接断言转换结果。 */
@@ -234,12 +267,100 @@ export function convertJavaRegexToJs(pattern: string): ConvertedJavaRegex {
 }
 
 /**
- * Java 的 `$0` 是「整个匹配」，JS 里对应 `$&`；不转的话 `$0` 会作为字面量插进正文。
+ * 把 Legado（Java）的**替换串**翻译成 JS 的 `String.replace` 替换串。
  *
- * 替换串里要产出字面量 `$&`，必须写成 `$$&`（`$$` 转义成 `$`）。
+ * 手机端走的是 `Matcher.appendReplacement(buf, replacement)`，规则里「替换为」那段
+ * 是 Java 的替换模板，不是纯文本；桌面版原先几乎原样丢给 `String.replace`，于是
+ * 两边行为分叉（issue #33 第 2 条：`$1`/`${name}`/`\$` 全都不认）。
+ *
+ * 逐条对齐 Java 语义（已用 JDK 1.8 实测）：
+ * - `$n`（1..99）：第 n 个捕获组。两位数超范围时**退一位**：只有 12 个组时
+ *   `$99` → 组 9 + 字面量 `9`，`$10` → 组 10，`$123` → 组 12 + `3`。
+ *   `$0` / `$00` 是整个匹配。组号超过实际组数 → Java 抛
+ *   `IndexOutOfBoundsException: No group N`，这里同样判成「无法执行」。
+ * - `${name}`：具名分组。JS 的写法是 `$<name>`，这里翻译过去；没有这个组名则报错
+ *   （Java 也是 `No group with name`）。
+ * - `\x`：转义，输出字面量 `x`。所以 `\1` 在手机端得到的是字符 `1`，**不是**分组
+ *   引用；`\$` 得到字面量 `$`，`\\` 得到 `\`。结尾单个 `\` 在 Java 里直接报错。
+ * - 其余 `$`（`$&`、`$$`、行尾 `$`、`$<x>`）在 Java 里都是 `Illegal group reference`，
+ *   这里一律判成「无法执行」，免得静默插入一段错误的正文。
+ *
+ * 输出侧还要防两件事：
+ * - JS 的 `$` 本身是特殊字符，字面量 `$` 必须写成 `$$`；
+ * - 组号后面紧跟数字会被 JS 吃成两位数分组（`$1` + `0` 变成组 10）。1..9 号组
+ *   后面接数字时改用 `$0n` 写法，JS 与 Java 都按「第 n 组」解释。
  */
-export function toJsReplacement(replacement: string): string {
-  return replacement.replace(/\$0(?![0-9])/g, '$$&')
+export function toJsReplacement(replacement: string, groups: ReplacementGroups): string {
+  let output = ''
+  for (let index = 0; index < replacement.length; index += 1) {
+    const char = replacement[index]
+    if (char === '\\') {
+      const escaped = replacement[index + 1]
+      if (escaped === undefined) {
+        throw new Error('替换为以单个 \\ 结尾，Java 端会报错；字面量反斜杠要写成 \\\\')
+      }
+      output += literalText(escaped)
+      index += 1
+      continue
+    }
+    if (char !== '$') {
+      output += literalText(char)
+      continue
+    }
+
+    const next = replacement[index + 1]
+    if (next === '{') {
+      const end = replacement.indexOf('}', index + 2)
+      if (end < 0) throw new Error('替换为里的 ${ 没有配对的 }')
+      const name = replacement.slice(index + 2, end)
+      if (!groups.names.has(name)) {
+        throw new Error(`替换为引用了不存在的命名分组 \${${name}}`)
+      }
+      output += `$<${name}>`
+      index = end
+      continue
+    }
+    if (!isAsciiDigit(next)) {
+      throw new Error(
+        `替换为里的 $ 后面不是分组编号（第 ${index + 1} 个字符）；`
+        + '引用捕获组写 $1，字面量 $ 要写成 \\$',
+      )
+    }
+
+    let end = index + 1
+    while (isAsciiDigit(replacement[end])) end += 1
+    // 复刻 JDK `Matcher.appendReplacement` 的解析：从第一位起累加，
+    // 一旦超过捕获组数量就停在上一轮的数字上，剩下的位当字面量。
+    // 于是 `$99`（12 个组）→ 组 9 + `9`，`$0005`（5 个组）→ 组 5，`$009` → 组 0 + `9`。
+    let digits = replacement.slice(index + 1, index + 2)
+    let cursor = index + 2
+    while (cursor < end) {
+      const candidate = Number(digits + replacement[cursor])
+      if (candidate > groups.count) break
+      digits = digits + replacement[cursor]
+      cursor += 1
+    }
+    const group = Number(digits)
+    if (group > groups.count) {
+      throw new Error(
+        `替换为引用了不存在的分组 $${digits}（本规则只有 ${groups.count} 个捕获组）`,
+      )
+    }
+
+    // 没被吃进组号的数字是字面量（`$99` → 组 9 + `9`）。
+    const rest = replacement.slice(cursor, end)
+    if (group === 0) {
+      output += '$&'
+      output += literalText(rest)
+    } else {
+      // 后面紧跟数字时必须写 `$0n`，否则 JS 会把它吃成两位数分组。
+      const following = rest[0] ?? replacement[end]
+      output += group < 10 && isAsciiDigit(following) ? `$0${group}` : `$${group}`
+      output += literalText(rest)
+    }
+    index = end - 1
+  }
+  return output
 }
 
 /** 送后端沙盒的一步：字符串替换在沙盒里也走 `String.replace`，所以统一用正则表达。 */
@@ -308,12 +429,18 @@ export function toSandboxRuleStep(
   } catch (error) {
     return { ok: false, error: (error as Error).message }
   }
+  let stepReplacement: string
+  try {
+    stepReplacement = toJsReplacement(replacement, captureGroups(converted.source, converted.flags))
+  } catch (error) {
+    return { ok: false, error: (error as Error).message }
+  }
   return {
     ok: true,
     step: {
       pattern: converted.source,
       flags: converted.flags,
-      replacement: toJsReplacement(replacement),
+      replacement: stepReplacement,
       isScript: false,
     },
   }

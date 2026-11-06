@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  captureGroups,
   compileReplaceRule,
   convertJavaRegexToJs,
   findUnsupportedSyntax,
@@ -87,18 +88,96 @@ describe('findUnsupportedSyntax', () => {
   })
 })
 
-describe('toJsReplacement', () => {
+describe('toJsReplacement（对齐 Java Matcher.appendReplacement）', () => {
+  const groupsOf = (pattern: string) => {
+    const { source, flags } = convertJavaRegexToJs(pattern)
+    return captureGroups(source, flags)
+  }
+
   it('$0 转成 $&（Java 的整个匹配）', () => {
-    expect(toJsReplacement('[$0]')).toBe('[$&]')
+    expect(toJsReplacement('[$0]', groupsOf('X'))).toBe('[$&]')
     // 光看字符串不够：`$&` 只有在 String.replace 的替换串里才表示整个匹配
-    expect('aXa'.replace(/X/g, toJsReplacement('[$0]'))).toBe('a[X]a')
+    expect('aXa'.replace(/X/g, toJsReplacement('[$0]', groupsOf('X')))).toBe('a[X]a')
   })
 
-  it('不误伤 $1..$9 与 $&', () => {
-    expect(toJsReplacement('$1-$2')).toBe('$1-$2')
-    expect(toJsReplacement('$&')).toBe('$&')
-    expect(toJsReplacement('$10')).toBe('$10')
-    expect('ab'.replace(/(a)(b)/g, toJsReplacement('$1-$2'))).toBe('a-b')
+  it('$1..$9 引用捕获组', () => {
+    expect('ABCD'.replace(/(A)(B)/g, toJsReplacement('$1-$2', groupsOf('(A)(B)')))).toBe('A-BCD')
+  })
+
+  it('两位数分组超范围时退一位，剩余数字按字面量输出（Java 实测 $99 → 组 9 + "9"）', () => {
+    const twelve = '(A)(B)(C)(D)(E)(F)(G)(H)(I)(J)(K)(L)'
+    const groups = groupsOf(twelve)
+    const re = /(A)(B)(C)(D)(E)(F)(G)(H)(I)(J)(K)(L)/
+    const text = 'ABCDEFGHIJKL'
+    expect(text.replace(re, toJsReplacement('$99', groups))).toBe('I9')
+    expect(text.replace(re, toJsReplacement('$10', groups))).toBe('J')
+    expect(text.replace(re, toJsReplacement('$123', groups))).toBe('L3')
+  })
+
+  it('一位分组后紧跟数字时不会被 JS 吃成两位分组', () => {
+    expect('ABCD'.replace(/(A)(B)/g, toJsReplacement('$10', groupsOf('(A)(B)')))).toBe('A0CD')
+  })
+
+  it('${name} 翻成 JS 的 $<name>', () => {
+    const groups = groupsOf('(?<x>A)(B)')
+    expect('ABCD'.replace(/(?<x>A)(B)/g, toJsReplacement('${x}!$2', groups))).toBe('A!BCD')
+  })
+
+  it('反斜杠是 Java 的转义：\\1 输出字面量 1，不是分组引用', () => {
+    expect('ABCD'.replace(/(A)(B)/g, toJsReplacement('\\1\\2', groupsOf('(A)(B)')))).toBe('12CD')
+    expect('ABCD'.replace(/(A)(B)/g, toJsReplacement('\\$1', groupsOf('(A)(B)')))).toBe('$1CD')
+    expect('ABCD'.replace(/(A)(B)/g, toJsReplacement('\\\\', groupsOf('(A)(B)')))).toBe('\\CD')
+  })
+
+  it('引用不存在的分组按 Java 报错，而不是把 $1 原样插进正文', () => {
+    expect(() => toJsReplacement('$1难看', groupsOf('(?=.*表情).*阴暗'))).toThrow(/不存在的分组/)
+    expect(() => toJsReplacement('${nope}', groupsOf('(A)'))).toThrow(/不存在的命名分组/)
+  })
+
+  it('字面量 $ 必须转义，裸 $ 按 Java 报错', () => {
+    // `$b`：Java 抛 Illegal group reference（$ 后面既不是数字也不是 {）
+    expect(() => toJsReplacement('价格$b', groupsOf('X'))).toThrow(/\$ 后面不是分组编号/)
+    // `$100`：Java 逐位退让到 $1，再报 No group 1
+    expect(() => toJsReplacement('价格$100', groupsOf('X'))).toThrow(/不存在的分组/)
+    expect(toJsReplacement('价格\\$100', groupsOf('X'))).toBe('价格$$100')
+  })
+
+  it('结尾单个反斜杠报错（Java: character to be escaped is missing）', () => {
+    expect(() => toJsReplacement('abc\\', groupsOf('X'))).toThrow(/单个 \\ 结尾/)
+  })
+
+  /**
+   * 基准值全部来自 JDK 1.8 实测（见 tmp_probe/java/T3~T6），不是照着 JS 猜的。
+   * 表里「输入 → 手机端输出」，测试只断言最终文本，避免把中转格式写死。
+   */
+  it('与手机端逐项对齐（5 组 / 15 组两套基准）', () => {
+    const cases: Array<[string, string, string]> = [
+      // [pattern, replacement, 期望输出]
+      ['(A)(B)(C)(D)(E)', '$015', 'A5'],
+      ['(A)(B)(C)(D)(E)', '$004', 'D'],
+      ['(A)(B)(C)(D)(E)', '$05', 'E'],
+      ['(A)(B)(C)(D)(E)', '$005', 'E'],
+      ['(A)(B)(C)(D)(E)', '$00', 'ABCDE'],
+      ['(A)(B)(C)(D)(E)', '$0', 'ABCDE'],
+      ['(A)(B)(C)(D)(E)', '$50', 'E0'],
+      ['(A)(B)(C)(D)(E)', '$0x', 'ABCDEx'],
+      ['(A)(B)(C)(D)(E)', '\\0', '0'],
+      ['(A)(B)(C)(D)(E)', '\\$', '$'],
+      ['(A)(B)(C)(D)(E)', '\\\\', '\\'],
+      ['(A)(B)(C)(D)(E)(F)(G)(H)(I)(J)(K)(L)', '$99', 'I9'],
+      ['(A)(B)(C)(D)(E)(F)(G)(H)(I)(J)(K)(L)', '$123', 'L3'],
+      ['(A)(B)(C)(D)(E)(F)(G)(H)(I)(J)(K)(L)', '$012', 'L'],
+      ['(A)(B)(C)(D)(E)(F)(G)(H)(I)(J)(K)(L)', '$0099', 'I9'],
+    ]
+    for (const [pattern, replacement, expected] of cases) {
+      const { source, flags } = convertJavaRegexToJs(pattern)
+      const groups = captureGroups(source, flags)
+      const re = new RegExp(source, flags)
+      // 每个分组匹配一个递增字母：(A)(B)(C) → "ABC"
+      const text = 'ABCDEFGHIJKLMNO'.slice(0, groups.count)
+      const actual = text.replace(re, toJsReplacement(replacement, groups))
+      expect(actual, `${pattern} + ${replacement}`).toBe(expected)
+    }
   })
 })
 

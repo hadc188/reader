@@ -216,6 +216,14 @@ mod tests {
     }
 
     #[test]
+    fn plain_replacement_supports_group_references() {
+        // 与手机端一致：`$1` 是捕获组引用（由前端 toJsReplacement 从 Java 模板翻译过来），
+        // 前端同步路径与这里走的是同一套 JS 替换串语义，两边结果必须一致。
+        let rules = vec![plain("(.*)阴暗", "$1难看")];
+        assert_eq!(apply_rules("他露出阴暗", &rules).unwrap(), "他露出难看");
+    }
+
+    #[test]
     fn plain_and_script_rules_mix_in_declared_order() {
         let rules = vec![
             plain("甲", "乙"),

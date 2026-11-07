@@ -217,8 +217,16 @@ export interface ReplaceRule {
   pattern: string
   replacement: string
   scope?: string
+  /** 排除范围：命中即跳过本规则（子串匹配，语义同 scope）。 */
+  excludeScope?: string
+  /** 作用于章节标题。缺省按 false —— 老规则不会突然改写标题。 */
+  scopeTitle?: boolean
+  /** 作用于正文。缺省按 true（手机端默认值）。 */
+  scopeContent?: boolean
   isEnabled: boolean
   isRegex: boolean
+  /** 单条规则超时(毫秒)。缺省或非正值按 3000，与手机端 getValidTimeoutMillisecond 一致。 */
+  timeoutMillisecond?: number
   order: number
 }
 

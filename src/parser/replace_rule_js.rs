@@ -87,14 +87,25 @@ pub fn apply_rules_with_timeout(
 
     // 输入以 JSON 字面量注入：JSON 是 JS 的子集，直接当表达式求值即可，不必手工转义。
     // U+2028/U+2029 在旧引擎里不能出现在字符串字面量中，先转成转义序列。
-    let text_literal = json_literal(&serde_json::Value::String(text.to_string()));
     let rules_literal = json_literal(
         &serde_json::to_value(rules).map_err(|error| format!("规则序列化失败: {error}"))?,
     );
 
+    // 特殊内容保护（对齐手机端 SpecialContentProtector）：先保护 <img> / [newpage] /
+    // 内联样式脚本，跑完规则再还原。脚本规则里的 `.*` 同样会吃掉图片，所以**两条
+    // 路径都要保护** —— 前端同步路径有一份等价实现（utils/replaceRuleProtect）。
+    //
+    // 但「规则明确要处理某类标签」时那一类必须放开（见 kinds_for_patterns）：
+    // 否则 `<img\b[^>]*>` 这种删图片规则会突然失效。
+    let protected = crate::parser::special_content_protector::protect_for_rules(
+        text,
+        rules.iter().map(|rule| rule.pattern.as_str()),
+    );
+    let protected_literal = json_literal(&serde_json::Value::String(protected.content().to_string()));
+
     let result = context.with(|ctx| {
         let setup = format!(
-            "globalThis.__readerInput = {text_literal};\nglobalThis.__readerRules = {rules_literal};"
+            "globalThis.__readerInput = {protected_literal};\nglobalThis.__readerRules = {rules_literal};"
         );
         ctx.eval::<(), _>(setup.as_bytes())
             .map_err(|error| format!("注入规则失败: {error}"))?;
@@ -111,6 +122,9 @@ pub fn apply_rules_with_timeout(
             "净化脚本执行超时（超过 {} 秒），已中止；请检查规则里是否有死循环",
             timeout.as_secs_f32().round() as u64
         )),
+        // 跑完规则后把受保护的片段换回来。放在这里而不是沙盒内部：还原是纯字符串
+        // 操作，没必要再塞进 JS 上下文里多一次注入。
+        Ok(output) => Ok(protected.restore(&output)),
         other => other,
     }
 }

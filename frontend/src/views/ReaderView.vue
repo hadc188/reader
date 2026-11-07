@@ -233,7 +233,7 @@
         </div>
 
         <div v-else>
-          <div class="chapter-title">{{ store.currentChapter?.title || '加载中...' }}</div>
+          <div class="chapter-title">{{ store.displayChapterTitle || '加载中...' }}</div>
 
           <!-- 脚本规则没跑成时正文会回落到「不含脚本」的版本，与脚本本来就没启用
                看起来完全一样。必须显式说明，否则用户只会以为规则没效果。 -->
@@ -284,7 +284,7 @@
           <!-- 卷标题章：章名照常渲染（与普通章节一致），但**不画正文区** ——
                卷章正文天然为空，留一个空块只会多出一段诡异的空白，让人以为
                这一章没加载出来。间隔由 `.continuous-volume` 拉大，作为分卷分隔。 -->
-          <div class="chapter-title">{{ chapter.title }}</div>
+          <div class="chapter-title">{{ store.displayTitleOf(chapter) }}</div>
 
           <div
             v-if="!chapter.isVolume"

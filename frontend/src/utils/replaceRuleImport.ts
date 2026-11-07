@@ -7,10 +7,10 @@
  *
  * 为什么需要映射:
  *   Legado 的 ReplaceRule 用 `scopeContent`(bool) + `scopeTitle`(bool) 两个开关
- *   表达生效范围; Reader 只有一个 `scope: string`(`'*'` / `'source:xxx'` / `'book:xxx'`)。
- *   Reader 目前没有「只作用于标题」的能力, 也不做按章节正文/标题分流,
- *   所以导入时正文范围统一落到 `'*'`, 「仅作用于标题」的条目照样按正文导入,
- *   但要在结果里单独计数(titleOnly), 让调用方提示用户能力差异。
+ *   表达作用目标, 另有 `scope` / `excludeScope` 两个字符串表达生效与排除范围。
+ *   Reader 现在把这些字段**原样保留**: 目标开关直接落到同名字段, 两个范围串
+ *   照搬, 匹配语义由 utils/replaceRuleScope 按手机端的「包含」规则实现。
+ *   老 JSON 缺字段时按手机端实体默认值补齐(正文开、标题关)。
  */
 import type { ReplaceRule } from '../types'
 
@@ -129,10 +129,14 @@ export function normalizeLegadoReplaceRules(raw: unknown): ReplaceRuleImportResu
     }
     if (isJsRuleText(replacement)) scriptRules += 1
 
-    // Reader 只有「正文范围」一种表达, 统一给 '*'(全部书籍的全部正文)。
-    // titleOnly 单独统计: 让调用方提示「这些规则在 Legado 里只管标题」。
-    const scopeContent = entry.scopeContent === true
-    const scopeTitle = entry.scopeTitle === true
+    // 作用范围按手机端原样保留：
+    // - `scopeContent` / `scopeTitle` 决定这条规则管正文还是管标题（以前一律丢弃，
+    //   于是「仅标题」的规则导入后完全无效）。
+    // - 字符串 `scope` / `excludeScope` 直接照搬，匹配语义由 utils/replaceRuleScope
+    //   按 LIKE %…% 的包含规则实现。
+    // - 老 JSON 可能两个开关都没有：按手机端实体默认值补（正文开、标题关）。
+    const scopeContent = typeof entry.scopeContent === 'boolean' ? entry.scopeContent : true
+    const scopeTitle = typeof entry.scopeTitle === 'boolean' ? entry.scopeTitle : false
     if (scopeTitle && !scopeContent) titleOnly += 1
 
     const id = toFiniteNumber(entry.id)
@@ -145,10 +149,16 @@ export function normalizeLegadoReplaceRules(raw: unknown): ReplaceRuleImportResu
       // pattern 保留原样(不 trim): 正则里的前导/尾随空白是有意义的匹配条件。
       pattern,
       replacement,
-      scope: '*',
+      scope: typeof entry.scope === 'string' && entry.scope.trim() ? entry.scope.trim() : '*',
+      excludeScope: typeof entry.excludeScope === 'string' && entry.excludeScope.trim()
+        ? entry.excludeScope.trim()
+        : undefined,
+      scopeContent,
+      scopeTitle,
       isEnabled: typeof entry.isEnabled === 'boolean' ? entry.isEnabled : true,
       // 缺 isRegex 按正则处理, 与 webdavBackup 里 Legado→Reader 的既有映射保持一致。
       isRegex: typeof entry.isRegex === 'boolean' ? entry.isRegex : true,
+      timeoutMillisecond: toFiniteNumber(entry.timeoutMillisecond) ?? 3000,
       order: toFiniteNumber(entry.order) ?? index + 1,
     })
   })
@@ -182,7 +192,7 @@ export function buildReplaceRuleImportMessage(result: ReplaceRuleImportResult): 
   const notes: string[] = []
   if (skipDetail) notes.push(skipDetail)
   if (scriptRules) notes.push(`${scriptRules} 条脚本规则在后端沙盒执行`)
-  if (titleOnly) notes.push(`${titleOnly} 条『仅作用于标题』的规则已按正文范围导入`)
+  if (titleOnly) notes.push(`${titleOnly} 条只作用于章节标题`)
 
   return {
     text: notes.length ? `导入 ${rules.length} 条（${notes.join('；')}）` : `导入 ${rules.length} 条`,

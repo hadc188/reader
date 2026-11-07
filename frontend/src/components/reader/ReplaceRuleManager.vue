@@ -26,10 +26,7 @@
       <div v-if="loading" class="state">正在读取规则…</div>
 
       <div v-else-if="!store.replaceRules.length" class="empty">
-        <p class="empty-title">还没有自定义规则</p>
-        <p class="empty-text">
-          规则按「排序」从小到大依次执行，用来清掉正文里的广告尾巴、站点水印这类内容。
-        </p>
+        <p class="empty-title">还没有净化规则</p>
         <div class="empty-actions">
           <button class="btn btn-primary" type="button" @click="openEditModal()">新增规则</button>
           <button class="btn" type="button" @click="openImportPanel">导入规则</button>
@@ -37,64 +34,74 @@
       </div>
 
       <template v-else>
-        <section class="group">
-          <div class="group-head">
-            <h4>规则列表</h4>
-            <span class="group-note">按排序执行</span>
+        <!-- 工具条：分组筛选 + 批量开关。规则多起来（导入几十条很常见）没有这两样没法管。 -->
+        <div class="list-tools">
+          <label class="group-filter">
+            <select v-model="activeGroup" :aria-label="'按分组筛选'">
+              <option value="">全部分组（{{ store.replaceRules.length }}）</option>
+              <option v-for="g in ruleGroups" :key="g.name" :value="g.name">
+                {{ g.name }}（{{ g.count }}）
+              </option>
+            </select>
+          </label>
+          <div class="bulk-actions">
+            <button class="link-btn" type="button" :disabled="bulkBusy" @click="setVisibleEnabled(true)">启用</button>
+            <span class="bulk-sep" aria-hidden="true"></span>
+            <button class="link-btn" type="button" :disabled="bulkBusy" @click="setVisibleEnabled(false)">停用</button>
           </div>
-          <div class="card card-rows">
-            <article
-              v-for="rule in sortedRules"
-              :key="rule.id"
-              class="rule-row"
-              :class="{ disabled: !rule.isEnabled }"
-            >
-              <div class="rule-main">
-                <div class="rule-title">
-                  <span class="rule-name">{{ rule.name }}</span>
-                  <span v-if="rule.isRegex" class="tag">正则</span>
-                  <!-- Legado 规则是 Java 正则, 少数写法在 JS 里没有等价物。标出来,
-                       免得用户以为「导入了却没效果」是阅读器的问题。 -->
-                  <span
-                    v-if="ruleIssues.get(rule.name)"
-                    class="tag tag-warn"
-                    :title="ruleIssues.get(rule.name)"
-                  >无法执行</span>
-                </div>
-                <p class="rule-scope">{{ describeScope(rule.scope) }}</p>
-                <dl class="rule-patterns">
-                  <div class="pattern-line">
-                    <dt>匹配</dt>
-                    <dd :title="rule.pattern">{{ rule.pattern }}</dd>
-                  </div>
-                  <div class="pattern-line">
-                    <dt>替换</dt>
-                    <dd :title="rule.replacement || '(空)'">{{ rule.replacement || '(空)' }}</dd>
-                  </div>
-                </dl>
-              </div>
-              <div class="rule-ops">
-                <button
-                  class="switch"
-                  type="button"
-                  role="switch"
-                  :aria-checked="rule.isEnabled"
-                  :aria-label="`启用规则 ${rule.name}`"
-                  :class="{ on: rule.isEnabled }"
-                  @click="toggleRule(rule)"
-                ></button>
-                <div class="rule-buttons">
-                  <button class="link-btn" type="button" @click="openEditModal(rule)">编辑</button>
-                  <button class="link-btn danger" type="button" @click="handleDelete(rule)">删除</button>
-                </div>
-              </div>
-            </article>
-          </div>
-        </section>
+        </div>
 
-        <p class="hint">
-          对正文的改动只影响阅读显示，不会改写原书文件；关闭某条规则后重新打开本章即可看到原文。
-        </p>
+        <div class="card card-rows">
+          <article
+            v-for="rule in visibleRules"
+            :key="rule.id"
+            class="rule-row"
+            :class="{ disabled: !rule.isEnabled }"
+          >
+            <button
+              class="switch"
+              type="button"
+              role="switch"
+              :aria-checked="rule.isEnabled"
+              :aria-label="`启用规则 ${rule.name}`"
+              :class="{ on: rule.isEnabled }"
+              @click="toggleRule(rule)"
+            ></button>
+
+            <div class="rule-main">
+              <div class="rule-title">
+                <span class="rule-name">{{ rule.name }}</span>
+                <span v-if="rule.isRegex" class="tag">正则</span>
+                <span v-if="describeTargets(rule) !== '正文'" class="tag">{{ describeTargets(rule) }}</span>
+                <!-- Legado 规则是 Java 正则，少数写法在 JS 里没有等价物。 -->
+                <span
+                  v-if="ruleIssues.get(rule.name)"
+                  class="tag tag-warn"
+                  :title="ruleIssues.get(rule.name)"
+                >无法执行</span>
+              </div>
+              <div class="rule-io">
+                <code class="io-text" :title="rule.pattern">{{ rule.pattern }}</code>
+                <svg class="io-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M5 12h14M13 6l6 6-6 6" />
+                </svg>
+                <code class="io-text io-text--out" :class="{ 'io-empty': !rule.replacement }" :title="rule.replacement">
+                  {{ rule.replacement || '删除' }}
+                </code>
+              </div>
+              <p class="rule-meta">
+                <span>{{ describeScope(rule.scope) }}</span>
+                <span v-if="rule.group" class="rule-meta-dot" aria-hidden="true">·</span>
+                <span v-if="rule.group">{{ rule.group }}</span>
+              </p>
+            </div>
+
+            <div class="rule-buttons">
+              <button class="link-btn" type="button" @click="openEditModal(rule)">编辑</button>
+              <button class="link-btn danger" type="button" @click="handleDelete(rule)">删除</button>
+            </div>
+          </article>
+        </div>
       </template>
     </div>
 
@@ -129,6 +136,8 @@
             <input id="rule-replacement" v-model="editingRule.replacement" placeholder="留空表示直接删除">
           </div>
 
+          <div class="field-split" aria-hidden="true"></div>
+
           <div class="field">
             <label>生效范围</label>
             <div class="segmented">
@@ -148,7 +157,25 @@
                 @click="setScopeMode('source')"
               >当前书源</button>
             </div>
-            <p class="field-hint">{{ describeScope(editingRule.scope) }}</p>
+          </div>
+
+          <div class="field">
+            <label for="rule-exclude">排除范围</label>
+            <input id="rule-exclude" v-model="editingRule.excludeScope" placeholder="不排除">
+          </div>
+
+          <div class="field field-inline">
+            <label>作用于</label>
+            <div class="check-row">
+              <label class="check">
+                <input v-model="editingRule.scopeContent" type="checkbox">
+                <span>正文</span>
+              </label>
+              <label class="check">
+                <input v-model="editingRule.scopeTitle" type="checkbox">
+                <span>章节标题</span>
+              </label>
+            </div>
           </div>
 
           <div class="field field-inline">
@@ -194,8 +221,7 @@
           </div>
 
           <p class="field-hint">
-            支持 Legado 净化规则的 JSON 数组。以 <code>@js:</code> 开头的脚本替换会在
-            Rust 沙盒里执行；需要脚本生成匹配式的规则没有等价能力，导入时会跳过。
+            支持 Legado 净化规则的 JSON 数组，按规则名合并。
           </p>
 
           <button class="btn" type="button" :disabled="importing" @click="importFromUrl">
@@ -214,8 +240,6 @@
             hidden
             @change="handleLocalFile"
           >
-
-          <p class="field-hint">导入按规则名合并，同名规则会被覆盖。</p>
         </div>
       </div>
     </Transition>
@@ -266,6 +290,60 @@ const sortedRules = computed(() => {
   return [...store.replaceRules].sort((a, b) => a.order - b.order)
 })
 
+/** 当前筛选的分组；空串表示全部。 */
+const activeGroup = ref('')
+/** 批量开关进行中：避免连点造成并发写同一份列表。 */
+const bulkBusy = ref(false)
+
+/** 分组清单（含条数），未分组的规则归到 `未分组`。 */
+const ruleGroups = computed(() => {
+  const counts = new Map<string, number>()
+  for (const rule of store.replaceRules) {
+    const group = (rule.group || '').trim() || '未分组'
+    counts.set(group, (counts.get(group) || 0) + 1)
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+})
+
+/** 列表实际渲染的规则（按分组筛选后）。 */
+const visibleRules = computed(() => {
+  if (!activeGroup.value) return sortedRules.value
+  return sortedRules.value.filter(
+    (rule) => ((rule.group || '').trim() || '未分组') === activeGroup.value,
+  )
+})
+
+/**
+ * 批量启用/停用**当前筛选出来的**规则。
+ *
+ * 只改变化的那几条：整批重写会把没改的规则也写一遍，一旦中途失败，
+ * 用户会看到一半改了一半没改。批量接口本身是 upsert，重复写没有问题。
+ */
+async function setVisibleEnabled(enabled: boolean) {
+  const targets = visibleRules.value.filter((rule) => rule.isEnabled !== enabled)
+  if (!targets.length) {
+    appStore.showToast(enabled ? '当前列表已全部启用' : '当前列表已全部停用', 'warning')
+    return
+  }
+  bulkBusy.value = true
+  try {
+    await saveReplaceRules(targets.map((rule) => ({ ...rule, isEnabled: enabled })))
+    await store.fetchReplaceRules()
+    appStore.showToast(
+      `${enabled ? '已启用' : '已停用'} ${targets.length} 条规则`,
+      'success',
+    )
+  } catch (e: any) {
+    appStore.showToast(e.message || '批量操作失败', 'error')
+    // 失败后以服务端为准，避免界面停在一个不确定的状态。
+    await store.fetchReplaceRules()
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
 /**
  * 规则名 → 无法执行的原因。
  *
@@ -295,6 +373,16 @@ function describeScope(scope?: string) {
   return scope
 }
 
+/** 作用目标的可读名。正文是默认值，所以只在不是「正文」时才需要显示。 */
+function describeTargets(rule: ReplaceRule) {
+  const content = rule.scopeContent !== false
+  const title = rule.scopeTitle === true
+  if (content && title) return '正文+标题'
+  if (title) return '仅标题'
+  if (content) return '正文'
+  return '未生效'
+}
+
 function getScopeMode(rule: ReplaceRule) {
   const scope = rule.scope || '*'
   if (scope.startsWith('source:')) return 'source'
@@ -311,7 +399,15 @@ onMounted(async () => {
 function openEditModal(rule?: ReplaceRule) {
   importPanelOpen.value = false
   if (rule) {
-    editingRule.value = { ...rule }
+    editingRule.value = {
+      ...rule,
+      // 老存档没有这两个开关：按手机端默认补齐（正文开、标题关），
+      // 否则 v-model 会把 undefined 当成未勾选，一保存就把正文规则关掉。
+      scopeContent: rule.scopeContent !== false,
+      scopeTitle: rule.scopeTitle === true,
+      excludeScope: rule.excludeScope || '',
+      timeoutMillisecond: rule.timeoutMillisecond ?? 3000,
+    }
   } else {
     editingRule.value = {
       id: 0,
@@ -319,8 +415,12 @@ function openEditModal(rule?: ReplaceRule) {
       pattern: '',
       replacement: '',
       scope: '*',
+      excludeScope: '',
+      scopeContent: true,
+      scopeTitle: false,
       isEnabled: true,
       isRegex: false,
+      timeoutMillisecond: 3000,
       order: store.replaceRules.length + 1
     }
   }
@@ -342,6 +442,10 @@ async function handleSave() {
   if (!editingRule.value) return
   if (!editingRule.value.name || !editingRule.value.pattern) {
     appStore.showToast('请填写名称和匹配内容', 'warning')
+    return
+  }
+  if (editingRule.value.scopeContent === false && editingRule.value.scopeTitle !== true) {
+    appStore.showToast('「正文」和「章节标题」至少勾选一个，否则规则不会生效', 'warning')
     return
   }
   try {
@@ -552,34 +656,7 @@ async function handleLocalFile(event: Event) {
   overscroll-behavior: contain;
 }
 
-/* ─── 分组与卡片 ─── */
-.group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.group-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 3px;
-}
-
-.group-head h4 {
-  margin: 0;
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  color: var(--rm-muted);
-}
-
-.group-note {
-  font-size: 11px;
-  color: var(--rm-muted);
-}
-
+/* ─── 卡片 ─── */
 .card {
   border-radius: 14px;
   border: 1px solid var(--rm-card-border);
@@ -592,13 +669,15 @@ async function handleLocalFile(event: Event) {
   padding: 2px 14px;
 }
 
-/* ─── 规则行 ─── */
+/* ─── 规则行 ───
+ * 三栏网格：开关 / 内容 / 操作。内容栏里「名称+标签」一行、「匹配 → 替换」一行、
+ * 「范围 · 分组」一行，比原来四行平铺紧凑得多，且左右两栏在窄屏会自动换行。 */
 .rule-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 12px;
+  padding: 11px 0;
   transition: opacity 0.18s;
 }
 
@@ -612,7 +691,6 @@ async function handleLocalFile(event: Event) {
 
 .rule-main {
   min-width: 0;
-  flex: 1;
 }
 
 .rule-title {
@@ -642,54 +720,73 @@ async function handleLocalFile(event: Event) {
   cursor: help;
 }
 
-.rule-scope {
-  margin: 4px 0 0;
-  font-size: 11.5px;
-  color: var(--rm-muted);
-}
-
-.rule-patterns {
-  margin: 6px 0 0;
+/* 「匹配 → 替换」一行展示。等宽字体便于比对正则，两端都可省略。 */
+.rule-io {
+  margin-top: 5px;
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.pattern-line {
-  display: flex;
+  align-items: center;
   gap: 6px;
   min-width: 0;
-}
-
-.pattern-line dt {
-  flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--rm-muted);
-}
-
-.pattern-line dd {
-  margin: 0;
-  min-width: 0;
   font-size: 11.5px;
-  font-family: 'Cascadia Mono', 'Consolas', monospace;
   color: var(--rm-label);
+}
+
+.io-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: 'Cascadia Mono', 'Consolas', monospace;
+}
+
+/* 匹配 → 替换：内容按自身宽度，短的不被拉开，长的自己省略。
+ * 不用 `flex: 1 1 0` 平分 —— 那会让短正则与箭头之间空出一大片，看着像两个独立字段。 */
+.io-text {
+  flex: 0 1 auto;
+  max-width: 62%;
+}
+
+.io-text--out {
+  color: var(--rm-muted);
+}
+
+/* 替换为空时显示占位的「删除」，用斜体区分于用户真写的文本。
+ * 类名不能叫 `empty` —— 本组件的 `.empty` 是空状态区块（带 56px 内边距），
+ * 复用会把这一行撑到一百多像素高。 */
+.io-text--out.io-empty {
+  font-family: inherit;
+  font-style: italic;
+}
+
+.io-arrow {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  color: var(--rm-muted);
+}
+
+.rule-meta {
+  margin: 4px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--rm-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rule-meta-dot {
+  opacity: 0.6;
 }
 
 /* ─── 行内操作 ─── */
-.rule-ops {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-
 .rule-buttons {
   display: flex;
   gap: 2px;
+  flex: 0 0 auto;
+  align-self: start;
 }
 
 /* 开关：与设置面板同款，纯 CSS，无输入控件残留边框。 */
@@ -818,7 +915,7 @@ async function handleLocalFile(event: Event) {
 /* ─── 空态 / 加载 ─── */
 .state,
 .empty {
-  padding: 40px 8px;
+  padding: 56px 8px;
   text-align: center;
 }
 
@@ -829,16 +926,8 @@ async function handleLocalFile(event: Event) {
   color: var(--rm-label);
 }
 
-.empty-text {
-  margin: 8px auto 0;
-  max-width: 34ch;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--rm-muted);
-}
-
 .empty-actions {
-  margin-top: 16px;
+  margin-top: 18px;
   display: flex;
   gap: 8px;
   justify-content: center;
@@ -847,14 +936,6 @@ async function handleLocalFile(event: Event) {
 
 .state {
   font-size: 12.5px;
-  color: var(--rm-muted);
-}
-
-.hint {
-  margin: 0;
-  padding: 0 3px;
-  font-size: 11.5px;
-  line-height: 1.6;
   color: var(--rm-muted);
 }
 
@@ -1072,16 +1153,74 @@ async function handleLocalFile(event: Event) {
     justify-content: flex-end;
   }
 
+  /* 窄屏把「操作」挪到第二行右侧，开关仍在最左，正文栏独占整行。 */
   .rule-row {
-    flex-direction: column;
-    gap: 10px;
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .rule-ops {
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
+  .rule-buttons {
+    grid-column: 2;
+    justify-self: end;
+    margin-top: -4px;
   }
+
+  .rule-io {
+    font-size: 11px;
+  }
+}
+
+/* ─── 分组筛选 + 批量开关 ─── */
+.list-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 0 2px 10px;
+}
+
+.group-filter select {
+  min-height: 30px;
+  max-width: 200px;
+  padding: 3px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--rm-line-strong);
+  background: var(--rm-field);
+  color: var(--rm-label);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.group-filter select:hover {
+  color: var(--rm-font, currentColor);
+  border-color: color-mix(in srgb, var(--rm-font, currentColor) 30%, transparent);
+}
+
+.bulk-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 分开「启用 / 停用」两个动作，避免误点成反向操作。 */
+.bulk-sep {
+  width: 1px;
+  height: 11px;
+  background: var(--rm-line-strong);
+}
+
+/* 「作用于」两个勾选框并排。 */
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+/* 编辑面板里「内容」与「作用范围」两组字段之间的分隔。 */
+.field-split {
+  height: 1px;
+  margin: 2px 0;
+  background: var(--rm-line);
 }
 </style>

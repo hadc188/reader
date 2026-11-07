@@ -136,6 +136,91 @@ describe('per-book replace rules', () => {
     expect(reader.displayContent).toBe('正文汉字')
   })
 
+  it('keeps images when a greedy rule matches the whole line', () => {
+    const reader = setupReader()
+    reader.replaceRules = [
+      { id: 1, name: '整行重写', pattern: '.*', replacement: '替换', isEnabled: true, isRegex: true, order: 0 },
+    ]
+    const output = reader.processContentForDisplay('广告<img src="a.png">尾巴')
+    // 整行被规则吃掉，图片自然也不在结果里；关键是没有留下被切碎的 `<img` 残片。
+    // 结果是两段「替换」而不是一段，因为 `.*` 在 JS 里末尾还会命中一个空串
+    // （`'abc'.replace(/.*/g, 'X')` → `'XX'`），与本次改动无关。
+    expect(output).toBe('替换替换')
+    expect(output).not.toContain('<img')
+  })
+
+  it('protects images from rules that only target text around them', () => {
+    const reader = setupReader()
+    reader.replaceRules = [
+      { id: 1, name: '删广告词', pattern: '广告', replacement: '', isEnabled: true, isRegex: false, order: 0 },
+    ]
+    const output = reader.processContentForDisplay('广告<img src="a.png">正文')
+    expect(output).toContain('<img src="a.png">')
+    expect(output).not.toContain('广告')
+  })
+
+  it('applies title-only rules to the displayed title only', () => {
+    const reader = setupReader()
+    reader.chapters = [{ title: '第十二章 免费阅读', url: 'chapter-1', index: 0 }]
+    reader.currentIndex = 0
+    reader.replaceRules = [
+      {
+        id: 1,
+        name: '去标题后缀',
+        pattern: '免费阅读',
+        replacement: '',
+        isEnabled: true,
+        isRegex: false,
+        order: 0,
+        scopeTitle: true,
+        scopeContent: false,
+      },
+    ]
+    expect(reader.displayChapterTitle).toBe('第十二章 ')
+    // 章节原值必须保留：换源与进度恢复都靠标题定位。
+    expect(reader.chapters[0].title).toBe('第十二章 免费阅读')
+    // 只作用于标题的规则不能改正文。
+    expect(reader.processContentForDisplay('免费阅读')).toBe('免费阅读')
+  })
+
+  it('honors excludeScope so a rule can skip one book', () => {
+    const reader = setupReader()
+    reader.replaceRules = [
+      {
+        id: 1,
+        name: '通用去广告',
+        pattern: '广告',
+        replacement: '',
+        isEnabled: true,
+        isRegex: false,
+        order: 0,
+        scope: '*',
+        excludeScope: reader.book!.name,
+      },
+    ]
+    // 当前书被排除 → 规则不生效。
+    expect(reader.processContentForDisplay('广告正文')).toBe('广告正文')
+  })
+
+  it('matches scope by substring like the phone app does', () => {
+    const reader = setupReader()
+    const book = reader.book!
+    reader.replaceRules = [
+      {
+        id: 1,
+        name: '混合串范围',
+        pattern: '广告',
+        replacement: '',
+        isEnabled: true,
+        isRegex: false,
+        order: 0,
+        // Legado 导出的混合串：精确相等匹配不到，包含匹配才能命中。
+        scope: `${book.name},${book.origin}`,
+      },
+    ]
+    expect(reader.processContentForDisplay('广告正文')).toBe('正文')
+  })
+
   it('ignores a late detail response after another book has opened', async () => {
     const reader = setupReader()
     const firstBook = reader.book!

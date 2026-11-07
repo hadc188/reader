@@ -49,7 +49,7 @@ function realisticExport() {
 }
 
 describe('normalizeLegadoReplaceRules', () => {
-  it('把 Legado 字段映射为 Reader 规则, 正文范围统一为 *', () => {
+  it('把 Legado 字段映射为 Reader 规则, 范围与作用目标原样保留', () => {
     const result = normalizeLegadoReplaceRules([legadoRule()])
     expect(result.rules).toEqual([
       {
@@ -59,8 +59,12 @@ describe('normalizeLegadoReplaceRules', () => {
         pattern: '\\s+',
         replacement: '',
         scope: '*',
+        excludeScope: undefined,
+        scopeContent: true,
+        scopeTitle: false,
         isEnabled: true,
         isRegex: true,
+        timeoutMillisecond: 3000,
         order: 1,
       },
     ])
@@ -227,7 +231,7 @@ describe('buildReplaceRuleImportMessage', () => {
     expect(feedback).toEqual({
       text:
         '导入 19 条（跳过 1 条：1 条用脚本生成匹配式的规则；3 条脚本规则在后端沙盒执行；' +
-        '1 条『仅作用于标题』的规则已按正文范围导入）',
+        '1 条只作用于章节标题）',
       type: 'warning',
     })
   })
@@ -267,14 +271,29 @@ describe('buildReplaceRuleImportMessage', () => {
     })
   })
 
-  it('成功时补充「仅作用于标题」的能力差异提示', () => {
+  it('成功时说明哪些规则只管标题', () => {
     const feedback = buildReplaceRuleImportMessage(normalizeLegadoReplaceRules([
       legadoRule({ name: '仅标题', scopeContent: false, scopeTitle: true }),
       legadoRule({ name: '正文' }),
     ]))
     expect(feedback).toEqual({
-      text: '导入 2 条（1 条『仅作用于标题』的规则已按正文范围导入）',
+      text: '导入 2 条（1 条只作用于章节标题）',
       type: 'success',
     })
+  })
+
+  it('仅标题规则的作用目标被保留，不会被改写成正文规则', () => {
+    const result = normalizeLegadoReplaceRules([
+      legadoRule({ name: '仅标题', scopeContent: false, scopeTitle: true }),
+    ])
+    expect(result.rules[0].scopeContent).toBe(false)
+    expect(result.rules[0].scopeTitle).toBe(true)
+  })
+
+  it('缺 scopeContent / scopeTitle 时按手机端默认补齐：正文开、标题关', () => {
+    const bare = { name: '老 JSON', pattern: 'x', replacement: '' }
+    const result = normalizeLegadoReplaceRules([bare])
+    expect(result.rules[0].scopeContent).toBe(true)
+    expect(result.rules[0].scopeTitle).toBe(false)
   })
 })

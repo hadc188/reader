@@ -67,6 +67,8 @@ import {
   type ReadingPositionSnapshot,
 } from '../utils/readingPosition'
 import { compileReplaceRule, toSandboxRuleStep } from '../utils/replaceRuleRegex'
+import { appliesToReplaceTarget, matchesReplaceRuleScope } from '../utils/replaceRuleScope'
+import { protectSpecialContent, kindsForPatterns } from '../utils/replaceRuleProtect'
 import {
   defaultClickAreaModes,
   defaultClickAreaProfiles,
@@ -820,6 +822,28 @@ export const useReaderStore = defineStore('reader', () => {
   let legadoPositionRestoreToken = 0
 
   const currentChapter = computed(() => chapters.value[currentIndex.value] || null)
+
+  /**
+   * 净化后的章节标题（标题净化规则的唯一出口）。
+   *
+   * 手机端在 `ContentProcessor.get()` 里对每一章的标题单独跑 `titleReplaceRules`；
+   * 桌面端此前完全没有这条链路，`scopeTitle: true` 的规则导入后直接失效。
+   *
+   * 单独开一个 computed 而不是改 `chapters` 里的原值：原值要参与「按标题定位章节」
+   * （换源、进度恢复都靠它），被规则改写后会定位不到。
+   */
+  const displayChapterTitle = computed(() => applyTitleReplaceRules(currentChapter.value?.title || ''))
+
+  /**
+   * 任意章节的净化标题（连续阅读一次挂多章，不能只算当前章）。
+   *
+   * 没有标题规则时直接返回原值，避免每章都跑一遍循环。
+   */
+  function displayTitleOf(chapter: { title?: string } | null | undefined): string {
+    const title = chapter?.title || ''
+    if (!title || !enabledTitleReplaceRules.value.length) return title
+    return applyTitleReplaceRules(title)
+  }
   const hasNext = computed(() => currentIndex.value < chapters.value.length - 1)
   const hasPrev = computed(() => currentIndex.value > 0)
 
@@ -1138,34 +1162,65 @@ export const useReaderStore = defineStore('reader', () => {
   /* ─── Chinese Conversion (OpenCC) ─── */
   /* ─── Content Filtering (Replace Rules) ─── */
 
-  /** 规则是否作用于当前这本书。 */
-  function matchReplaceRuleScope(rule: ReplaceRule) {
+  /** 当前书作为范围判定目标；没开书时为 null（只有「全部书籍」的规则生效）。 */
+  const replaceRuleScopeTarget = computed(() => {
     const currentBook = book.value
-    const scope = (rule.scope || '').trim()
-    if (!scope || scope === '*') return true
-    if (!currentBook) return false
-
-    if (scope.startsWith('source:')) {
-      return scope.slice('source:'.length) === currentBook.origin
+    if (!currentBook) return null
+    return {
+      name: currentBook.name || '',
+      origin: currentBook.origin || '',
+      bookUrl: currentBook.bookUrl || '',
     }
+  })
 
-    if (scope.startsWith('book:')) {
-      return scope.slice('book:'.length) === currentBook.bookUrl
-    }
-
-    const scopeParts = scope.split(';')
-    if (scopeParts[0] !== '*' && scopeParts[0] !== currentBook.name) {
-      return false
-    }
-    return scopeParts.length === 1 || scopeParts[1] === currentBook.bookUrl
+  /** 规则是否作用于当前这本书（含排除范围）。语义见 utils/replaceRuleScope。 */
+  function matchReplaceRuleScope(rule: ReplaceRule) {
+    return matchesReplaceRuleScope(rule, replaceRuleScopeTarget.value)
   }
 
-  /** 当前生效的规则, 已按 order 排序。 */
+  /** 当前生效的正文规则, 已按 order 排序。 */
   const enabledReplaceRules = computed(() =>
     [...replaceRules.value]
-      .filter(rule => rule.isEnabled && matchReplaceRuleScope(rule))
+      .filter(rule => rule.isEnabled && appliesToReplaceTarget(rule, 'content') && matchReplaceRuleScope(rule))
       .sort((a, b) => a.order - b.order),
   )
+
+  /** 当前生效的标题规则, 已按 order 排序。 */
+  const enabledTitleReplaceRules = computed(() =>
+    [...replaceRules.value]
+      .filter(rule => rule.isEnabled && appliesToReplaceTarget(rule, 'title') && matchReplaceRuleScope(rule))
+      .sort((a, b) => a.order - b.order),
+  )
+
+  /**
+   * 对章节标题应用标题净化规则。
+   *
+   * 手机端在 `ContentProcessor.get()` 里用 `chapter.getDisplayTitle(titleReplaceRules)`
+   * 处理标题，与正文规则是两套独立列表。桌面端此前完全没有标题净化 —— Legado 里
+   * `scopeTitle: true` 的规则导入后直接失效。
+   *
+   * 只跑同步可执行的规则（正则/字面量）：`@js:` 标题规则在手机端也极少见，
+   * 为此每章多一次 IPC 不划算。
+   */
+  function applyTitleReplaceRules(title: string): string {
+    if (!title) return title
+    const currentBook = book.value
+    if (currentBook?.readConfig?.useReplaceRule === false) return title
+    let result = title
+    for (const rule of enabledTitleReplaceRules.value) {
+      if (isScriptRule(rule)) continue
+      const compiled = compileReplaceRule(rule.pattern, rule.isRegex, rule.replacement)
+      if (compiled.kind === 'error' || compiled.kind === 'script') continue
+      try {
+        result = compiled.kind === 'regex'
+          ? result.replace(compiled.regex, compiled.replacement)
+          : result.replaceAll(compiled.needle, compiled.replacement)
+      } catch {
+        // 标题净化失败不该影响正文显示：跳过这条规则即可。
+      }
+    }
+    return result
+  }
 
   function isScriptRule(rule: ReplaceRule) {
     return /^@js:/i.test((rule.replacement || '').trim())
@@ -1188,7 +1243,22 @@ export const useReaderStore = defineStore('reader', () => {
     const currentBook = book.value
     if (currentBook?.readConfig?.useReplaceRule === false) return text
 
-    for (const rule of enabledReplaceRules.value) {
+    const rules = enabledReplaceRules.value
+    if (!rules.length) return text
+
+    // 特殊内容保护（对齐手机端 SpecialContentProtector）：先把 <img> / [newpage] /
+    // 内联样式脚本换成占位符，跑完所有规则再还原。没有这一步，`.*` 这类宽匹配会把
+    // 正文里的插图整段吃掉 —— 用户只会看到"开了净化后图片全没了"。
+    //
+    // 但「规则明确要处理某类标签」时那一类必须放开（见 kindsForPatterns）：
+    // 否则 `<img\b[^>]*>` 这种删图片规则会突然失效，等于把既有规则废掉。
+    const protectedContent = protectSpecialContent(
+      result,
+      kindsForPatterns(rules.map((rule) => rule.pattern || '')),
+    )
+    result = protectedContent.content
+
+    for (const rule of rules) {
       if (isScriptRule(rule)) continue
       const compiled = compileReplaceRule(rule.pattern, rule.isRegex, rule.replacement)
       if (compiled.kind === 'error') {
@@ -1209,7 +1279,7 @@ export const useReaderStore = defineStore('reader', () => {
         console.error(`Failed to apply rule: ${rule.name}`, e)
       }
     }
-    return result
+    return protectedContent.restore(result)
   }
 
   /** 按当前档位转换正文。
@@ -4436,7 +4506,7 @@ export const useReaderStore = defineStore('reader', () => {
     bookLoadError,
     legadoPositionRestore,
     legadoPositionRestoreCompleted,
-    currentChapter, hasNext, hasPrev, readingProgress,
+    currentChapter, displayChapterTitle, displayTitleOf, hasNext, hasPrev, readingProgress,
       loadBook, loadChapter, fetchChapterContent, setActiveChapterState, refreshContent, nextChapter, prevChapter, clear,
       chapterScrollProgress, setChapterScrollProgress,
       getPersistedReaderSession, restorePersistedSession, syncCurrentBookProgressToLegado,

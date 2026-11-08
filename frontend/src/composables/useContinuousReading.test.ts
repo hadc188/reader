@@ -119,6 +119,30 @@ describe('hide-read continuous mode advancement', () => {
     expect(continuousChapters.value.map((chapter) => chapter.index)).toEqual([12])
   })
 
+  it('trims the rendered list to a window around the current chapter', async () => {
+    const {
+      initializeContinuousChapters,
+      loadContinuousNext,
+      trimContinuousWindow,
+      continuousChapters,
+    } = setupHarness()
+
+    await initializeContinuousChapters(11, false)
+    await vi.waitFor(() => {
+      expect(continuousChapters.value.map((chapter) => chapter.index)).toEqual([11, 12])
+    })
+
+    // 模拟长读后列表已经累积到第 11..20 章
+    for (let step = 0; step < 8; step += 1) {
+      await loadContinuousNext()
+    }
+    expect(continuousChapters.value.length).toBeGreaterThan(6)
+
+    // 当前章推进到 16 时只应保留 14..18
+    await trimContinuousWindow(16)
+    expect(continuousChapters.value.map((chapter) => chapter.index)).toEqual([14, 15, 16, 17, 18])
+  })
+
   it('keeps the saved chapter progress when initializing at the open position', async () => {
     const { store, initializeContinuousChapters } = setupHarness()
     // loadBook/loadChapter 设置的上次阅读位置, 打开书时不得被初始化清零

@@ -817,6 +817,12 @@ export const useReaderStore = defineStore('reader', () => {
   const legadoPositionRestoreCompleted = ref<{ index: number; token: number } | null>(null)
   const restoringLegadoProgress = ref(false)
   const customFonts = ref<CustomFontEntry[]>([])
+  /** 已安装到 `document.fonts` 的自定义字体，按 family 记录以便真正卸载。
+   *
+   *  `document.fonts.add()` 只是把 FontFace 加入文档字体集；删除字体文件后
+   *  不调用 `document.fonts.delete()` 的话，解析后的字体数据会一直常驻，
+   *  反复导入/删除会线性累积。这里同时处理重复安装：同 family 先删旧再加新。 */
+  const installedFontFaces = new Map<string, FontFace>()
   let chapterLoadRequestId = 0
   let bookLoadRequestId = 0
   let legadoPositionRestoreToken = 0
@@ -872,7 +878,12 @@ export const useReaderStore = defineStore('reader', () => {
     const face = new FontFace(family, `url("${blobUrl}")`)
     try {
       const loaded = await face.load()
+      // 同名 family 重复安装（例如重新拉取字体列表）时先移除旧实例，避免
+      // document.fonts 里堆叠多份同名字体。
+      const previous = installedFontFaces.get(family)
+      if (previous) document.fonts.delete(previous)
       document.fonts.add(loaded)
+      installedFontFaces.set(family, loaded)
       return true
     } catch (error) {
       throw new Error(`字体文件加载失败：${error instanceof Error ? error.message : '格式不受支持'}`)
@@ -883,6 +894,16 @@ export const useReaderStore = defineStore('reader', () => {
 
   async function fetchCustomFonts() {
     customFonts.value = await listCustomFonts()
+    // 列表里已经没有的字体（例如从备份恢复后覆盖）也要释放，否则旧字体
+    // 会一直留在 document.fonts 中。
+    const listedIds = new Set(customFonts.value.map((font) => font.id))
+    for (const [family, face] of installedFontFaces) {
+      const id = family.slice('ReaderCustom_'.length)
+      if (!listedIds.has(id)) {
+        document.fonts.delete(face)
+        installedFontFaces.delete(family)
+      }
+    }
     const failedIds = new Set<string>()
     for (const font of customFonts.value) {
       try {
@@ -920,6 +941,14 @@ export const useReaderStore = defineStore('reader', () => {
     customFonts.value = customFonts.value.filter((font) => font.id !== id)
     if (config.fontFamily === `${CUSTOM_FONT_PREFIX}${id}`) {
       updateConfig('fontFamily', 'system')
+    }
+    // 先切回系统字体再释放：如果当前正文仍引用这个 family，先删字体可能
+    // 让已渲染文字短暂回退，顺序反过来更稳。
+    const family = customFontFamily(id)
+    const face = installedFontFaces.get(family)
+    if (face) {
+      document.fonts.delete(face)
+      installedFontFaces.delete(family)
     }
   }
 

@@ -826,6 +826,10 @@ function shouldSkipPositionRestore(index: number) {
 let suppressPositionSaveUntil = 0
 let suppressContinuousScrollSyncUntil = 0
 let suppressContinuousAutoLoadUntil = 0
+/** 连续阅读裁剪是否已排队：滚动是高频事件，同一帧只允许排一次裁剪。 */
+let continuousTrimScheduled = false
+/** 上一次裁剪/阅读推进时的章节号：用来区分向下读与向上回看。 */
+let continuousTrimAnchorIndex = 0
 const restoreStabilizeTimers: number[] = []
 const serverProgressAutoSaveScheduler = createReaderProgressAutoSaveScheduler({
   intervalMs: SERVER_PROGRESS_AUTOSAVE_MS,
@@ -1677,6 +1681,7 @@ const {
   getContinuousSections,
   scrollToContinuousChapter,
   pruneReadChapters,
+  trimContinuousWindow,
   clearContinuousChapters,
   disposeContinuousReading,
 } = useContinuousReading(
@@ -2056,6 +2061,9 @@ async function rebuildContinuousAtChapter(targetIndex: number) {
   suppressContinuousAutoLoadUntil = Date.now() + 500
   // 重建后落在目标章节开头, 不恢复上次位置
   markSkipPositionRestore(targetIndex)
+  // 跳章后重置裁剪锚点：否则从后往前跳时 `movingForward` 会一直是 false，
+  // 后续向下阅读再也不裁剪。
+  continuousTrimAnchorIndex = targetIndex
   await initializeContinuousChapters(targetIndex, false, true)
 }
 
@@ -3158,6 +3166,34 @@ function handleScroll() {
         } else {
           store.setChapterScrollProgress(progress)
         }
+
+        // 普通连续阅读会一直往下追加章节，长读后 DOM 与正文对象无上限累积。
+        // 这里在当前章判定稳定后把列表裁成当前章前后各 N 章的窗口；裁剪自身
+        // 的滚动补偿会再次触发 scroll 事件，先置抑制窗口，避免它被当成用户滚动
+        // 反推出错误的 currentIndex。
+        //
+        // 必须等当前这轮 handleScroll 结束再裁：本次 reading 的
+        // `continuousRemaining` 是按裁剪前的高度算的，同帧裁剪会让它突然变大/变小，
+        // 从而误触发或漏触发下面的 `loadContinuousNext()`。用 rAF 延迟到下一帧，
+        // 让滚动判定先按裁剪前的布局完成。
+        if (!hideReadChaptersMode.value) {
+          const movingForward = activeIndex >= continuousTrimAnchorIndex
+          continuousTrimAnchorIndex = activeIndex
+          if (movingForward && !continuousTrimScheduled) {
+            continuousTrimScheduled = true
+            suppressContinuousScrollSyncUntil = Date.now() + 300
+            window.requestAnimationFrame(() => {
+              continuousTrimScheduled = false
+              const beforeTrim = continuousChapters.value.length
+              // 用回调执行时的当前章，而不是排队时捕获的旧值：这一帧内可能
+              // 又滚过了章节边界，按旧章裁剪会把用户正在读的新章裁掉。
+              void trimContinuousWindow(store.currentIndex).finally(() => {
+                if (continuousChapters.value.length === beforeTrim) return
+                suppressContinuousScrollSyncUntil = Date.now() + 200
+              })
+            })
+          }
+        }
       }
     }
 
@@ -3978,6 +4014,8 @@ onUnmounted(() => {
 watch(() => config.value.readMethod, async () => {
   clearSelectionState()
   if (isContinuousMode.value) {
+    // 切入连续阅读时按当前章重新建立裁剪锚点，避免沿用非连续模式下的旧值。
+    continuousTrimAnchorIndex = store.currentIndex
     await initializeContinuousChapters(store.currentIndex, false)
   } else {
     clearContinuousChapters()

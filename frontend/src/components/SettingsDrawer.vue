@@ -366,6 +366,59 @@
                 <span></span>
               </button>
             </div>
+
+            <!-- 窗口透明度：与桌面背景图并列的「应用级」外观项。
+                 只有 Windows 桌面壳支持整窗 alpha，其它平台不渲染。 -->
+            <div
+              v-if="!appStore.isWebMode && readerStore.windowOpacitySupported"
+              class="background-setting"
+            >
+              <div class="setting-switch-copy">
+                <span>窗口透明度</span>
+              </div>
+              <div class="background-opacity-row">
+                <label for="app-window-opacity">不透明度</label>
+                <input
+                  id="app-window-opacity"
+                  class="settings-slider"
+                  type="range"
+                  :min="windowOpacityFloorPercent"
+                  max="100"
+                  step="1"
+                  :value="readerOpacityToPercent(readerStore.config.windowOpacity)"
+                  @input="updateWindowOpacityPercent(($event.target as HTMLInputElement).value)"
+                >
+                <label class="opacity-input-wrap" title="可直接输入数值">
+                  <input
+                    class="opacity-input"
+                    type="number"
+                    :min="windowOpacityFloorPercent"
+                    max="100"
+                    step="1"
+                    :value="readerOpacityToPercent(readerStore.config.windowOpacity)"
+                    @change="applyWindowOpacityPercent(($event.target as HTMLInputElement).value, $event.target as HTMLInputElement)"
+                  >
+                  <span class="opacity-unit">%</span>
+                </label>
+              </div>
+              <div class="setting-switch-row">
+                <div class="setting-switch-copy">
+                  <span>应用到阅读页</span>
+                  <small>{{ windowOpacityDescription }}</small>
+                </div>
+                <button
+                  class="switch-control"
+                  :class="{ on: readerStore.config.applyWindowOpacityToReader }"
+                  type="button"
+                  role="switch"
+                  :aria-checked="readerStore.config.applyWindowOpacityToReader"
+                  aria-label="将窗口透明度应用到阅读页"
+                  @click="toggleWindowOpacityForReader"
+                >
+                  <span></span>
+                </button>
+              </div>
+            </div>
           </section>
 
           <!-- 隐藏功能: 只对桌面端有意义。Web 端本来就没有统计与 RSS,
@@ -421,8 +474,10 @@ import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { isTauriRuntime } from '../api/transport'
 import {
+  READER_WINDOW_OPACITY_MIN,
   READER_BACKGROUND_OPACITY_STEP,
   normalizeReaderBackgroundOpacity,
+  normalizeReaderWindowOpacity,
   percentToReaderOpacity,
   prepareReaderBackgroundImage,
   readerOpacityToPercent,
@@ -694,6 +749,42 @@ function applyBackgroundOpacityPercent(raw: string, input: HTMLInputElement) {
 function syncBackgroundOpacityInput(input: HTMLInputElement, applied: number) {
   const actual = String(readerOpacityToPercent(applied))
   if (input.value !== actual) input.value = actual
+}
+
+/** 窗口透明度下限（百分比整数），与 Rust 侧保持一致。 */
+const windowOpacityFloorPercent = Math.round(READER_WINDOW_OPACITY_MIN * 100)
+
+const windowOpacityDescription = computed(() => (
+  readerStore.config.applyWindowOpacityToReader
+    ? '阅读页与应用窗口使用同一档透明度'
+    : '阅读页使用自己的透明度，可在阅读设置里单独调整'
+))
+
+function updateWindowOpacityPercent(raw: string) {
+  const percent = Number(raw)
+  if (!Number.isFinite(percent)) return
+  readerStore.updateConfig('windowOpacity', normalizeReaderWindowOpacity(percent / 100))
+}
+
+function applyWindowOpacityPercent(raw: string, input: HTMLInputElement) {
+  const parsed = percentToReaderOpacity(raw)
+  if (parsed === null) {
+    syncBackgroundOpacityInput(input, readerStore.config.windowOpacity)
+    return
+  }
+  const next = normalizeReaderWindowOpacity(parsed)
+  readerStore.updateConfig('windowOpacity', next)
+  syncBackgroundOpacityInput(input, next)
+}
+
+function toggleWindowOpacityForReader() {
+  const next = !readerStore.config.applyWindowOpacityToReader
+  // 关闭时若阅读页还停在默认的 100%，先继承当前应用窗口的档位 ——
+  // 否则一关开关阅读页会毫无征兆地跳回实色，与"两套值分开调"的预期不符。
+  if (!next && readerStore.config.readerWindowOpacity >= 1) {
+    readerStore.updateConfig('readerWindowOpacity', readerStore.config.windowOpacity)
+  }
+  readerStore.updateConfig('applyWindowOpacityToReader', next)
 }
 
 function removeBackgroundImage() {

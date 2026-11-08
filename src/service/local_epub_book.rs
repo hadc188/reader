@@ -140,7 +140,16 @@ pub struct LocalEpubBookService {
     /// `original.epub` 取一个条目; 若每次重新打开, 光解析 1800 多个条目的中央
     /// 目录就要上百毫秒 —— 缓存句柄后单章读取回到毫秒级。
     archives: Arc<tokio::sync::Mutex<HashMap<String, EpubArchiveHandle>>>,
+    /// 已解析的 `manifest.json`。
+    ///
+    /// 每次翻章都要按章号查路径, 而 manifest 含全书章节 + assets 清单(上千条目,
+    /// 几百 KB JSON)。逐次读文件 + 反序列化会让本地书换章多出几十毫秒 ——
+    /// 正是"本地书翻页应该无感"被打断的那部分。import / rebuild / 删书时失效。
+    indexes: Arc<tokio::sync::Mutex<HashMap<String, Arc<StoredEpubIndex>>>>,
 }
+
+/// 同时缓存的本地 EPUB 目录数量上限。
+const LOCAL_EPUB_INDEX_CACHE_LIMIT: usize = 8;
 
 pub fn is_local_epub_origin(value: &str) -> bool {
     value.trim() == LOCAL_EPUB_ORIGIN
@@ -160,6 +169,7 @@ impl LocalEpubBookService {
             storage_dir: storage_dir.as_ref().to_path_buf(),
             rebuild_lock: Arc::new(tokio::sync::Mutex::new(())),
             archives: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            indexes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -230,8 +240,9 @@ impl LocalEpubBookService {
         let book_dir = self.book_dir(user_ns, &book_url)?;
 
         if book_dir.exists() {
-            // 同一本书重新导入会复用同一个 book_url, 必须先丢掉旧句柄。
+            // 同一本书重新导入会复用同一个 book_url, 必须先丢掉旧句柄与旧目录缓存。
             self.invalidate_archive(&book_url).await;
+            self.invalidate_index(user_ns, &book_url).await;
             fs::remove_dir_all(&book_dir)
                 .await
                 .map_err(|e| AppError::Internal(e.into()))?;
@@ -311,7 +322,7 @@ impl LocalEpubBookService {
 
     pub async fn get_book_info(&self, user_ns: &str, book_url: &str) -> Result<Book, AppError> {
         let index = self.read_index(user_ns, book_url).await?;
-        Ok(book_from_index(index))
+        Ok(book_from_index((*index).clone()))
     }
 
     pub async fn get_chapter_list(
@@ -322,10 +333,10 @@ impl LocalEpubBookService {
         let index = self.read_index(user_ns, book_url).await?;
         Ok(index
             .chapters
-            .into_iter()
+            .iter()
             .map(|chapter| BookChapter {
-                title: chapter.title,
-                url: chapter.url,
+                title: chapter.title.clone(),
+                url: chapter.url.clone(),
                 index: chapter.index,
                 ..BookChapter::default()
             })
@@ -399,6 +410,7 @@ impl LocalEpubBookService {
     pub async fn delete_book_files(&self, user_ns: &str, book_url: &str) -> Result<bool, AppError> {
         // 先丢缓存句柄: 否则 Windows 上目录会因文件被占用而删不掉。
         self.invalidate_archive(book_url).await;
+        self.invalidate_index(user_ns, book_url).await;
         let book_dir = self.book_dir(user_ns, book_url)?;
         match fs::remove_dir_all(book_dir).await {
             Ok(()) => Ok(true),
@@ -419,9 +431,30 @@ impl LocalEpubBookService {
         Ok(self.local_root(user_ns).join(hash))
     }
 
-    async fn read_index(&self, user_ns: &str, book_url: &str) -> Result<StoredEpubIndex, AppError> {
+    async fn read_index(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+    ) -> Result<Arc<StoredEpubIndex>, AppError> {
+        let cache_key = format!("{user_ns}:{book_url}");
+        if let Some(hit) = self.indexes.lock().await.get(&cache_key) {
+            return Ok(hit.clone());
+        }
         let dir = self.book_dir(user_ns, book_url)?;
-        let index = self.read_index_file(&dir).await?;
+        let index = Arc::new(self.load_index(&dir, book_url).await?);
+        let mut cache = self.indexes.lock().await;
+        if cache.len() >= LOCAL_EPUB_INDEX_CACHE_LIMIT {
+            if let Some(evicted) = cache.keys().next().cloned() {
+                cache.remove(&evicted);
+            }
+        }
+        cache.insert(cache_key, index.clone());
+        Ok(index)
+    }
+
+    /// 读 manifest; 版本过旧时用原书就地重建一次。
+    async fn load_index(&self, dir: &Path, book_url: &str) -> Result<StoredEpubIndex, AppError> {
+        let index = self.read_index_file(dir).await?;
         // 旧版本导入的书没有保留原书 CSS, 章节里只剩裸标签, 排版全部丢失。
         // 原始 epub 还留在 book_dir 里, 就地按新规则重建一次, 用户不必重新导入。
         if index.engine_version >= CURRENT_EPUB_ENGINE_VERSION || !dir.join("original.epub").exists()
@@ -431,11 +464,20 @@ impl LocalEpubBookService {
 
         let _guard = self.rebuild_lock.lock().await;
         // 等锁期间可能已被另一个读取重建过: 重新读一次再决定, 避免重复解包。
-        let latest = self.read_index_file(&dir).await.unwrap_or(index);
+        let latest = self.read_index_file(dir).await.unwrap_or(index);
         if latest.engine_version >= CURRENT_EPUB_ENGINE_VERSION {
             return Ok(latest);
         }
-        self.rebuild_index(&dir, latest).await
+        self.rebuild_index(book_url, dir, latest).await
+    }
+
+    /// 丢弃某本书的目录缓存。重新导入 / 重建索引 / 删书都要调用, 否则会继续按
+    /// 旧 manifest 的章节路径去解压。
+    async fn invalidate_index(&self, user_ns: &str, book_url: &str) {
+        self.indexes
+            .lock()
+            .await
+            .remove(&format!("{user_ns}:{book_url}"));
     }
 
     async fn read_index_file(&self, dir: &Path) -> Result<StoredEpubIndex, AppError> {
@@ -451,6 +493,7 @@ impl LocalEpubBookService {
     /// 全量解包的成本。
     async fn rebuild_index(
         &self,
+        book_url: &str,
         dir: &Path,
         fallback: StoredEpubIndex,
     ) -> Result<StoredEpubIndex, AppError> {
@@ -472,8 +515,9 @@ impl LocalEpubBookService {
             }
         };
         // 重建重写了 assets/styles, 缓存句柄要丢掉(它指向的仍是原文件, 但语义上
-        // 这份索引已换代, 重新打开最省心)。
+        // 这份索引已换代, 重新打开最省心)。清单同理: 章节路径可能变了。
         self.invalidate_archive(&rebuilt.book_url).await;
+        self.invalidate_index_by_url(book_url).await;
         if let Err(err) = write_file_atomic(&marker, b"").await {
             tracing::debug!("clear epub rebuild marker failed: {err:?}");
         }
@@ -488,6 +532,13 @@ impl LocalEpubBookService {
             Err(err) => tracing::warn!("serialize rebuilt epub manifest failed: {err:?}"),
         }
         Ok(rebuilt)
+    }
+
+    /// 按 book_url 丢弃所有命名空间下的目录缓存(重建索引时手头只有 book_url)。
+    async fn invalidate_index_by_url(&self, book_url: &str) {
+        let suffix = format!(":{book_url}");
+        let mut cache = self.indexes.lock().await;
+        cache.retain(|key, _| !key.ends_with(&suffix));
     }
 }
 

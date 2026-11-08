@@ -130,6 +130,73 @@ describe('reader local txt chapters', () => {
     await expect(readerStore.fetchChapterContent(0)).resolves.toBe('')
   })
 
+  it('does not report a fetch stage for local books', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    readerStore.book = {
+      name: '本地书',
+      author: '本地导入',
+      origin: 'local-txt',
+      bookUrl: 'local-txt:abc123',
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'local-txt:abc123#0', index: 0 },
+      { title: '第二章', url: 'local-txt:abc123#1', index: 1 },
+    ]
+
+    let resolveContent: ((value: string) => void) | undefined
+    vi.mocked(getBookContent).mockImplementation(async (params) => {
+      // 后端即便推了阶段(理论上本地分支不会), 本地书也不该把它显示出来:
+      // 读盘是毫秒级的, 「正在获取章节…」浮条只会闪一下。
+      params.onStage?.('parsing')
+      return new Promise<string>((resolve) => {
+        resolveContent = resolve
+      })
+    })
+    const loading = readerStore.loadChapter(1)
+    await vi.waitFor(() => {
+      expect(getBookContent).toHaveBeenCalledTimes(1)
+    })
+    expect(readerStore.loadStage).toBe('')
+
+    resolveContent?.('本地正文')
+    await loading
+    expect(readerStore.content).toBe('本地正文')
+    expect(readerStore.loadStage).toBe('')
+    // 后端也不必收到阶段回调 —— 传了就等于让后端多做一次 IPC 往返
+    expect(vi.mocked(getBookContent).mock.calls[0][0].onStage).toBeUndefined()
+  })
+
+  it('keeps reporting stages for network books', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(true)
+    readerStore.book = {
+      name: '网络书',
+      author: '作者',
+      origin: 'test-source',
+      bookUrl: 'https://example.test/book',
+    }
+    readerStore.chapters = [{ title: '第一章', url: 'chapter-0', index: 0 }]
+
+    let resolveContent: ((value: string) => void) | undefined
+    vi.mocked(getBookContent).mockImplementation(async (params) => {
+      params.onStage?.('parsing')
+      return new Promise<string>((resolve) => {
+        resolveContent = resolve
+      })
+    })
+    const loading = readerStore.loadChapter(0)
+    await vi.waitFor(() => {
+      expect(readerStore.loadStage).toBe('parsing')
+    })
+
+    resolveContent?.('网络正文')
+    await loading
+    expect(readerStore.loadStage).toBe('')
+  })
+
   it('still rejects an empty chapter that is not a volume', async () => {
     const appStore = useAppStore()
     const readerStore = useReaderStore()

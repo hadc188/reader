@@ -452,6 +452,12 @@ import {
   shouldRevealReaderControls,
 } from '../utils/readerHoverControls'
 import { resolveReaderBackTarget } from '../utils/readerBack'
+import {
+  LOCAL_CHAPTER_LOADING_DELAY_MS,
+  isChapterLoadingActive,
+  shouldDeferChapterLoading,
+  shouldShowChapterLoading,
+} from '../utils/readerChapterLoading'
 import { shouldPreferServerReadingPosition, toMillis, type ReadingPositionSnapshot } from '../utils/readingPosition'
 import { isLocalBook, isLocalEpubBook } from '../utils/localBook'
 import { PDF_PAGE_ATTR, isPdfBook, releasePdfBook, renderPdfChapterPages } from '../utils/pdfPages'
@@ -870,9 +876,65 @@ const disableSystemCallout = computed(() => {
 /** 连续阅读模式的「原地刷新」不显示全屏加载态: 章节列表必须留在 DOM 里。
  *  一旦卸载, `.content-loading` 的 height:100% 会让滚动容器内容塌缩、
  *  scrollTop 被夹到 0, 重新挂载后 handleScroll 会把第一项(上一章)判为当前章。 */
-const showChapterLoading = computed(() => (
-  store.loading && !(isContinuousMode.value && store.refreshing)
+const rawChapterLoading = computed(() => isChapterLoadingActive({
+  loading: store.loading,
+  continuousMode: isContinuousMode.value,
+  refreshing: store.refreshing,
+}))
+
+/**
+ * 本地书的加载动画延迟显示(见 utils/readerChapterLoading 的说明)。
+ *
+ * 只影响可见动画, 不动 `store.loading`: 分页落位、进度保存都要拿它判断
+ * "正文是否还在路上"。首次打开书时屏上还没有正文, 那时仍要立刻显示加载态,
+ * 否则用户会对着空白页面以为卡住了 —— 所以只有已渲染过正文时才延迟。
+ */
+const hasRenderedChapter = computed(() => Boolean(store.content))
+/**
+ * 哪些书可以延迟加载动画: 本地 TXT/EPUB 的正文是磁盘上的 HTML/纯文本, 取回即可见。
+ *
+ * 本地 PDF 不算: 它的章节正文只是占位符, 真正的画面要 pdf.js 逐页画 canvas
+ * (跳章还要先回收上一章的 canvas), 延迟隐掉加载圈只会让用户对着空白等更久。
+ */
+const deferChapterLoading = computed(() => (
+  isLocalBook(store.book) && !isPdfBookMode.value
 ))
+const localChapterLoadingVisible = ref(false)
+let localChapterLoadingTimer: number | null = null
+watch(
+  [rawChapterLoading, deferChapterLoading, hasRenderedChapter],
+  ([loadingNow, deferrable]) => {
+    const defer = shouldDeferChapterLoading({
+      loading: loadingNow,
+      deferrable,
+      localIndicatorVisible: localChapterLoadingVisible.value,
+      hasRenderedChapter: hasRenderedChapter.value,
+    })
+    if (!defer) {
+      if (localChapterLoadingTimer !== null) {
+        clearTimeout(localChapterLoadingTimer)
+        localChapterLoadingTimer = null
+      }
+      localChapterLoadingVisible.value = false
+      return
+    }
+    if (localChapterLoadingTimer !== null) return
+    localChapterLoadingTimer = window.setTimeout(() => {
+      localChapterLoadingTimer = null
+      localChapterLoadingVisible.value = true
+    }, LOCAL_CHAPTER_LOADING_DELAY_MS)
+  },
+  { immediate: true },
+)
+/** 阅读页是否画全屏加载圈: 书源立即画, 本地书延迟画(毫秒级读完就完全不画)。 */
+const showChapterLoading = computed(() => shouldShowChapterLoading({
+  loading: store.loading,
+  continuousMode: isContinuousMode.value,
+  refreshing: store.refreshing,
+  deferrable: deferChapterLoading.value,
+  localIndicatorVisible: localChapterLoadingVisible.value,
+  hasRenderedChapter: hasRenderedChapter.value,
+}))
 const touchState = ref({
   startX: 0,
   startY: 0,
@@ -3988,6 +4050,10 @@ onUnmounted(() => {
   if (legadoPositionRestoreTimer) clearTimeout(legadoPositionRestoreTimer)
   if (refreshOfflineCacheStateTimer) clearTimeout(refreshOfflineCacheStateTimer)
   if (horizontalRebuildTimer) clearTimeout(horizontalRebuildTimer)
+  if (localChapterLoadingTimer !== null) {
+    clearTimeout(localChapterLoadingTimer)
+    localChapterLoadingTimer = null
+  }
   hoverSupportStop?.()
   hoverSupportStop = null
   hoverMediaQuery?.removeEventListener('change', syncHoverPointerSupport)

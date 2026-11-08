@@ -89,6 +89,9 @@ fn reveal(window: &tauri::WebviewWindow, state: &RevealState) {
     if state.maximize.load(Ordering::SeqCst) {
         let _ = window.maximize();
     }
+    // `maximize()` 会让 tao 重算窗口样式（同迷你模式的置顶切换），
+    // 重放一次整窗透明度，避免启动即最大化时透明度丢失。
+    reader_rust::api::commands::window::reapply_window_opacity(window);
     let _ = window.show();
     let _ = window.set_focus();
 }

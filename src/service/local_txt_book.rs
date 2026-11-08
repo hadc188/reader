@@ -4,7 +4,9 @@ use crate::util::hash::md5_hex;
 use encoding_rs::GB18030;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs;
 
 pub const LOCAL_TXT_ORIGIN: &str = "local-txt";
@@ -229,12 +231,23 @@ pub fn validate_txt_upload(file_name: &str, byte_len: usize) -> Result<(), AppEr
 #[derive(Clone)]
 pub struct LocalTxtBookService {
     storage_dir: PathBuf,
+    /// 已解析的章节目录缓存。
+    ///
+    /// 本地 TXT 每翻一章都要按章号查区间，而 `chapters.json` 是一份可能上千章的
+    /// JSON（几百 KB）。每次正文请求都读文件 + 反序列化一遍，本地书"瞬间翻页"
+    /// 的体验就没了。目录只在导入/删除时变化，按 book_url 失效即可。
+    indexes: Arc<tokio::sync::Mutex<HashMap<String, Arc<StoredTxtIndex>>>>,
 }
+
+/// 同时缓存的本地 TXT 目录数量上限。目录本身是几千章的小结构，留几本足够覆盖
+/// "在几本书之间来回切"的场景，又不会让缓存无限增长。
+const LOCAL_TXT_INDEX_CACHE_LIMIT: usize = 16;
 
 impl LocalTxtBookService {
     pub fn new(storage_dir: impl AsRef<Path>) -> Self {
         Self {
             storage_dir: storage_dir.as_ref().to_path_buf(),
+            indexes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -258,6 +271,9 @@ impl LocalTxtBookService {
             md5_hex(&text)
         ));
         let book_url = format!("{}:{}", LOCAL_TXT_ORIGIN, hash);
+        // 同一本书重新导入会复用同一个 book_url，旧目录缓存必须先作废，否则会按
+        // 上一次分章的区间去读新文件（章号可能对不上）。
+        self.invalidate_index(user_ns, &book_url).await;
         // 只要区间: 旧实现为每章复制一份正文却从不使用(索引只存 start/end)。
         let chapters = parse_txt_chapter_ranges(&book_url, &text);
         let book_dir = self.book_dir(user_ns, &book_url)?;
@@ -313,7 +329,7 @@ impl LocalTxtBookService {
     pub async fn get_book_info(&self, user_ns: &str, book_url: &str) -> Result<Book, AppError> {
         let index = self.read_index(user_ns, book_url).await?;
         Ok(Book {
-            name: index.name,
+            name: index.name.clone(),
             author: "本地导入".to_string(),
             book_url: index.book_url.clone(),
             origin: LOCAL_TXT_ORIGIN.to_string(),
@@ -336,10 +352,10 @@ impl LocalTxtBookService {
         let index = self.read_index(user_ns, book_url).await?;
         Ok(index
             .chapters
-            .into_iter()
+            .iter()
             .map(|chapter| BookChapter {
-                title: chapter.title,
-                url: chapter.url,
+                title: chapter.title.clone(),
+                url: chapter.url.clone(),
                 index: chapter.index,
                 is_volume: chapter.is_volume,
                 ..BookChapter::default()
@@ -355,16 +371,35 @@ impl LocalTxtBookService {
             .iter()
             .find(|chapter| chapter.index == requested_index)
             .ok_or_else(|| AppError::BadRequest("章节不存在".to_string()))?;
-        let text = fs::read_to_string(self.book_dir(user_ns, &book_url)?.join("book.txt"))
-            .await
-            .map_err(map_local_txt_read_error)?;
-        if chapter.start > chapter.end || chapter.end > text.len() {
+        if chapter.start > chapter.end {
             return Err(AppError::BadRequest("章节索引无效".to_string()));
         }
-        Ok(text[chapter.start..chapter.end].to_string())
+        // 只读本章那一段字节，而不是每次翻章都把整本（最大 50MB）读进内存。
+        // 旧实现 `read_to_string` 整本 + 切片，一本大书光读盘就是几十毫秒 ——
+        // 本地书"翻页应该无感"的体验正是被这一步拖出来的。
+        let path = self.book_dir(user_ns, &book_url)?.join("book.txt");
+        let mut file = fs::File::open(path)
+            .await
+            .map_err(map_local_txt_read_error)?;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        file.seek(std::io::SeekFrom::Start(chapter.start as u64))
+            .await
+            .map_err(map_local_txt_read_error)?;
+        let mut buf = vec![0u8; chapter.end.saturating_sub(chapter.start)];
+        file.read_exact(&mut buf)
+            .await
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                    AppError::BadRequest("章节索引无效".to_string())
+                } else {
+                    map_local_txt_read_error(err)
+                }
+            })?;
+        String::from_utf8(buf).map_err(|_| AppError::BadRequest("章节索引无效".to_string()))
     }
 
     pub async fn delete_book_files(&self, user_ns: &str, book_url: &str) -> Result<bool, AppError> {
+        self.invalidate_index(user_ns, book_url).await;
         let book_dir = self.book_dir(user_ns, book_url)?;
         match fs::remove_dir_all(book_dir).await {
             Ok(()) => Ok(true),
@@ -385,7 +420,15 @@ impl LocalTxtBookService {
         Ok(self.local_root(user_ns).join(hash))
     }
 
-    async fn read_index(&self, user_ns: &str, book_url: &str) -> Result<StoredTxtIndex, AppError> {
+    async fn read_index(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+    ) -> Result<Arc<StoredTxtIndex>, AppError> {
+        let cache_key = format!("{user_ns}:{book_url}");
+        if let Some(hit) = self.indexes.lock().await.get(&cache_key) {
+            return Ok(hit.clone());
+        }
         let path = self.book_dir(user_ns, book_url)?.join("chapters.json");
         let data = fs::read_to_string(path)
             .await
@@ -400,7 +443,23 @@ impl LocalTxtBookService {
                 chapter.is_volume = is_volume_title(&chapter.title);
             }
         }
+        let index = Arc::new(index);
+        let mut cache = self.indexes.lock().await;
+        if cache.len() >= LOCAL_TXT_INDEX_CACHE_LIMIT {
+            if let Some(evicted) = cache.keys().next().cloned() {
+                cache.remove(&evicted);
+            }
+        }
+        cache.insert(cache_key, index.clone());
         Ok(index)
+    }
+
+    /// 丢弃某本书的目录缓存：重新导入会改写 `chapters.json`，删书会连目录一起删。
+    async fn invalidate_index(&self, user_ns: &str, book_url: &str) {
+        self.indexes
+            .lock()
+            .await
+            .remove(&format!("{user_ns}:{book_url}"));
     }
 }
 

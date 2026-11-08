@@ -128,9 +128,24 @@ onMounted(() => {
   void appStore.runStartupVersionCheck()
   void appStore.applyBossKey().catch(() => undefined)
   void appStore.applyNetworkProxy().catch(() => undefined)
+  // 恢复上次保存的整窗不透明度。先问平台是否支持，再把值推给窗口 ——
+  // 不支持时设置项不会渲染，也不会发无意义的 IPC。
+  void readerStore.detectWindowOpacitySupport().then(() => {
+    return readerStore.syncWindowOpacityForRoute(route.name === 'reader')
+  })
   // 迷你模式状态由 Rust 侧持有(桌面壳启动时据此建窗), 这里同步一份用于紧凑布局。
   void appStore.syncWindowMode()
 })
+
+/** 窗口不透明度按页面取值：非阅读页用应用窗口的 `windowOpacity`，阅读页
+ *  由「应用到阅读页」决定跟随应用值还是用自己的 `readerWindowOpacity`。
+ *  这里监听路由而不是页面内组件，保证直接跳转/返回都能换成正确的档位。 */
+watch(
+  () => route.name,
+  (name) => {
+    void readerStore.syncWindowOpacityForRoute(name === 'reader')
+  },
+)
 
 let closeUnlisten: (() => void) | undefined
 let legadoUnlisten: (() => void) | undefined

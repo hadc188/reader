@@ -113,6 +113,10 @@ reader-rust 是「阅读3.0」的 Rust 实现，主形态是 **Tauri v2 桌面�
   - **该修复已随 `tao 0.37.2` 发布**（2026-10-23，CHANGELOG 明确列出 #1353），`vendor/tao` 与 `[patch.crates-io]` 里的 `tao` 条目已删除，现在走官方版本。
   - **升级约束**：`tao` 由 `tauri-runtime-wry` 引入，版本必须与 `tauri` 配套升级。`tauri 2.11.x` 的 `tauri-runtime-wry` 要求 `tao = "0.35"`，换不到 0.37；`tauri 2.12.x`（`tauri-runtime-wry 2.12.3`）才放宽到 `tao = "0.37"`。想升 tao 就得一起升 tauri，别只改 `Cargo.toml` 里的 `tao`。
   - **收益**：前端不必用「进全屏前先 `unmaximize`、退出后再 `maximize`」的变通。那个变通也能绕开黑边，但两次 `ShowWindow`（`SW_RESTORE` / `SW_MAXIMIZE`）都由 tao 异步派发到事件循环线程，退出全屏时会先看到一次窗口化动画、再来一次最大化动画。
+- **本地书翻章不该有加载动画**：本地 TXT/EPUB/PDF 的正文就在磁盘上，"加载"是毫秒级的文件读取。三处配合，改任何一处都要一起看：
+  - `stores/reader.ts` 的 `fetchChapterContent` **不给本地书发阶段回调**（`reportStage && !isLocalBook`），也不登记 `loadStage` —— 否则阅读页顶部的「正在获取章节…」浮条会闪一下。
+  - `views/ReaderView.vue` 的 `showChapterLoading` 对本地 TXT/EPUB 走 200ms 延迟显示（判定在 `utils/readerChapterLoading.ts`）：目录跳章/跨章翻页时目标章不在预载缓存里，`store.loading` 会同步置 true，若立刻画全屏圈，正文会被整段卸载再被新正文顶掉 —— 用户看到的就是"闪一下圈圈"。**只延迟可见动画，不改 `store.loading`**：分页落位（`readerLandingPageIndexAfterPrevChapter` 的 `!loading`）、进度保存都拿它判断"正文是否还在路上"。首次打开书（屏上还没正文）与本地 PDF（正文只是占位符，画面靠 pdf.js 画 canvas）不延迟。
+  - 后端 `LocalTxtBookService` / `LocalEpubBookService` 按 `book_url` 缓存已解析的目录（`chapters.json` / `manifest.json`）。每次翻章都重新读文件 + 反序列化一本上千章的索引，本身就是几十毫秒的卡顿；**import / rebuild / 删书都要显式 `invalidate_index`**，否则会按旧章节路径/字节区间去读。TXT 正文改成按 `start..end` 字节区间 seek + read，不再整本 `read_to_string` 后切片。
 - **本地 PDF 管线**（`src/service/local_pdf_book.rs` + `frontend/src/utils/pdfPages.ts`）：阅读形态与 Legado 的 `PdfFile` 一致——**按页渲染**，不做全文重排。导入只解析页数、书签、封面与 `/Info` 元数据，原文件落盘为书目录下的 `book.pdf`；章节正文是每页一个 `<div class="pdf-page" data-pdf-page="N">` 占位，前端经 `reader://` 的 `/pdf?bookUrl=` 取整本 PDF，用 pdf.js 逐页画到 canvas（扫描件、复杂版式都能原样显示）。目录优先用 PDF 书签（`/Root/Outlines`，深度优先扁平化），无书签时从正文认「第X回/章」标题（`detect_headings`），都没有才按 20 页/章分段；书签章超过 `PAGES_PER_CHAPTER` 页会再细分并加 `(1/n)` 序号，避免整本只标一个书签时出现上百页的巨型章节。`collect_page_ids` 仍是页序的唯一来源。本地 PDF 强制单章模式：不走左右翻页（会把整页图切块），也不进连续阅读（页渲染按单章创建与释放，换章要回收上一章的 canvas）。`EXTRACTOR_VERSION` 5，更早的文本缓存需重新导入同一文件升级。
 
 - **桌面 origin 迁移**：`http://127.0.0.1:*` → `http://tauri.localhost` 后 localStorage 偏好重置一次；书库数据（SQLite/文件）不受影响。

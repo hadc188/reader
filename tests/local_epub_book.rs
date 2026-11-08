@@ -558,7 +558,12 @@ async fn epub_rebuild_failure_is_not_retried_for_the_same_engine_version() {
     assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "4");
 
     // 版本升级后允许重试(哨兵里的旧版本号不再匹配)。
+    //
+    // 必须换一个 service 实例: 目录缓存(manifest 的解析结果)只活在进程内, 而
+    // "版本升级"在真实场景里就是换了新二进制、缓存自然清空。用同一个实例改写
+    // 哨兵文件会命中缓存, 测不到重试判定。
     std::fs::write(&marker, "1").unwrap();
+    let service = LocalEpubBookService::new(&storage_dir);
     let chapters = service
         .get_chapter_list("alice", &book.book_url)
         .await

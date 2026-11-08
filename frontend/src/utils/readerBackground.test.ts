@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_READER_BACKGROUND_OPACITY,
   DEFAULT_READER_PANEL_OPACITY,
+  DEFAULT_READER_WINDOW_OPACITY,
   MAX_BACKGROUND_DIMENSION,
   READER_BACKGROUND_OPACITY_STEP,
   READER_PANEL_OPACITY_MIN,
+  READER_WINDOW_OPACITY_MIN,
   backgroundOutputSize,
   backgroundUploadFileName,
   normalizeReaderBackgroundOpacity,
   normalizeReaderPanelOpacity,
+  normalizeReaderWindowOpacity,
   percentToReaderOpacity,
   readerOpacityToPercent,
 } from './readerBackground'
@@ -47,6 +50,28 @@ describe('reader background opacity', () => {
 
   it('steps the slider by 1% so fine adjustments are possible', () => {
     expect(READER_BACKGROUND_OPACITY_STEP).toBe(0.01)
+  })
+})
+
+describe('window opacity', () => {
+  it('defaults to fully opaque so upgrading users see no change', () => {
+    expect(DEFAULT_READER_WINDOW_OPACITY).toBe(1)
+    expect(normalizeReaderWindowOpacity(undefined)).toBe(1)
+    expect(normalizeReaderWindowOpacity('invalid')).toBe(1)
+  })
+
+  it('keeps a user-chosen translucency', () => {
+    expect(normalizeReaderWindowOpacity(0.8)).toBe(0.8)
+    expect(normalizeReaderWindowOpacity(1)).toBe(1)
+  })
+
+  it('clamps to the readable floor shared with the Rust command', () => {
+    // 与 src/api/commands/window.rs 的 WINDOW_OPACITY_MIN 必须一致，
+    // 否则滑块位置会与原生窗口的实际 alpha 脱节。
+    expect(READER_WINDOW_OPACITY_MIN).toBe(0.1)
+    expect(normalizeReaderWindowOpacity(0.1)).toBe(READER_WINDOW_OPACITY_MIN)
+    expect(normalizeReaderWindowOpacity(0)).toBe(READER_WINDOW_OPACITY_MIN)
+    expect(normalizeReaderWindowOpacity(2)).toBe(1)
   })
 })
 

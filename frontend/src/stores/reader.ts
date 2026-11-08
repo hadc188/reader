@@ -26,8 +26,10 @@ import { saveRecentReadBook } from '../utils/recentBooks'
 import {
   DEFAULT_READER_BACKGROUND_OPACITY,
   DEFAULT_READER_PANEL_OPACITY,
+  DEFAULT_READER_WINDOW_OPACITY,
   normalizeReaderBackgroundOpacity,
   normalizeReaderPanelOpacity,
+  normalizeReaderWindowOpacity,
 } from '../utils/readerBackground'
 import { normalizeReaderColor } from '../utils/readerColor'
 import {
@@ -166,6 +168,17 @@ export interface ReadConfig {
   /** 阅读页浮层（目录/书签/设置抽屉、右键菜单等）的底板不透明度, 1 为实色。
    *  阅读页铺了背景图时, 半透明底板能让用户边调设置边看到正文变化。 */
   panelOpacity: number
+  /** 应用窗口整体不透明度, 1 为实色。仅 Windows 桌面端生效: 通过分层窗口
+   *  让整个应用窗口透出桌面, 与背景图透明度/面板不透明度是三个独立维度。 */
+  windowOpacity: number
+  /** 阅读页专属的窗口不透明度。
+   *  只在 `applyWindowOpacityToReader` 关闭时生效 —— 那时窗口有两套值：
+   *  应用窗口用 `windowOpacity`，阅读页用这个；开启时阅读页直接跟随
+   *  `windowOpacity`，这份值保留但不参与渲染（关掉开关能立刻回到原样）。 */
+  readerWindowOpacity: number
+  /** 是否让阅读页沿用应用窗口的不透明度（与背景图的 `applyBackgroundToReader`
+   *  同一套语义）。开启时阅读页与应用窗口完全一致；关闭时两者各用各的值。 */
+  applyWindowOpacityToReader: boolean
 }
 
 const defaultConfig: ReadConfig = {
@@ -198,6 +211,9 @@ const defaultConfig: ReadConfig = {
   readerBackgroundImage: '',
   readerImageOpacity: DEFAULT_READER_BACKGROUND_OPACITY,
   panelOpacity: DEFAULT_READER_PANEL_OPACITY,
+  windowOpacity: DEFAULT_READER_WINDOW_OPACITY,
+  readerWindowOpacity: DEFAULT_READER_WINDOW_OPACITY,
+  applyWindowOpacityToReader: true,
 }
 
 /**
@@ -297,6 +313,11 @@ function loadConfig(): ReadConfig {
           || (typeof savedConfig.readerBackgroundImage === 'string' ? savedConfig.readerBackgroundImage : ''),
         readerImageOpacity: normalizeReaderBackgroundOpacity(savedConfig.readerImageOpacity),
         panelOpacity: normalizeReaderPanelOpacity(savedConfig.panelOpacity),
+        windowOpacity: normalizeReaderWindowOpacity(savedConfig.windowOpacity),
+        readerWindowOpacity: normalizeReaderWindowOpacity(savedConfig.readerWindowOpacity),
+        applyWindowOpacityToReader: typeof savedConfig.applyWindowOpacityToReader === 'boolean'
+          ? savedConfig.applyWindowOpacityToReader
+          : defaultConfig.applyWindowOpacityToReader,
         // 两套九宫格：缺哪套就回落那套的预设，脏格只影响那一格。老存档里还是
         // 单套 clickAreas + 单个 clickAreaMode，由 migrateLegacyClickAreas 原样
         // 铺到两套上，保证老用户升级后手感不变。
@@ -863,6 +884,59 @@ export const useReaderStore = defineStore('reader', () => {
   /* ─── Reading config ─── */
   const config = reactive<ReadConfig>(loadConfig())
 
+  /** 整窗不透明度是否可用。默认 false: 只有桌面壳明确回答支持时才渲染入口，
+   *  这样 Web 模式与 macOS/Linux 都不会出现“拖了没反应”的滑块。 */
+  const windowOpacitySupported = ref(false)
+
+  async function detectWindowOpacitySupport() {
+    if (!isTauriRuntime()) return
+    try {
+      windowOpacitySupported.value = await invokeRaw<boolean>('is_window_opacity_supported')
+    } catch {
+      windowOpacitySupported.value = false
+    }
+  }
+
+  /** 最近一次同步时是否在阅读页。切换「应用到阅读页」开关时要用它重算，
+   *  否则在阅读页里关掉开关不会立刻生效。 */
+  let lastSyncOnReader = false
+
+  /**
+   * 按当前页面把整窗不透明度同步到桌面壳。
+   *
+   * 只有桌面端能调 `set_window_opacity`：Web 阅读模式没有窗口可控制，
+   * 非 Windows 平台由 capability 查询提前排除。失败时静默忽略 ——
+   * 透明度是装饰性偏好，不该让阅读页因为平台不支持而报错。
+   *
+   * 语义与「桌面背景图 → 应用到阅读页」一致：
+   * - 勾选「应用到阅读页」：阅读页直接跟随应用窗口的 `windowOpacity`；
+   * - 不勾选：两套值各自独立，阅读页用 `readerWindowOpacity`。
+   *
+   * 非阅读页永远用 `windowOpacity`，所以书架/设置页不受阅读页那套值影响。
+   */
+  async function syncWindowOpacityForRoute(onReader: boolean) {
+    lastSyncOnReader = onReader
+    if (!isTauriRuntime() || !windowOpacitySupported.value) return
+    const opacity = onReader
+      ? (config.applyWindowOpacityToReader ? config.windowOpacity : config.readerWindowOpacity)
+      : config.windowOpacity
+    try {
+      await invokeRaw('set_window_opacity', { opacity })
+    } catch { /* 非 Windows 或窗口尚未就绪 */ }
+  }
+
+  watch(() => config.windowOpacity, () => {
+    void syncWindowOpacityForRoute(lastSyncOnReader)
+  })
+
+  watch(() => config.readerWindowOpacity, () => {
+    if (lastSyncOnReader) void syncWindowOpacityForRoute(true)
+  })
+
+  watch(() => config.applyWindowOpacityToReader, () => {
+    void syncWindowOpacityForRoute(lastSyncOnReader)
+  })
+
   function customFontFamily(id: string) {
     return `ReaderCustom_${id.replace(/[^a-zA-Z0-9_]/g, '')}`
   }
@@ -981,6 +1055,9 @@ export const useReaderStore = defineStore('reader', () => {
       readerBackgroundImage: config.readerBackgroundImage,
       readerImageOpacity: config.readerImageOpacity,
       panelOpacity: config.panelOpacity,
+      windowOpacity: config.windowOpacity,
+      readerWindowOpacity: config.readerWindowOpacity,
+      applyWindowOpacityToReader: config.applyWindowOpacityToReader,
       fontColor: config.fontColor,
       // 点击区域是「手感」偏好，和配色一样不属于排版参数：重置排版不该把用户
       // 认真配好的九宫格打回默认。
@@ -3884,11 +3961,16 @@ export const useReaderStore = defineStore('reader', () => {
     // 本次请求发起时的代次。换书/关闭预载会递增它, 迟到的响应据此放弃写缓存。
     const generation = chapterPreloadGeneration
 
+    // 本地书(TXT/EPUB/PDF)的正文就在磁盘上, 没有"抓取正文/解析段评"这一步;
+    // 它的耗时是毫秒级的文件读取, 任何阶段提示都只会闪一下 —— 用户看到的正是
+    // 本地书跳章时那个本该不存在的圈圈。阶段只对书源正文有意义。
+    const localBook = isLocalBook(book.value)
+
     // 立即给出可见反馈，不等后端的阶段事件到达（否则跳章后会有一段"无响应"观感，
     // 用户会以为点了没反应）。后端事件随后把阶段细化成 parsing / caching。
     // 用「所有者令牌」登记：并发加载时只有最后登记的那次能清掉提示。
     let ownsStage = false
-    if (reportStage) {
+    if (reportStage && !localBook) {
       loadStage.value = 'fetching'
       chapterStageOwner = ++chapterStageSeq
       ownsStage = true
@@ -3906,7 +3988,7 @@ export const useReaderStore = defineStore('reader', () => {
         chapterTitle: chapter.title,
         refresh: forceRefresh ? 1 : 0,
         // 只有仍持有提示的那次加载才能更新阶段（并发加载时避免互相覆盖）
-        onStage: reportStage
+        onStage: reportStage && !localBook
           ? (stage) => {
               if (chapterStageOwner === stageOwner) loadStage.value = stage
             }
@@ -3966,6 +4048,9 @@ export const useReaderStore = defineStore('reader', () => {
     // 复用在途预载时同样不亮动画(否则就是那次闪烁), 但书源很慢的话用户会以为
     // 翻页没反应。改成延迟兜底: 200ms 内返回就完全不显示动画, 超过才亮出来。
     // 这个定时器只在"等一份已经在路上的正文"时存在, 与 loading 互斥。
+    // 本地书的加载动画由阅读页按 `isLocalBook` 再延迟显示(见 ReaderView 的
+    // showChapterLoading): 它读盘是毫秒级的, 而 `loading` 这个标志还要给分页落位
+    // 等逻辑判断"正文是否还在路上", 不能因为本地书就提前置 false。
     let pendingIndicatorTimer: number | null = null
     if (cachedContent === undefined && pendingPreload !== undefined) {
       pendingIndicatorTimer = window.setTimeout(() => {
@@ -4545,7 +4630,8 @@ export const useReaderStore = defineStore('reader', () => {
       clearLegadoPositionRestore,
       consumeLegadoPositionRestoreCompleted,
       persistProgress, flushProgressToServer, flushProgressToServerKeepalive,
-      config, updateConfig, resetConfig, saveConfig, setBackgroundImage, clearBackgroundImage,
+      config, updateConfig, resetConfig, saveConfig, syncWindowOpacityForRoute,
+      windowOpacitySupported, detectWindowOpacitySupport, setBackgroundImage, clearBackgroundImage,
       setReaderBackgroundImage, clearReaderBackgroundImage,
       customFonts, fetchCustomFonts, importCustomFont, removeCustomFont, customFontFamily,
     themeIndex, isNight, currentTheme, chromeTheme, readerTheme, readerBackgroundColor, setThemeIndex, toggleNight,

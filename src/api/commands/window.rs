@@ -10,6 +10,106 @@ use crate::app::window_state::{
     WindowStateStore,
 };
 
+/// 窗口整体不透明度的下限。低于该值时文字与控件会淡到几乎不可读，
+/// 且 Windows 分层窗口在极低 alpha 下更容易出现整窗“消失”的观感。
+pub const WINDOW_OPACITY_MIN: f64 = 0.1;
+
+/// 主窗口当前生效的整窗不透明度。
+///
+/// 必须由 Rust 侧记住：tao 的 `set_always_on_top`（迷你模式切换）会通过
+/// `WindowState::set_window_flags` 整体重算 `GWL_EXSTYLE`，把手工加的
+/// `WS_EX_LAYERED` 冲掉。切换迷你模式后必须按这个值重放一次透明度。
+static WINDOW_OPACITY: Mutex<f64> = Mutex::new(1.0);
+
+/// 把任意输入钳制到可用的窗口不透明度区间。
+///
+/// 非有限值（NaN/Infinity）一律回落到 1.0：这类值通常来自前端脏存档，
+/// 直接交给 Win32 会得到未定义行为。
+pub fn normalize_window_opacity(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 1.0;
+    }
+    value.clamp(WINDOW_OPACITY_MIN, 1.0)
+}
+
+/// 把不透明度真正写到窗口上（不记录状态）。
+///
+/// 采用 `WS_EX_LAYERED` + `SetLayeredWindowAttributes(LWA_ALPHA)`：
+/// 这是 Win32 上对“整窗 alpha”支持最广、不依赖 DWM 合成开关的做法。
+///
+/// 注意**不要**在 100% 时移除 `WS_EX_LAYERED`：tao/WebView2 自己就会给顶层
+/// 窗口带上这个标志（实测 ex-style 已含 0x80000），贸然摘掉会破坏它们维护的
+/// 窗口状态。100% 时把 alpha 设回 255 即可，效果与不透明一致。
+#[cfg(target_os = "windows")]
+fn apply_window_opacity(window: &tauri::WebviewWindow, opacity: f64) -> Result<(), String> {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, SetLayeredWindowAttributes, SetWindowLongW, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED,
+    };
+
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    // SAFETY: hwnd 来自 Tauri 的存活窗口；GetWindowLongW/SetWindowLongW 只
+    // 读写该窗口的扩展样式，SetLayeredWindowAttributes 的目标也是同一个
+    // 窗口。三者都是 Win32 文档允许的调用方式。
+    unsafe {
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        if ex_style & (WS_EX_LAYERED.0 as i32) == 0 {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | (WS_EX_LAYERED.0 as i32));
+        }
+        let alpha = (opacity * 255.0).round() as u8;
+        if SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA).is_err() {
+            return Err("设置窗口透明度失败".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_window_opacity(_window: &tauri::WebviewWindow, _opacity: f64) -> Result<(), String> {
+    Err("当前平台不支持窗口透明度".to_string())
+}
+
+/// 记录并应用整窗不透明度。
+fn remember_and_apply(window: &tauri::WebviewWindow, opacity: f64) -> Result<(), String> {
+    let opacity = normalize_window_opacity(opacity);
+    apply_window_opacity(window, opacity)?;
+    if let Ok(mut current) = WINDOW_OPACITY.lock() {
+        *current = opacity;
+    }
+    Ok(())
+}
+
+/// 设置主窗口的整体不透明度（仅 Windows 生效）。
+///
+/// 非 Windows 平台返回错误而不是静默成功：前端据此隐藏入口，
+/// 调用方也能区分“不支持”和“设置成功”。
+#[tauri::command]
+pub fn set_window_opacity(app: tauri::AppHandle, opacity: f64) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    remember_and_apply(&window, opacity)
+}
+
+/// 重新施加当前记录的透明度。
+///
+/// 供窗口扩展样式被第三方（tao 的置顶切换等）整体重算后调用。
+pub fn reapply_window_opacity(window: &tauri::WebviewWindow) {
+    let opacity = WINDOW_OPACITY
+        .lock()
+        .map(|value| *value)
+        .unwrap_or(1.0);
+    let _ = apply_window_opacity(window, opacity);
+}
+
+/// 当前平台是否支持整窗不透明度。前端据此决定是否展示设置项，
+/// 避免 macOS/Linux 上出现一个拖了没反应的滑块。
+#[tauri::command]
+pub fn is_window_opacity_supported() -> bool {
+    cfg!(target_os = "windows")
+}
+
 /// 本轮关闭请求是否已被前端接管。
 ///
 /// 外壳在拦截关闭请求后启动看门狗: 宽限期内前端若已 hide(关闭到托盘)或
@@ -145,6 +245,12 @@ pub fn toggle_mini_mode(app: tauri::AppHandle) -> Result<WindowMode, String> {
     }
     write_state(&app, state)?;
 
+    // 4) 重新施加整窗透明度。
+    //    上面的 set_always_on_top 会让 tao 通过 `WindowState::set_window_flags`
+    //    整体重算 GWL_EXSTYLE，把手工加的 `WS_EX_LAYERED` 冲掉，
+    //    表现就是"一切换迷你模式，窗口就不透明了"。这里按记住的值重放。
+    reapply_window_opacity(&window);
+
     Ok(WindowMode {
         mini_mode: state.mini_mode,
         always_on_top: state.mini_mode,
@@ -191,4 +297,38 @@ pub fn configure_boss_key(
             }
         })
         .map_err(|error| format!("快捷键注册失败：{error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_window_opacity, WINDOW_OPACITY_MIN};
+
+    /// 默认必须是 1：老用户升级后窗口不能突然变半透明。
+    #[test]
+    fn window_opacity_defaults_to_opaque() {
+        assert_eq!(normalize_window_opacity(1.0), 1.0);
+        assert_eq!(normalize_window_opacity(0.72), 0.72);
+    }
+
+    /// 低于下限会淡到无法阅读，统一钳到下限。
+    #[test]
+    fn window_opacity_clamps_to_readable_floor() {
+        assert_eq!(normalize_window_opacity(0.0), WINDOW_OPACITY_MIN);
+        assert_eq!(normalize_window_opacity(0.09), WINDOW_OPACITY_MIN);
+        assert_eq!(normalize_window_opacity(-1.0), WINDOW_OPACITY_MIN);
+    }
+
+    /// 超过 1 没有意义，Win32 的 alpha 也只有 0-255。
+    #[test]
+    fn window_opacity_clamps_above_one() {
+        assert_eq!(normalize_window_opacity(1.5), 1.0);
+    }
+
+    /// NaN/Infinity 来自前端脏存档，必须回落到不透明而不是传播给 Win32。
+    #[test]
+    fn window_opacity_rejects_non_finite_values() {
+        assert_eq!(normalize_window_opacity(f64::NAN), 1.0);
+        assert_eq!(normalize_window_opacity(f64::INFINITY), 1.0);
+        assert_eq!(normalize_window_opacity(f64::NEG_INFINITY), 1.0);
+    }
 }

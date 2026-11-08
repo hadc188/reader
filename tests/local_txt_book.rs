@@ -164,6 +164,92 @@ async fn txt_delete_removes_imported_book_files() {
 }
 
 #[tokio::test]
+async fn txt_reimport_reuses_url_and_still_reads_the_new_file() {
+    // 同一份文件名 + 同样内容会得到同一个 book_url（哈希只取名字与内容）。
+    // 目录缓存必须跟着失效, 否则会拿旧分章的字节区间去切新文件。
+    let storage_dir = std::env::temp_dir().join(format!(
+        "reader-rust-local-txt-reimport-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&storage_dir);
+    let service = reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
+    let text = "第一章 开始\n第一版正文。\n第二章 后来\n第二版正文。\n";
+
+    let first = service
+        .import_txt_book("alice", "同一本.txt", text.as_bytes())
+        .await
+        .unwrap();
+    let before = service
+        .get_chapter_list("alice", &first.book_url)
+        .await
+        .unwrap();
+    // 先读一次把目录灌进缓存
+    assert_eq!(
+        service
+            .get_content("alice", &before[1].url)
+            .await
+            .unwrap()
+            .trim(),
+        "第二版正文。"
+    );
+
+    let second = service
+        .import_txt_book("alice", "同一本.txt", text.as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(first.book_url, second.book_url);
+
+    let chapters = service
+        .get_chapter_list("alice", &second.book_url)
+        .await
+        .unwrap();
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(
+        service
+            .get_content("alice", &chapters[1].url)
+            .await
+            .unwrap()
+            .trim(),
+        "第二版正文。"
+    );
+
+    let _ = std::fs::remove_dir_all(storage_dir);
+}
+
+/// 正文按字节区间读取(不整本读盘): 章节序号跨越整本书时也要取到正确的一段。
+#[tokio::test]
+async fn txt_content_reads_only_the_chapter_byte_range() {
+    let storage_dir = std::env::temp_dir().join(format!(
+        "reader-rust-local-txt-range-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&storage_dir);
+    let service = reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
+
+    let mut text = String::new();
+    for index in 1..=200 {
+        text.push_str(&format!("第{index}章 标题\n第{index}章正文。\n"));
+    }
+    let book = service
+        .import_txt_book("alice", "多章.txt", text.as_bytes())
+        .await
+        .unwrap();
+    let chapters = service
+        .get_chapter_list("alice", &book.book_url)
+        .await
+        .unwrap();
+    assert_eq!(chapters.len(), 200);
+
+    let last = service
+        .get_content("alice", &chapters[199].url)
+        .await
+        .unwrap();
+    assert_eq!(last.trim(), "第200章正文。");
+
+    let _ = std::fs::remove_dir_all(storage_dir);
+}
+
+#[tokio::test]
 async fn saving_same_named_local_txt_books_keeps_distinct_book_urls() {
     use reader_rust::crawler::http_client::HttpClient;
     use reader_rust::parser::rule_engine::RuleEngine;

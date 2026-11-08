@@ -80,6 +80,10 @@ axum = { version = "0.7", features = ["json", "multipart"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 # Only used by tests/*.rs to spin up local mock upstream sites.

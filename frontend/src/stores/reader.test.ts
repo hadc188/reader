@@ -704,6 +704,8 @@ describe('reader local txt chapters', () => {
     expect(saved.clickAreaModes).toEqual({ paged: 'custom', scroll: 'auto' })
     expect(saved.clickAreaProfiles.paged.tl).toBe('bookmark')
     expect(saved.clickAreaProfiles.scroll.br).toBe('tts')
+    expect(saved.clickAreas).toBeUndefined()
+    expect(saved.clickAreaMode).toBeUndefined()
 
     // 重置排版参数不该把用户配好的点击区域打回默认。
     readerStore.updateConfig('fontSize', 30)
@@ -739,6 +741,40 @@ describe('reader local txt chapters', () => {
     // 两套是各自独立的对象，改一套不会串到另一套。
     expect(migrated.config.clickAreaProfiles.paged)
       .not.toBe(migrated.config.clickAreaProfiles.scroll)
+  })
+
+  it('prefers two-profile grids when legacy grid fields still exist', () => {
+    // 真实升级存档会同时带旧 clickAreas/clickAreaMode 和新 clickAreaProfiles。
+    // 旧字段是上下滚动网格；新字段里左右翻页已保存为默认分区。重开时必须用新字段。
+    localStorage.setItem('readConfig', JSON.stringify({
+      readMethod: '左右翻页',
+      clickAreaMode: 'custom',
+      clickAreas: {
+        tl: 'prevPage', tc: 'prevPage', tr: 'prevPage',
+        ml: 'menu', mc: 'menu', mr: 'menu',
+        bl: 'nextPage', bc: 'nextPage', br: 'nextPage',
+      },
+      clickAreaModes: { paged: 'auto', scroll: 'auto' },
+      clickAreaProfiles: {
+        paged: {
+          tl: 'prevPage', tc: 'menu', tr: 'nextPage',
+          ml: 'prevPage', mc: 'menu', mr: 'nextPage',
+          bl: 'prevPage', bc: 'menu', br: 'nextPage',
+        },
+        scroll: {
+          tl: 'prevPage', tc: 'prevPage', tr: 'prevPage',
+          ml: 'menu', mc: 'menu', mr: 'menu',
+          bl: 'nextPage', bc: 'nextPage', br: 'nextPage',
+        },
+      },
+    }))
+    setActivePinia(createPinia())
+    const readerStore = useReaderStore()
+
+    expect(readerStore.config.readMethod).toBe('左右翻页')
+    expect(readerStore.config.clickAreaModes).toEqual({ paged: 'auto', scroll: 'auto' })
+    expect(readerStore.config.clickAreaProfiles.paged.tl).toBe('prevPage')
+    expect(readerStore.config.clickAreaProfiles.paged.tc).toBe('menu')
   })
 
   it('falls back to the presets when the stored grids are dirty', () => {

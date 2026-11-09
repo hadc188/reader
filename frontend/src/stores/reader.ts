@@ -225,16 +225,14 @@ const defaultConfig: ReadConfig = {
  *   老用户升级后手感完全不变。
  */
 function resolveClickAreaConfig(
-  savedConfig: Partial<ReadConfig> & { clickAreas?: unknown; clickAreaMode?: unknown },
   parsed: { clickAreas?: unknown; clickAreaMode?: unknown },
 ): { clickAreaModes: ClickAreaModes; clickAreaProfiles: ClickAreaProfiles } {
-  // 注意 `...savedConfig` 已经把老字段带进来了，这里读的是**原始存档**，
-  // 而不是被 Partial<ReadConfig> 抹掉类型后的值。
+  const savedConfig = parsed as Partial<ReadConfig>
   const legacyAreas = parsed.clickAreas
-  const hasNewFormat = legacyAreas !== null
-    && typeof legacyAreas === 'object'
-    && !Array.isArray(legacyAreas)
-    && ('paged' in (legacyAreas as Record<string, unknown>) || 'scroll' in (legacyAreas as Record<string, unknown>))
+  // 新字段存在时必须优先。旧版存档可能同时带着 clickAreas 和 clickAreaMode，
+  // 如果先看旧字段，升级后保存的左右翻页配置会在每次重开时被旧网格覆盖。
+  const hasNewFormat = savedConfig.clickAreaProfiles !== undefined
+    || savedConfig.clickAreaModes !== undefined
   if (!hasNewFormat && legacyAreas !== undefined) {
     const migrated = migrateLegacyClickAreas(legacyAreas, parsed.clickAreaMode, defaultConfig.clickAreaProfiles)
     return { clickAreaModes: migrated.modes, clickAreaProfiles: migrated.areas }
@@ -263,6 +261,8 @@ function loadConfig(): ReadConfig {
         autoPageMode: _legacyAutoPageMode,
         scrollPixel: legacyScrollPixel,
         pageSpeed: legacyPageSpeed,
+        clickAreas: _legacyClickAreas,
+        clickAreaMode: _legacyClickAreaMode,
         ...savedConfig
       } = parsed
       // 旧版像素滚动速度 = scrollPixel × pageSpeed/1000 × 0.5 像素/帧(60fps),
@@ -321,7 +321,7 @@ function loadConfig(): ReadConfig {
         // 两套九宫格：缺哪套就回落那套的预设，脏格只影响那一格。老存档里还是
         // 单套 clickAreas + 单个 clickAreaMode，由 migrateLegacyClickAreas 原样
         // 铺到两套上，保证老用户升级后手感不变。
-        ...resolveClickAreaConfig(savedConfig, parsed),
+        ...resolveClickAreaConfig(parsed),
       }
     }
   } catch { /* ignore */ }
@@ -1031,6 +1031,11 @@ export const useReaderStore = defineStore('reader', () => {
     // 两张背景图都是落盘的图片地址, 各自存在独立的 localStorage key 里, 不进 readConfig。
     delete persistedConfig.backgroundImage
     delete persistedConfig.readerBackgroundImage
+    // 迁移后的存档不再保留旧版单套九宫格字段，避免它们继续参与加载判断。
+    delete (persistedConfig as Partial<ReadConfig> & { clickAreas?: unknown; clickAreaMode?: unknown })
+      .clickAreas
+    delete (persistedConfig as Partial<ReadConfig> & { clickAreas?: unknown; clickAreaMode?: unknown })
+      .clickAreaMode
     localStorage.setItem('readConfig', JSON.stringify(persistedConfig))
   }
 

@@ -18,6 +18,7 @@ pub mod update;
 pub mod user;
 pub mod webdav;
 pub mod window;
+pub mod xmnote;
 
 use crate::error::error::{ApiResponse, AppError};
 use std::borrow::Cow;

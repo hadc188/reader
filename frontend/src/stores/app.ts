@@ -312,6 +312,7 @@ export const useAppStore = defineStore('app', () => {
   const showSourceManager = ref(false)
   const showUserManager = ref(false)
   const showWebdavManager = ref(false)
+  const showBookmarkManager = ref(false)
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true)
 
   const initialReadingStats = (() => {
@@ -626,6 +627,7 @@ export const useAppStore = defineStore('app', () => {
     autoCheckUpdate, setAutoCheckUpdate, runStartupVersionCheck,
     checkVersionUpdate, dismissVersionUpdateReminder, applyDesktopUpdate, cancelDesktopUpdate,
     showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager,
+    showBookmarkManager,
     updateDialogVisible, closeUpdateProgressDialog,
     isOnline, setOnlineStatus,
     readingStats, readingStatsSummary, startReadingSession, stopReadingSession, setReadingSessionBook, markBookOpened, markChapterRead,

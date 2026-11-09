@@ -120,6 +120,8 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::bookmark::save_bookmarks,
         commands::bookmark::delete_bookmark,
         commands::bookmark::delete_bookmarks,
+        commands::bookmark::save_bookmark_export_as,
+        commands::xmnote::send_xmnote_books,
         commands::debug::debug_source_step,
         commands::source_click::eval_source_click,
         commands::network::configure_network_proxy,

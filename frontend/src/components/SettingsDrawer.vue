@@ -47,6 +47,23 @@
             </div>
           </section>
 
+          <section v-show="activeSettingsTab === 'common'" class="drawer-section">
+            <h3 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <path d="M6 3h12a2 2 0 0 1 2 2v16l-8-5-8 5V5a2 2 0 0 1 2-2Z" />
+              </svg>
+              阅读数据
+            </h3>
+            <div class="btn-group">
+              <button class="action-btn" @click="openBookmarkManager">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M6 3h12a2 2 0 0 1 2 2v16l-8-5-8 5V5a2 2 0 0 1 2-2Z" />
+                </svg>
+                书签管理
+              </button>
+            </div>
+          </section>
+
           <section v-if="isDesktopApp" v-show="activeSettingsTab === 'app'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
@@ -634,6 +651,11 @@ function openWebdavManager() {
   appStore.showWebdavManager = true
 }
 
+function openBookmarkManager() {
+  close()
+  appStore.showBookmarkManager = true
+}
+
 async function toggleBossKey() {
   try {
     await appStore.setBossKeyEnabled(!appStore.bossKeyEnabled)
@@ -966,6 +988,14 @@ async function handleCheckVersionUpdate() {
   color: var(--color-text-secondary);
   letter-spacing: 0;
   margin-bottom: var(--space-3);
+}
+
+.section-hint {
+  display: block;
+  margin-top: var(--space-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
 }
 
 .user-info-card {

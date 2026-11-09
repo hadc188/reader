@@ -9,7 +9,7 @@
       fontFamily: currentFontFamily,
       '--color-primary': '#c97f3a',
       '--reader-selection-bg': theme.fontColor,
-      '--reader-selection-color': theme.content,
+      '--reader-selection-color': selectionTextColor,
     }"
     @click="handleBackgroundClick"
     @pointermove="handleReaderPointerMove"
@@ -157,6 +157,9 @@
       @scroll="handleScroll"
       @load.capture="handleReaderImageLoad"
       @mousedown="handleManualReadingInput"
+      @mousedown.capture="handleMouseDownSelection"
+      @mousemove="handleMouseMoveSelection"
+      @mouseup="handleMouseUpSelection"
       @wheel="handleManualReadingInput"
       @touchstart="handleTouchStart"
       @touchmove="handleTouchMove"
@@ -209,7 +212,15 @@
         <!-- 章节加载阶段：段评解析可能耗时数秒。做成浮层，三种阅读模式都能看到。 -->
         <div v-if="isHorizontalPageMode" class="horizontal-page-layout">
           <section class="horizontal-content-page">
-            <div ref="chapterTextRef" class="horizontal-pages">
+            <div
+              ref="chapterTextRef"
+              class="horizontal-pages"
+              :class="{
+                'page-selection-unlocked': mouseSelectionUnlocked,
+                'page-turn-in-progress': horizontalPageTurnInProgress,
+                'page-selection-hidden': !mouseSelectionUnlocked,
+              }"
+            >
               <section
                 v-for="(page, idx) in horizontalPages"
                 :key="`h-page-${idx}`"
@@ -218,6 +229,8 @@
                   transform: horizontalPageTransform(idx),
                   transitionDuration: horizontalPageTransitionDuration,
                   willChange: horizontalPageWillChange(idx),
+                  userSelect: 'text',
+                  WebkitUserSelect: 'text',
                 }"
               >
                 <div
@@ -568,6 +581,19 @@ const loadStageText = computed(() => {
   }
 })
 const theme = computed(() => store.readerTheme)
+/** 选区背景固定为正文色，文字按背景亮度取黑/白，避免浅色主题下文字发灰看不清。 */
+const selectionTextColor = computed(() => {
+  const hex = theme.value.fontColor.replace('#', '')
+  if (hex.length !== 3 && hex.length !== 6) return '#fff'
+  const value = hex.length === 3
+    ? hex.split('').map(ch => parseInt(ch + ch, 16)).join('')
+    : hex
+  const r = Number.parseInt(value.slice(0, 2), 16)
+  const g = Number.parseInt(value.slice(2, 4), 16)
+  const b = Number.parseInt(value.slice(4, 6), 16)
+  const luminance = (r * 299 + g * 587 + b * 114) / 1000
+  return luminance > 150 ? '#1f1f1f' : '#fff'
+})
 const chromeTheme = computed(() => store.chromeTheme)
 /** 阅读页背景来源: 专属图 > 自定义色 > 桌面图 > 主题。 */
 const readerBackgroundSource = computed(() => resolveReaderBackground({
@@ -1102,10 +1128,17 @@ const {
 } = useReaderSearch(store, locateSearchMatch)
 const {
   selectionMenu,
+  mouseSelectionUnlocked,
+  suppressNextReaderClick,
   suppressSelectionCloseUntil,
   hideSelectionMenu,
   scheduleSelectionMenuUpdate,
+  handleMouseDownSelection,
+  handleMouseMoveSelection,
   handleMouseUpSelection,
+  clearSelectionBeforePageTurn,
+  clearSelectionAfterPageTurn,
+  isDraggingSelection,
   handleTouchEndSelection,
   handleSelectionChange,
   addSelectionBookmark,
@@ -1182,6 +1215,11 @@ function checkMedia() {
 
 function scheduleHorizontalRebuild() {
   if (horizontalRebuildTimer) clearTimeout(horizontalRebuildTimer)
+  if (horizontalPageTurnTimer !== null) {
+    clearTimeout(horizontalPageTurnTimer)
+    horizontalPageTurnTimer = null
+  }
+  horizontalPageTurnInProgress.value = false
   horizontalRebuildTimer = window.setTimeout(() => {
     horizontalRebuildTimer = null
     if (!isHorizontalPageMode.value) return
@@ -1601,6 +1639,9 @@ const HORIZONTAL_JUMP_FADE_MS = 150
 
 /** 置位期间 transform 不吃过渡, 大跨度跳变靠它瞬时定位(见 beginHorizontalJump)。 */
 const horizontalJumpInProgress = ref(false)
+/** 翻页位移期间暂时关闭正文选择，防止旧页合成层继续绘制原生选区高亮。 */
+const horizontalPageTurnInProgress = ref(false)
+let horizontalPageTurnTimer: number | null = null
 /** 连续跳变(如快速连翻两章)的令牌: 只有最后一次置位有权解除瞬时状态。 */
 let horizontalJumpToken = 0
 /** 进行中的淡入。连续跳变时先取消上一个: 两个 opacity 动画叠在同一元素上, 后者接管时
@@ -1663,6 +1704,7 @@ function beginHorizontalJump(fade: boolean) {
  *  淡入也只在那边给。 */
 watch(horizontalPageIndex, (next, previous) => {
   if (!isHorizontalPageMode.value) return
+  clearSelectionBeforePageTurn()
   if (Math.abs(next - previous) <= 1) return
   beginHorizontalJump(false)
   // flush 必须是 sync: 置位要早于任何一次渲染读取 horizontalPageTransitionDuration,
@@ -1677,6 +1719,20 @@ const horizontalPageTransitionDuration = computed(() => {
   if (duration <= 0) return '0ms'
   return `${duration}ms`
 })
+
+function beginHorizontalPageTurnGuard() {
+  if (!isHorizontalPageMode.value) return
+  if (isDraggingSelection()) return
+  if (horizontalPageTurnTimer !== null) {
+    window.clearTimeout(horizontalPageTurnTimer)
+  }
+  horizontalPageTurnInProgress.value = true
+  const duration = Number(config.value.animateDuration) || 0
+  horizontalPageTurnTimer = window.setTimeout(() => {
+    horizontalPageTurnTimer = null
+    horizontalPageTurnInProgress.value = false
+  }, duration + 80)
+}
 
 /** 把某个搜索命中的高亮定位到视野内 —— 左右分页下就是"换到它所在的那一页"。
  *
@@ -1774,6 +1830,11 @@ function syncHorizontalPageState() {
 function pageForward() {
   const container = scrollContainerRef.value
   if (!container) return
+  beginHorizontalPageTurnGuard()
+  const clearAfterPageTurn = () => {
+    clearSelectionAfterPageTurn((Number(config.value.animateDuration) || 0) + 80)
+  }
+  clearSelectionBeforePageTurn()
   if (isHorizontalPageMode.value) {
     // 一屏恰好一页, 所以步进量是 1 页。
     const lastPage = horizontalLastPageStart.value
@@ -1784,6 +1845,7 @@ function pageForward() {
     horizontalPageIndex.value = Math.min(lastPage, horizontalPageIndex.value + 1)
     container.scrollTo({ left: 0, behavior: 'auto' })
     syncHorizontalPageState()
+    clearAfterPageTurn()
     return
   }
   const step = getPageStep(container)
@@ -1797,6 +1859,11 @@ function pageForward() {
 function pageBackward() {
   const container = scrollContainerRef.value
   if (!container) return
+  beginHorizontalPageTurnGuard()
+  const clearAfterPageTurn = () => {
+    clearSelectionAfterPageTurn((Number(config.value.animateDuration) || 0) + 80)
+  }
+  clearSelectionBeforePageTurn()
   if (isHorizontalPageMode.value) {
     if (horizontalPageIndex.value <= 0) {
       // 跨到上一章时要把落点定在**上一章末页**。不标记的话 prevChapter 会走
@@ -1809,6 +1876,7 @@ function pageBackward() {
     horizontalPageIndex.value = Math.max(0, horizontalPageIndex.value - 1)
     container.scrollTo({ left: 0, behavior: 'auto' })
     syncHorizontalPageState()
+    clearAfterPageTurn()
     return
   }
   const step = getPageStep(container)
@@ -3023,6 +3091,10 @@ async function refreshFromContextMenu() {
 function handleGlobalClick(e: MouseEvent) {
   if (store.activePanel) return
   closeReaderContextMenu()
+  if (suppressNextReaderClick.value) {
+    suppressNextReaderClick.value = false
+    return
+  }
   if (Date.now() < suppressNextTapUntil) return
   if (Date.now() < suppressSelectionCloseUntil.value) return
   if (selectionMenu.value.visible) {
@@ -3969,7 +4041,6 @@ onMounted(async () => {
   window.addEventListener('click', closeReaderContextMenu)
   // 书源图片气泡的 click 脚本(捕获阶段, 抢在翻页逻辑之前)
   document.addEventListener('click', handleSourceImageClick, true)
-  document.addEventListener('mouseup', handleMouseUpSelection)
   document.addEventListener('touchend', handleTouchEndSelection)
     document.addEventListener('selectionchange', handleSelectionChange)
     checkMedia()
@@ -4035,7 +4106,6 @@ onUnmounted(() => {
   window.removeEventListener('mouseup', handleReaderMouseUpForHotkey, true)
   window.removeEventListener('click', closeReaderContextMenu)
   document.removeEventListener('click', handleSourceImageClick, true)
-  document.removeEventListener('mouseup', handleMouseUpSelection)
   document.removeEventListener('touchend', handleTouchEndSelection)
     document.removeEventListener('selectionchange', handleSelectionChange)
     window.removeEventListener('resize', checkMedia)
@@ -4050,6 +4120,10 @@ onUnmounted(() => {
   if (legadoPositionRestoreTimer) clearTimeout(legadoPositionRestoreTimer)
   if (refreshOfflineCacheStateTimer) clearTimeout(refreshOfflineCacheStateTimer)
   if (horizontalRebuildTimer) clearTimeout(horizontalRebuildTimer)
+  if (horizontalPageTurnTimer !== null) {
+    clearTimeout(horizontalPageTurnTimer)
+    horizontalPageTurnTimer = null
+  }
   if (localChapterLoadingTimer !== null) {
     clearTimeout(localChapterLoadingTimer)
     localChapterLoadingTimer = null
@@ -4607,6 +4681,12 @@ watch(
   overflow: hidden;
 }
 
+.horizontal-pages.page-selection-hidden .horizontal-page,
+.horizontal-pages.page-selection-hidden .horizontal-page * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 /* 一页 = 一屏：宽度恒等于容器宽(--reader-page-step 由 JS 写为容器宽)。
    正文的**行宽**由里面的 .horizontal-page-content 单独控制, 并在页内居中,
    所以宽窗口下是「正文居中 + 两侧留白」, 而不是一屏并排显示两页。
@@ -4840,6 +4920,12 @@ watch(
 .reader-view :deep(*)::selection {
   color: var(--reader-selection-color);
   background: var(--reader-selection-bg);
+}
+
+.horizontal-pages.page-selection-hidden .horizontal-page::selection,
+.horizontal-pages.page-selection-hidden .horizontal-page :deep(*)::selection {
+  color: inherit !important;
+  background: transparent !important;
 }
 
 :deep(.chapter-text p.reader-indent) {

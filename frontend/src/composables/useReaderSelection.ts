@@ -14,6 +14,19 @@ interface SelectionReplaceOptions {
   isRegex?: boolean
 }
 
+interface MouseSelectionGate {
+  startX: number
+  startY: number
+  dragged: boolean
+  suppressClick: boolean
+}
+
+const MOUSE_SELECTION_DRAG_THRESHOLD_PX = 4
+const CLICK_SELECTION_SUPPRESSION_MS = 100
+const DRAG_SELECTION_GRACE_MS = 500
+const RAPID_CLICK_MS = 400
+const RAPID_CLICK_DISTANCE_PX = 6
+
 export function useReaderSelection(
   store: ReaderStore,
   appStore: AppStore,
@@ -31,10 +44,115 @@ export function useReaderSelection(
   })
   const activeSelectionText = ref('')
   const suppressSelectionCloseUntil = ref(0)
+  const mouseSelectionUnlocked = ref(false)
+  const suppressNextReaderClick = ref(false)
   let selectionMenuUpdateTimer: number | null = null
+  let mouseSelectionGate: MouseSelectionGate | null = null
+  let suppressClickSelectionUntil = 0
+  let suppressPageTurnClearUntil = 0
+  let selectionSettleTimer: number | null = null
+  let lastClickEndedAt = 0
+  let lastClickX = 0
+  let lastClickY = 0
 
   function hideSelectionMenu() {
     selectionMenu.value.visible = false
+  }
+
+  function clearClickSelection() {
+    const selection = window.getSelection?.()
+    if (selection?.rangeCount) selection.removeAllRanges()
+  }
+
+  function suppressSelectionFromClick() {
+    suppressClickSelectionUntil = Date.now() + CLICK_SELECTION_SUPPRESSION_MS
+    hideSelectionMenu()
+    clearClickSelection()
+    window.requestAnimationFrame?.(() => {
+      if (Date.now() < suppressClickSelectionUntil) clearClickSelection()
+    })
+  }
+
+  /** 翻页开始前清掉本次点击造成的误选，真实拖动产生的选区不受影响。 */
+  function clearSelectionBeforePageTurn() {
+    if (isDraggingSelection() || Date.now() < suppressPageTurnClearUntil) return
+    suppressClickSelectionUntil = Date.now() + CLICK_SELECTION_SUPPRESSION_MS
+    hideSelectionMenu()
+    clearClickSelection()
+  }
+
+  function isDraggingSelection() {
+    return Boolean(mouseSelectionGate?.dragged)
+  }
+
+  function clearSelectionAfterPageTurn(delayMs: number) {
+    if (selectionSettleTimer) window.clearTimeout(selectionSettleTimer)
+    const draggedAtPageTurn = Boolean(mouseSelectionGate?.dragged)
+    selectionSettleTimer = window.setTimeout(() => {
+      selectionSettleTimer = null
+      if (draggedAtPageTurn) return
+      hideSelectionMenu()
+      clearClickSelection()
+    }, Math.max(0, delayMs))
+  }
+
+  function handleMouseDownSelection(event: MouseEvent) {
+    if (event.button !== 0) return
+    const sourceCapabilities = (event as MouseEvent & {
+      sourceCapabilities?: { firesTouchEvents?: boolean }
+    }).sourceCapabilities
+    if (sourceCapabilities?.firesTouchEvents) return
+    mouseSelectionUnlocked.value = false
+    mouseSelectionGate = {
+      startX: event.clientX,
+      startY: event.clientY,
+      dragged: false,
+      suppressClick: Date.now() - lastClickEndedAt < RAPID_CLICK_MS
+        && Math.hypot(event.clientX - lastClickX, event.clientY - lastClickY) < RAPID_CLICK_DISTANCE_PX,
+    }
+  }
+
+  function handleMouseMoveSelection(event: MouseEvent) {
+    const gate = mouseSelectionGate
+    if (!gate || gate.dragged) return
+    if (Math.hypot(event.clientX - gate.startX, event.clientY - gate.startY) >= MOUSE_SELECTION_DRAG_THRESHOLD_PX) {
+      gate.dragged = true
+      mouseSelectionUnlocked.value = true
+      suppressClickSelectionUntil = 0
+      suppressPageTurnClearUntil = Date.now() + DRAG_SELECTION_GRACE_MS
+    }
+  }
+
+  function handleMouseUpSelection(event: MouseEvent) {
+    const gate = mouseSelectionGate
+    mouseSelectionGate = null
+    const dragged = gate && (
+      gate.dragged
+      || Math.hypot(event.clientX - gate.startX, event.clientY - gate.startY) >= MOUSE_SELECTION_DRAG_THRESHOLD_PX
+    )
+    if (gate?.suppressClick && !dragged) {
+      mouseSelectionUnlocked.value = false
+      lastClickEndedAt = Date.now()
+      lastClickX = event.clientX
+      lastClickY = event.clientY
+      suppressSelectionFromClick()
+      return
+    }
+    if (gate && !dragged && !event.defaultPrevented) {
+      mouseSelectionUnlocked.value = false
+      lastClickEndedAt = Date.now()
+      lastClickX = event.clientX
+      lastClickY = event.clientY
+      suppressSelectionFromClick()
+      return
+    }
+    if (dragged) {
+      suppressNextReaderClick.value = true
+      suppressPageTurnClearUntil = Date.now() + DRAG_SELECTION_GRACE_MS
+    } else {
+      mouseSelectionUnlocked.value = false
+    }
+    scheduleSelectionMenuUpdate(120)
   }
 
   function scheduleSelectionMenuUpdate(delay = 220) {
@@ -46,10 +164,6 @@ export function useReaderSelection(
     }, delay)
   }
 
-  function handleMouseUpSelection() {
-    scheduleSelectionMenuUpdate(120)
-  }
-
   function handleTouchEndSelection() {
     scheduleSelectionMenuUpdate(260)
   }
@@ -59,6 +173,11 @@ export function useReaderSelection(
   }
 
   function updateSelectionMenu() {
+    if (Date.now() < suppressClickSelectionUntil) {
+      clearClickSelection()
+      hideSelectionMenu()
+      return
+    }
     if (config.value.selectAction !== 'popup') {
       hideSelectionMenu()
       return
@@ -193,7 +312,8 @@ export function useReaderSelection(
   function clearSelectionState() {
     activeSelectionText.value = ''
     hideSelectionMenu()
-    window.getSelection?.()?.removeAllRanges()
+    const selection = window.getSelection?.()
+    if (selection?.rangeCount) selection.removeAllRanges()
   }
 
   function disposeSelection() {
@@ -201,14 +321,25 @@ export function useReaderSelection(
       clearTimeout(selectionMenuUpdateTimer)
       selectionMenuUpdateTimer = null
     }
+    if (selectionSettleTimer) {
+      window.clearTimeout(selectionSettleTimer)
+      selectionSettleTimer = null
+    }
   }
 
   return {
     selectionMenu,
+    mouseSelectionUnlocked,
+    suppressNextReaderClick,
     suppressSelectionCloseUntil,
     hideSelectionMenu,
     scheduleSelectionMenuUpdate,
+    handleMouseDownSelection,
+    handleMouseMoveSelection,
     handleMouseUpSelection,
+    clearSelectionBeforePageTurn,
+    clearSelectionAfterPageTurn,
+    isDraggingSelection,
     handleTouchEndSelection,
     handleSelectionChange,
     updateSelectionMenu,

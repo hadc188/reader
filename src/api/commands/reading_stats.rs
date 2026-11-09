@@ -1,6 +1,8 @@
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
-use crate::service::reading_stats_service::{BookReadingStats, DailyReadingStats};
+use crate::service::reading_stats_service::{
+    BookReadingStats, DailyReadingStats, ReadingStatsOverview,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -15,9 +17,8 @@ pub struct AddReadingStatsRequest {
 }
 
 /// Accumulate reading time/characters for the current user on a date.
-#[tauri::command]
-pub async fn add_reading_stats(
-    state: tauri::State<'_, AppState>,
+pub async fn add_reading_stats_core(
+    state: &AppState,
     req: AddReadingStatsRequest,
 ) -> Result<ApiResponse<serde_json::Value>, AppError> {
     let user_ns = "default";
@@ -36,6 +37,14 @@ pub async fn add_reading_stats(
     Ok(ApiResponse::ok(serde_json::json!({ "saved": true })))
 }
 
+#[tauri::command]
+pub async fn add_reading_stats(
+    state: tauri::State<'_, AppState>,
+    req: AddReadingStatsRequest,
+) -> Result<ApiResponse<serde_json::Value>, AppError> {
+    add_reading_stats_core(&state, req).await
+}
+
 /// Per-day stats for a date range (YYYY-MM-DD), oldest first.
 #[tauri::command]
 pub async fn get_reading_stats_daily(
@@ -51,7 +60,7 @@ pub async fn get_reading_stats_daily(
 /// Lifetime totals.
 pub async fn get_reading_stats_summary_core(
     state: &AppState,
-) -> Result<ApiResponse<serde_json::Value>, AppError> {
+) -> Result<ApiResponse<ReadingStatsOverview>, AppError> {
     let user_ns = "default";
     let summary = state.reading_stats_service.get_summary(user_ns).await?;
     Ok(ApiResponse::ok(summary))
@@ -61,7 +70,7 @@ pub async fn get_reading_stats_summary_core(
 #[tauri::command]
 pub async fn get_reading_stats_summary(
     state: tauri::State<'_, AppState>,
-) -> Result<ApiResponse<serde_json::Value>, AppError> {
+) -> Result<ApiResponse<ReadingStatsOverview>, AppError> {
     get_reading_stats_summary_core(&state).await
 }
 

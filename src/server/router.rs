@@ -127,6 +127,7 @@ pub fn build(state: AppState, _options: WebOptions, static_source: Option<Static
         .route("/reader3/getBookGroups", get(get_book_groups))
         // ─── 阅读统计 (最近阅读 / 统计页) ───
         .route("/reader3/getReadingStatsSummary", get(get_reading_stats_summary))
+        .route("/reader3/addReadingStats", post(add_reading_stats))
         // ─── 其它只读接口 ───
         .route("/reader3/getBookmarks", get(get_bookmarks))
         .route("/reader3/getReplaceRules", get(get_replace_rules))
@@ -526,6 +527,13 @@ async fn get_book_groups(State(state): State<AppState>) -> Response {
 
 async fn get_reading_stats_summary(State(state): State<AppState>) -> Response {
     envelope(reading_stats_cmd::get_reading_stats_summary_core(&state).await)
+}
+
+async fn add_reading_stats(
+    State(state): State<AppState>,
+    Json(req): Json<reading_stats_cmd::AddReadingStatsRequest>,
+) -> Response {
+    envelope(reading_stats_cmd::add_reading_stats_core(&state, req).await)
 }
 
 /// 版本检查在 Web 端只读展示, 不提供"立即更新" —— 浏览器里没有可替换的

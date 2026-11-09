@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAppStore } from './app'
+import { addReadingStats } from '../api/readingStats'
+
+vi.mock('../api/readingStats', () => ({
+  addReadingStats: vi.fn(() => Promise.resolve({ saved: true })),
+}))
 
 function installBrowserGlobals() {
   const values = new Map<string, string>()
@@ -55,6 +60,7 @@ describe('app reading session clock', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks()
+    vi.mocked(addReadingStats).mockClear()
     setActivePinia(createPinia())
     browser = installBrowserGlobals()
     vi.useFakeTimers()
@@ -128,5 +134,26 @@ describe('app reading session clock', () => {
     store.stopReadingSession()
 
     expect(store.readingStats.totalSeconds).toBe(10)
+  })
+
+  it('splits a long session into server-sized chunks', async () => {
+    const store = useAppStore()
+    store.startReadingSession('book-a', '第一本', '作者')
+    vi.advanceTimersByTime(2 * 60 * 60 * 1000)
+
+    store.stopReadingSession()
+    await vi.waitFor(() => expect(addReadingStats).toHaveBeenCalledTimes(2))
+
+    expect(store.readingStats.totalSeconds).toBe(7200)
+    expect(vi.mocked(addReadingStats).mock.calls.map(([params]) => params.seconds)).toEqual([3600, 3600])
+    expect(vi.mocked(addReadingStats).mock.calls.every(([params]) => params.bookUrl === 'book-a')).toBe(true)
+  })
+
+  it('marks a chapter as read only once', () => {
+    const store = useAppStore()
+
+    expect(store.markChapterRead('book-a', 2, 10)).toBe(true)
+    expect(store.markChapterRead('book-a', 2, 10)).toBe(false)
+    expect(store.readingStats.readChapters.filter((key) => key === 'book-a#2')).toHaveLength(1)
   })
 })

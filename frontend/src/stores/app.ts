@@ -316,10 +316,24 @@ export const useAppStore = defineStore('app', () => {
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true)
 
   const initialReadingStats = (() => {
+    const fallback = {
+      totalSeconds: 0,
+      openedBooks: [],
+      readChapters: [],
+      completedBooks: [],
+    }
     try {
-      return JSON.parse(localStorage.getItem(STATS_KEY) || '{"totalSeconds":0,"openedBooks":[],"readChapters":[],"completedBooks":[]}')
+      const saved = JSON.parse(localStorage.getItem(STATS_KEY) || '{}')
+      return {
+        ...fallback,
+        ...saved,
+        totalSeconds: Number.isFinite(saved?.totalSeconds) ? Math.max(0, saved.totalSeconds) : 0,
+        openedBooks: Array.isArray(saved?.openedBooks) ? saved.openedBooks.filter((item: unknown) => typeof item === 'string') : [],
+        readChapters: Array.isArray(saved?.readChapters) ? saved.readChapters.filter((item: unknown) => typeof item === 'string') : [],
+        completedBooks: Array.isArray(saved?.completedBooks) ? saved.completedBooks.filter((item: unknown) => typeof item === 'string') : [],
+      }
     } catch {
-      return { totalSeconds: 0, openedBooks: [], readChapters: [], completedBooks: [] }
+      return fallback
     }
   })()
 
@@ -330,10 +344,15 @@ export const useAppStore = defineStore('app', () => {
     completedBooks: string[]
   }>(initialReadingStats)
   let readingSessionStartedAt = 0
+  let readingSessionPendingSeconds = 0
   let readingSessionBook: { bookUrl: string; bookName: string; bookAuthor: string } | null = null
   const readingSessionActive = ref(false)
   let readingSessionVisibilityBound = false
   let readingSessionHasWindowFocus = true
+  let readingStatsFlushQueue = Promise.resolve()
+
+  /** 单次上报上限: 服务端同样限制 24h, 长会话分段避免整段被截断。 */
+  const READING_STATS_FLUSH_CHUNK_SECONDS = 60 * 60
 
   function persistStats() {
     localStorage.setItem(STATS_KEY, JSON.stringify(readingStats.value))
@@ -350,8 +369,6 @@ export const useAppStore = defineStore('app', () => {
       pauseReadingSessionClock()
       return
     }
-    // 以**计时起点**为准判断是否在跑, 而不是看 `readingSessionActive`:
-    // 后者只是镜像, 任何一处忘记同步都会让这里空转(见 flushReadingSession 的说明)。
     if (!readingSessionStartedAt) {
       readingSessionStartedAt = Date.now()
     }
@@ -359,7 +376,6 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function pauseReadingSessionClock() {
-    if (!readingSessionActive.value) return
     flushReadingSession()
     readingSessionActive.value = false
   }
@@ -393,25 +409,39 @@ export const useAppStore = defineStore('app', () => {
   function flushReadingSession() {
     if (!readingSessionStartedAt) return
     const delta = Math.max(0, Math.round((Date.now() - readingSessionStartedAt) / 1000))
-    readingStats.value.totalSeconds += delta
     readingSessionStartedAt = 0
-    // 计时起点归零后必须同时把"正在计时"标志放掉。
-    //
-    // `readingSessionActive` 是 `readingSessionStartedAt > 0` 的镜像, 两者
-    // 不一致时 `resumeReadingSessionClock` 会因为 `!readingSessionActive` 不成立
-    // 而不再设置新的起点 —— 换书(flush 后立刻 resume)就会让时长永久冻结,
-    // 直到下一次失焦/聚焦把它重新拉起来。
     readingSessionActive.value = false
+    readingSessionPendingSeconds += delta
+    void flushReadingSessionStats()
+  }
+
+  function flushReadingSessionStats() {
+    const book = readingSessionBook
+    let remaining = readingSessionPendingSeconds
+    readingSessionPendingSeconds = 0
+    if (remaining <= 0) return
+
+    const total = remaining
+    readingStats.value.totalSeconds += total
     persistStats()
-    // Sync to the server-side reading_stats table (best-effort).
-    if (delta > 0) {
-      void addReadingStats({
-        seconds: delta,
-        bookUrl: readingSessionBook?.bookUrl,
-        bookName: readingSessionBook?.bookName,
-        bookAuthor: readingSessionBook?.bookAuthor,
-      }).catch(() => undefined)
+
+    const chunks: number[] = []
+    while (remaining > 0) {
+      const chunk = Math.min(remaining, READING_STATS_FLUSH_CHUNK_SECONDS)
+      chunks.push(chunk)
+      remaining -= chunk
     }
+
+    readingStatsFlushQueue = readingStatsFlushQueue.then(async () => {
+      for (const chunk of chunks) {
+        await addReadingStats({
+          seconds: chunk,
+          bookUrl: book?.bookUrl,
+          bookName: book?.bookName,
+          bookAuthor: book?.bookAuthor,
+        }).catch(() => undefined)
+      }
+    })
   }
 
   async function applyDesktopUpdate() {
@@ -499,13 +529,13 @@ export const useAppStore = defineStore('app', () => {
 
   function markChapterRead(bookUrl: string, index: number, totalChapters: number) {
     const key = `${bookUrl}#${index}`
-    if (!readingStats.value.readChapters.includes(key)) {
-      readingStats.value.readChapters.push(key)
-    }
+    const isFirstRead = !readingStats.value.readChapters.includes(key)
+    if (isFirstRead) readingStats.value.readChapters.push(key)
     if (totalChapters > 0 && index >= totalChapters - 1 && !readingStats.value.completedBooks.includes(bookUrl)) {
       readingStats.value.completedBooks.push(bookUrl)
     }
     persistStats()
+    return isFirstRead
   }
 
   const readingStatsSummary = computed(() => {
@@ -630,7 +660,8 @@ export const useAppStore = defineStore('app', () => {
     showBookmarkManager,
     updateDialogVisible, closeUpdateProgressDialog,
     isOnline, setOnlineStatus,
-    readingStats, readingStatsSummary, startReadingSession, stopReadingSession, setReadingSessionBook, markBookOpened, markChapterRead,
+    readingStats, readingStatsSummary, startReadingSession, stopReadingSession, setReadingSessionBook,
+    markBookOpened, markChapterRead,
     toasts, showToast, dismissToast,
     confirmState, confirmDialog, resolveConfirm,
     hiddenFeatures, isFeatureHidden, toggleHiddenFeature,

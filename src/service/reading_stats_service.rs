@@ -3,6 +3,11 @@ use sqlx::{Row, SqlitePool};
 
 use crate::error::error::AppError;
 
+/// 单次写入的上限。阅读时长来自前端会话结算, 正常一次最多几分钟;
+/// 时钟跳变、重复 flush 或脏请求不该把统计表推到离谱数值。
+const MAX_SECONDS_PER_WRITE: i64 = 24 * 60 * 60;
+const MAX_CHARACTERS_PER_WRITE: i64 = 10_000_000;
+
 /// Per-day reading statistics: seconds read and characters read, keyed by user
 /// namespace and calendar date (YYYY-MM-DD).
 #[derive(Clone)]
@@ -16,7 +21,6 @@ pub struct ReadingStatsService {
 pub struct DailyReadingStats {
     pub date: String,
     pub seconds: i64,
-    pub characters: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -25,8 +29,18 @@ pub struct BookReadingStats {
     pub book_url: String,
     pub book_name: String,
     pub seconds: i64,
-    pub characters: i64,
     pub last_read_date: String,
+}
+
+/// 统计页概览：今日 / 本月 / 累计时长与活跃天数。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingStatsOverview {
+    pub today_seconds: i64,
+    pub month_seconds: i64,
+    pub total_seconds: i64,
+    pub active_days: i64,
+    pub read_books: i64,
 }
 
 /// 备份导出用: reading_stats 全量按日行。
@@ -73,8 +87,8 @@ impl ReadingStatsService {
         book_author: Option<&str>,
     ) -> Result<(), AppError> {
         let date = date.map(String::from).unwrap_or_else(Self::today);
-        let seconds = seconds.max(0);
-        let characters = characters.max(0);
+        let seconds = seconds.clamp(0, MAX_SECONDS_PER_WRITE);
+        let characters = characters.clamp(0, MAX_CHARACTERS_PER_WRITE);
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO reading_stats (user_ns, date, seconds, characters)
@@ -147,27 +161,34 @@ impl ReadingStatsService {
             .map(|row| DailyReadingStats {
                 date: row.get("date"),
                 seconds: row.get("seconds"),
-                characters: row.get("characters"),
             })
             .collect())
     }
 
     /// Totals across all time.
-    pub async fn get_summary(&self, user_ns: &str) -> Result<serde_json::Value, AppError> {
+    pub async fn get_summary(&self, user_ns: &str) -> Result<ReadingStatsOverview, AppError> {
         let row = sqlx::query(
-            "SELECT COALESCE(SUM(seconds),0) AS seconds,
-                    COALESCE(SUM(characters),0) AS characters,
-                    COUNT(*) AS days
-             FROM reading_stats WHERE user_ns = ?1",
+        "SELECT
+           COALESCE(SUM(seconds), 0) AS seconds,
+           COALESCE(SUM(CASE WHEN date = ?2 THEN seconds ELSE 0 END), 0) AS today_seconds,
+           COALESCE(SUM(CASE WHEN date >= ?3 AND date <= ?2 THEN seconds ELSE 0 END), 0) AS month_seconds,
+           COUNT(CASE WHEN seconds > 0 THEN 1 END) AS days,
+           (SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(book_name), ''), book_url))
+            FROM reading_book_stats WHERE user_ns = ?1) AS books
+         FROM reading_stats WHERE user_ns = ?1",
         )
         .bind(user_ns)
+    .bind(Self::today())
+    .bind(Local::now().format("%Y-%m-01").to_string())
         .fetch_one(&self.pool)
         .await?;
-        Ok(serde_json::json!({
-            "totalSeconds": row.get::<i64, _>("seconds"),
-            "totalCharacters": row.get::<i64, _>("characters"),
-            "activeDays": row.get::<i64, _>("days"),
-        }))
+        Ok(ReadingStatsOverview {
+            total_seconds: row.get("seconds"),
+            today_seconds: row.get("today_seconds"),
+            month_seconds: row.get("month_seconds"),
+            active_days: row.get("days"),
+            read_books: row.get("books"),
+        })
     }
 
     pub async fn get_by_book(
@@ -176,39 +197,38 @@ impl ReadingStatsService {
         start: &str,
         end: &str,
     ) -> Result<Vec<BookReadingStats>, AppError> {
-        // 按 (书名, 作者) 联合分组, 而非仅按 book_url 或仅按 book_name。
-        // 原因 1: 同一本小说换源后 book_url 会变成新源的 URL, 按 book_url 分组
-        //         会让同一本书出现多条记录(每个源一条)。
-        // 原因 2: 仅按 book_name 分组会把不同作者的同名书合并成一条,
-        //         删除其中一本会误删另一本。加入作者区分可避免此问题。
-        // 作者缺失时回退为空串参与分组(同名无作者的书仍会合并, 这是可接受的退化)。
+        // 排行按规范化书名分组。桌面排行不展示作者, 若把作者纳入分组键,
+        // 历史记录里"有作者/作者为空/作者改名"会产生多个视觉上完全相同的条目。
+        // 同一书名换源时也应收敛为一行; 作者仅作为辅助信息取最新非空值。
         let rows = sqlx::query(
             "WITH agg AS (
                SELECT
                  COALESCE(NULLIF(TRIM(book_name), ''), book_url) AS norm_name,
-                 COALESCE(NULLIF(TRIM(book_author), ''), '') AS norm_author,
                  COALESCE(SUM(seconds), 0) AS seconds,
-                 COALESCE(SUM(characters), 0) AS characters,
                  MAX(date) AS last_read_date
                FROM reading_book_stats
                WHERE user_ns = ?1 AND date >= ?2 AND date <= ?3
-               GROUP BY COALESCE(NULLIF(TRIM(book_name), ''), book_url),
-                        COALESCE(NULLIF(TRIM(book_author), ''), '')
-               HAVING SUM(seconds) > 0 OR SUM(characters) > 0
+               GROUP BY COALESCE(NULLIF(TRIM(book_name), ''), book_url)
+               HAVING SUM(seconds) > 0
              )
              SELECT
                agg.norm_name AS book_name,
-               agg.norm_author AS book_author,
+               COALESCE((
+                 SELECT r.book_author FROM reading_book_stats r
+                 WHERE r.user_ns = ?1 AND r.date >= ?2 AND r.date <= ?3
+                   AND COALESCE(NULLIF(TRIM(r.book_name), ''), r.book_url) = agg.norm_name
+                   AND TRIM(r.book_author) <> ''
+                 ORDER BY r.date DESC, r.seconds DESC
+                 LIMIT 1
+               ), '') AS book_author,
                COALESCE((
                  SELECT r.book_url FROM reading_book_stats r
                  WHERE r.user_ns = ?1 AND r.date >= ?2 AND r.date <= ?3
                    AND COALESCE(NULLIF(TRIM(r.book_name), ''), r.book_url) = agg.norm_name
-                   AND COALESCE(NULLIF(TRIM(r.book_author), ''), '') = agg.norm_author
                  ORDER BY r.date DESC, r.seconds DESC
                  LIMIT 1
                ), agg.norm_name) AS book_url,
                agg.seconds,
-               agg.characters,
                agg.last_read_date
              FROM agg
              ORDER BY agg.seconds DESC, agg.norm_name ASC",
@@ -225,7 +245,6 @@ impl ReadingStatsService {
                 book_url: row.get("book_url"),
                 book_name: row.get("book_name"),
                 seconds: row.get("seconds"),
-                characters: row.get("characters"),
                 last_read_date: row.get("last_read_date"),
             })
             .collect())
@@ -321,24 +340,19 @@ impl ReadingStatsService {
         Ok(())
     }
 
-    /// Delete all per-book reading stats rows for a given book. Since get_by_book
-    /// now groups by book_name (not book_url), deletion must also match by book_name
-    /// to remove all rows for that book across different source URLs. The book_url
-    /// passed in is the "latest" URL from the stats display; we resolve it to the
-    /// (book_name, book_author) pair first, then delete all rows matching that pair
-    /// to remove all rows for that book across different source URLs without
-    /// accidentally deleting a different book with the same name.
+    /// Delete all per-book reading stats rows for a given book.
+    ///
+    /// `book_url` is the representative URL returned by `get_by_book`. Resolve it
+    /// to the normalized book name, then delete every row sharing that name so
+    /// historical author changes/source switches cannot leave a duplicate row.
     pub async fn delete_book_stats(
         &self,
         user_ns: &str,
         book_url: &str,
     ) -> Result<u64, AppError> {
-        // 先查出该 book_url 对应的 (书名, 作者), 再按此二元组删除所有记录。
-        // 仅按书名删除会误伤同名不同作者的书; 加入作者可精确区分。
-        let row: Option<(String, String)> = sqlx::query_as(
+        let row: Option<String> = sqlx::query_scalar(
             "SELECT
-               COALESCE(NULLIF(TRIM(book_name), ''), book_url) AS name,
-               COALESCE(NULLIF(TRIM(book_author), ''), '') AS author
+               COALESCE(NULLIF(TRIM(book_name), ''), book_url) AS name
              FROM reading_book_stats
              WHERE user_ns = ?1 AND book_url = ?2 LIMIT 1",
         )
@@ -346,21 +360,52 @@ impl ReadingStatsService {
         .bind(book_url)
         .fetch_optional(&self.pool)
         .await?;
-        let (name, author) = match row {
-            Some(pair) => pair,
+        let name = match row {
+            Some(name) => name,
             None => return Ok(0),
         };
-        let result = sqlx::query(
-            "DELETE FROM reading_book_stats
+        let mut tx = self.pool.begin().await?;
+        // 先保存要扣减的按日汇总，再删除分书行；反过来会在删除后查不到数据。
+        let deductions = sqlx::query(
+            "SELECT date, SUM(seconds) AS seconds, SUM(characters) AS characters
+             FROM reading_book_stats
              WHERE user_ns = ?1
                AND COALESCE(NULLIF(TRIM(book_name), ''), book_url) = ?2
-               AND COALESCE(NULLIF(TRIM(book_author), ''), '') = ?3",
+             GROUP BY date",
         )
         .bind(user_ns)
         .bind(&name)
-        .bind(&author)
-        .execute(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+        let result = sqlx::query(
+            "DELETE FROM reading_book_stats
+             WHERE user_ns = ?1
+               AND COALESCE(NULLIF(TRIM(book_name), ''), book_url) = ?2",
+        )
+        .bind(user_ns)
+        .bind(&name)
+        .execute(&mut *tx)
+        .await?;
+        // 分书统计删除后, 按日总量必须同步扣减; 否则统计页的累计时长
+        // 仍包含这本书, 与“删除该书阅读记录”的语义矛盾。
+        for row in deductions {
+            let date: String = row.get("date");
+            let seconds: i64 = row.get("seconds");
+            let characters: i64 = row.get("characters");
+            sqlx::query(
+                "UPDATE reading_stats
+                 SET seconds = MAX(0, seconds - ?3),
+                     characters = MAX(0, characters - ?4)
+                 WHERE user_ns = ?1 AND date = ?2",
+            )
+            .bind(user_ns)
+            .bind(date)
+            .bind(seconds)
+            .bind(characters)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(result.rows_affected())
     }
 
@@ -533,7 +578,6 @@ mod tests {
         assert_eq!(books[0].book_url, "book-a");
         assert_eq!(books[0].book_name, "第一本书");
         assert_eq!(books[0].seconds, 300);
-        assert_eq!(books[0].characters, 800);
         assert_eq!(books[0].last_read_date, "2026-08-09");
         assert_eq!(books[1].book_url, "book-b");
         assert_eq!(books[1].seconds, 90);
@@ -543,6 +587,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(daily[0].seconds, 300);
+    }
+
+    #[tokio::test]
+    async fn overview_reports_today_month_total_and_active_days() {
+        let service = setup_service().await;
+        let today = ReadingStatsService::today();
+        let month_start = format!("{}-01", &today[..7]);
+        service
+            .add_reading("default", 120, 0, Some(&today), Some("book-a"), Some("A书"), Some("甲"))
+            .await
+            .unwrap();
+        service
+            .add_reading("default", 60, 0, Some(&month_start), Some("book-b"), Some("B书"), Some("乙"))
+            .await
+            .unwrap();
+
+        let overview = service.get_summary("default").await.unwrap();
+        assert!(overview.today_seconds >= 120);
+        assert!(overview.month_seconds >= 180);
+        assert!(overview.total_seconds >= 180);
+        assert!(overview.active_days >= 1);
+        assert_eq!(overview.read_books, 2);
     }
 
     #[tokio::test]
@@ -571,10 +637,26 @@ mod tests {
         // 时长累加: 120 + 180 = 300
         let doupo = books.iter().find(|b| b.book_name == "测试书籍").unwrap();
         assert_eq!(doupo.seconds, 300);
-        assert_eq!(doupo.characters, 800);
         assert_eq!(doupo.last_read_date, "2026-08-11");
         // book_url 取最近阅读日期对应的 (2026-08-11 → url-b)
         assert_eq!(doupo.book_url, "url-b");
+    }
+
+    #[tokio::test]
+    async fn same_book_name_with_legacy_blank_author_merges_into_one_row() {
+        let service = setup_service().await;
+        service
+            .add_reading("default", 120, 0, Some("2026-08-10"), Some("url-old"), Some("同一本书"), Some(""))
+            .await
+            .unwrap();
+        service
+            .add_reading("default", 180, 0, Some("2026-08-11"), Some("url-new"), Some("同一本书"), Some("作者甲"))
+            .await
+            .unwrap();
+
+        let books = service.get_by_book("default", "2026-08-10", "2026-08-11").await.unwrap();
+        assert_eq!(books.len(), 1, "作者缺失的旧记录应和新记录合并, 实际: {:?}", books);
+        assert_eq!(books[0].seconds, 300);
     }
 
     #[tokio::test]
@@ -595,6 +677,9 @@ mod tests {
         let books = service.get_by_book("default", "2026-08-08", "2026-08-08").await.unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].book_url, "book-b");
+
+        let daily = service.get_daily("default", "2026-08-08", "2026-08-08").await.unwrap();
+        assert_eq!(daily[0].seconds, 90);
     }
 
     #[tokio::test]
@@ -681,13 +766,13 @@ mod tests {
         let renamed = books.iter().find(|book| book.book_url == "local-txt:abc").unwrap();
         assert_eq!(renamed.book_name, "新书名");
         assert_eq!(renamed.seconds, 300);
-        assert_eq!(renamed.characters, 800);
         assert!(books.iter().any(|book| book.book_name == "另一本"));
     }
 
     #[tokio::test]
-    async fn same_name_different_authors_not_merged() {
-        // 不同作者的同名书不应合并, 删除其中一本不影响另一本
+    async fn same_name_is_merged_even_when_author_differs() {
+        // 排行榜只显示书名; 同名记录若按作者拆开会直接出现视觉重复。
+        // 这里确保同名一律收敛为一条, 删除时也一次清理全部来源。
         let service = setup_service().await;
         service
             .add_reading("default", 100, 0, Some("2026-08-08"), Some("url-甲"), Some("同名书"), Some("作者甲"))
@@ -699,13 +784,12 @@ mod tests {
             .unwrap();
 
         let books = service.get_by_book("default", "2026-08-08", "2026-08-08").await.unwrap();
-        assert_eq!(books.len(), 2, "同名不同作者的书应分开, 实际: {:?}", books);
+        assert_eq!(books.len(), 1, "同名记录应合并, 实际: {:?}", books);
+        assert_eq!(books[0].seconds, 300);
 
-        // 删除作者甲的书, 作者乙的书不受影响
         let deleted = service.delete_book_stats("default", "url-甲").await.unwrap();
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted, 2);
         let books = service.get_by_book("default", "2026-08-08", "2026-08-08").await.unwrap();
-        assert_eq!(books.len(), 1);
-        assert_eq!(books[0].book_url, "url-乙");
+        assert!(books.is_empty());
     }
 }

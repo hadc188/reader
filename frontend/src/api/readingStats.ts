@@ -3,26 +3,25 @@ import { invokeEnvelope } from './invoke'
 export interface DailyReadingStats {
   date: string
   seconds: number
-  characters: number
 }
 
 export interface ReadingStatsSummary {
   totalSeconds: number
-  totalCharacters: number
+  todaySeconds: number
+  monthSeconds: number
   activeDays: number
+  readBooks: number
 }
 
 export interface BookReadingStats {
   bookUrl: string
   bookName: string
   seconds: number
-  characters: number
   lastReadDate: string
 }
 
 export function addReadingStats(params: {
   seconds?: number
-  characters?: number
   date?: string
   bookUrl?: string
   bookName?: string

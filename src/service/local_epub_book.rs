@@ -39,7 +39,7 @@ const IMAGE_BASE_FILE: &str = "__image-base.css";
 /// 1 = 清洗 XHTML 但不保留原书样式; 2 = 保留作用域化 CSS、SVG 封面、修正字数;
 /// 3 = 正文改为按需解压(导入不再逐章生成 HTML); 4 = 不再保留原书 font-family,
 /// 字体交给阅读器设置。
-const CURRENT_EPUB_ENGINE_VERSION: u32 = 4;
+const CURRENT_EPUB_ENGINE_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -620,9 +620,12 @@ fn build_chapter_list(
         if !is_html_media_type(&item.media_type) || !seen_chapter_paths.insert(item.path.clone()) {
             continue;
         }
-        let title = title_map
+        let toc_title = title_map
             .get(&item.path)
-            .cloned()
+            .map(|value| value.trim())
+            .filter(|value| is_meaningful_epub_title(value));
+        let title = toc_title
+            .map(str::to_string)
             .or_else(|| {
                 files
                     .get(&item.path)
@@ -1287,7 +1290,7 @@ fn extract_html_title(html: &str) -> Option<String> {
                 let tag = local_name(e.name().as_ref());
                 if capture.as_deref() == Some(tag.as_str()) {
                     let title = collapse_ws(&captured_text);
-                    if !title.is_empty() {
+                    if is_meaningful_epub_title(&title) {
                         return Some(title);
                     }
                     capture = None;
@@ -1300,6 +1303,16 @@ fn extract_html_title(html: &str) -> Option<String> {
         buf.clear();
     }
     None
+}
+
+/// 目录/HTML 中常见的占位标题不能当作真正章节名。
+fn is_meaningful_epub_title(value: &str) -> bool {
+    let title = value.trim();
+    !title.is_empty()
+        && !matches!(
+            title.to_ascii_lowercase().as_str(),
+            "未知" | "untitled" | "unknown" | "n/a" | "null"
+        )
 }
 
 /// 清洗结果: 正文片段 + 本章引用的样式表 href。
@@ -2499,7 +2512,7 @@ fn html_unescape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_leading_duplicate_title;
+    use super::{extract_html_title, is_meaningful_epub_title, strip_leading_duplicate_title};
 
     #[test]
     fn removes_matching_leading_heading_only() {
@@ -2540,6 +2553,19 @@ mod tests {
     fn keeps_heading_that_follows_body_text() {
         let html = "<p>正文在前</p><h1>第一章 起点</h1>";
         assert_eq!(strip_leading_duplicate_title(html, "第一章 起点"), html);
+    }
+
+    #[test]
+    fn rejects_unknown_toc_placeholder() {
+        assert!(!is_meaningful_epub_title("未知"));
+        assert!(!is_meaningful_epub_title("Untitled"));
+        assert!(is_meaningful_epub_title("示例章节标题"));
+    }
+
+    #[test]
+    fn extracts_real_heading_instead_of_unknown_html_title() {
+        let html = "<html><head><title>未知</title></head><body><h1>示例章节标题</h1></body></html>";
+        assert_eq!(extract_html_title(html).as_deref(), Some("示例章节标题"));
     }
 
     /// `class="title"`(整个 class 值就是 title) 也要认出来。

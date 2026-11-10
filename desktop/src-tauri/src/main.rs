@@ -5,6 +5,7 @@
 )]
 
 mod portable;
+mod webview_memory;
 mod win;
 
 use reader_rust::api::commands::window::CLOSE_REQUEST_HANDLED;
@@ -96,6 +97,14 @@ fn reveal(window: &tauri::WebviewWindow, state: &RevealState) {
     let _ = window.set_focus();
 }
 
+/// 显示主窗口前先恢复 WebView2 的正常内存级别。
+fn show_main_window(window: &tauri::WebviewWindow) {
+    webview_memory::apply(window, webview_memory::MemoryLevel::Normal);
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
 fn main() {
     #[cfg(target_os = "windows")]
     const WEBVIEW2_DOWNLOAD_URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
@@ -147,9 +156,7 @@ fn main() {
 
             // Surface the existing window instead of starting a second instance.
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
+                show_main_window(&window);
             }
         }))
         .invoke_handler(reader_rust::api::invoke_handler())
@@ -440,7 +447,34 @@ fn start(app: &mut App, paths: &portable::Paths) -> anyhow::Result<()> {
         });
     }
 
+    #[cfg(target_os = "windows")]
+    setup_webview_memory_events(window.clone(), Arc::clone(&reveal_state));
+
     Ok(())
+}
+
+/// 最小化/隐藏后延迟进入低内存模式，恢复可见时回到正常级别。
+#[cfg(target_os = "windows")]
+fn setup_webview_memory_events(window: tauri::WebviewWindow, page_ready: Arc<RevealState>) {
+    let event_window = window.clone();
+    window.on_window_event(move |event| match event {
+        WindowEvent::Focused(true) => {
+            webview_memory::apply(&event_window, webview_memory::MemoryLevel::Normal);
+        }
+        WindowEvent::Resized(_) if event_window.is_minimized().unwrap_or(false) => {
+            let target = event_window.clone();
+            let page_ready = Arc::clone(&page_ready);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if page_ready.revealed.load(Ordering::SeqCst)
+                    && target.is_minimized().unwrap_or(false)
+                {
+                    webview_memory::apply(&target, webview_memory::MemoryLevel::Low);
+                }
+            });
+        }
+        _ => {}
+    });
 }
 
 /// 记录窗口尺寸/位置。`force` 为真时跳过节流, 用于退出前补写最后一次变化。
@@ -493,18 +527,14 @@ fn setup_tray(app: &mut App) -> anyhow::Result<()> {
             };
             if is_left {
                 if let Some(window) = tray.app_handle().get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
+                    show_main_window(&window);
                 }
             }
         })
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
+                    show_main_window(&window);
                 }
             }
             "quit" => {

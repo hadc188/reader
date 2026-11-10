@@ -1804,6 +1804,7 @@ export const useReaderStore = defineStore('reader', () => {
   let preloadGeneration = 0
   const inFlightPreloadKeys = new Set<string>()
   const inFlightOpenAIAudioRequests = new Map<string, Promise<Blob>>()
+  let preloadAbortController: AbortController | null = null
   let currentTTSSessionId = 0
   /**
    * 缓冲流的外部控制句柄。
@@ -2342,9 +2343,18 @@ export const useReaderStore = defineStore('reader', () => {
 
   function clearPreloadedOpenAIAudio() {
     preloadGeneration += 1
+    preloadAbortController?.abort()
+    preloadAbortController = null
     inFlightPreloadKeys.clear()
     inFlightOpenAIAudioRequests.clear()
     preloadedOpenAIAudio.value = []
+  }
+
+  /** 离开阅读页时释放朗读缓冲、试听音频和预载 Blob。 */
+  function releaseTTSResources() {
+    stopTTS(false)
+    if (hasActiveSpeechPreview()) cleanupSpeechPreview()
+    clearPreloadedOpenAIAudio()
   }
 
   async function preloadOpenAITTS(rawText?: string | string[] | null) {
@@ -2362,10 +2372,13 @@ export const useReaderStore = defineStore('reader', () => {
     if (!pendingTexts.length) return
 
     const generation = preloadGeneration
+    const controller = new AbortController()
+    preloadAbortController?.abort()
+    preloadAbortController = controller
     for (const text of pendingTexts.slice(0, OPENAI_AUDIO_PRELOAD_LIMIT)) {
       const key = buildOpenAIAudioCacheKey(text)
       inFlightPreloadKeys.add(key)
-      const { promise } = getOrStartOpenAIAudioRequest(text)
+      const { promise } = getOrStartOpenAIAudioRequest(text, controller.signal)
       void promise
         .then((blob) => {
           if (generation !== preloadGeneration) return
@@ -2375,6 +2388,9 @@ export const useReaderStore = defineStore('reader', () => {
         })
         .catch(() => undefined)
         .finally(() => {
+          if (preloadAbortController === controller) {
+            preloadAbortController = null
+          }
           inFlightPreloadKeys.delete(key)
         })
     }
@@ -4656,7 +4672,7 @@ export const useReaderStore = defineStore('reader', () => {
     setEdgeVoice, setEdgeDialogueVoice, setEdgePitch, setEdgeVolume, setEdgeFormat,
     setMsVoice, setMsDialogueVoice, setMsStyle, setMsDialogueStyle, setMsStyleDegree, setMsPitch, setMsVolume, setMsFormat,
     isSpeechPreviewing, isSpeechPreviewLoading, previewSpeech, stopSpeechPreview,
-    attachSpeechStreamControls, synthesizeSpeechChunkBlob,
+    attachSpeechStreamControls, synthesizeSpeechChunkBlob, releaseTTSResources,
     setOpenAISpeechSource, setSpeechApiFormat, setOpenAISpeechBaseUrl, setSpeechProxyUrl, setOpenAISpeechApiKey, setOpenAISpeechModel, setOpenAISpeechVoice, setOpenAISpeechFormat, setOpenAISpeechRequestMode, preloadOpenAITTS,
     displayContent, processContentForDisplay, replaceRulesDegraded, failedScriptRuleCount,
     isAutoScrolling,

@@ -4140,7 +4140,7 @@ onUnmounted(() => {
   disposeSelection()
   disposeContinuousReading()
   disposeAutoPlayback()
-  store.stopTTS()
+  store.releaseTTSResources()
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     window.speechSynthesis.onvoiceschanged = null
   }

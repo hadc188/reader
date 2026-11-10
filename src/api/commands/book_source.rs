@@ -24,6 +24,10 @@ const MAX_TEST_SOURCE_BATCH_SIZE: usize = 100;
 static SOURCE_TEST_CANCELLATIONS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// 同一时刻只处理一次书源外链窗口替换，避免连续点击时并发创建同名窗口。
+static EXTERNAL_WINDOW_GATE: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
+
 #[derive(Debug, Deserialize)]
 pub struct BookSourceUrlParam {
     #[serde(rename = "bookSourceUrl")]
@@ -597,6 +601,8 @@ pub async fn open_external_window(
 ) -> Result<ApiResponse<()>, AppError> {
     use tauri::Manager;
 
+    let _window_gate = EXTERNAL_WINDOW_GATE.lock().await;
+
     let parsed = url::Url::parse(url.trim())
         .map_err(|_| AppError::BadRequest(format!("无效的网址: {url}")))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -606,7 +612,20 @@ pub async fn open_external_window(
     // 复用同一个窗口标签：连续点多个链接时只保留最新的那个，不堆窗口。
     const LABEL: &str = "source-link";
     if let Some(existing) = app.get_webview_window(LABEL) {
+        // 等待旧 WebView2 销毁后再创建新窗口，避免两套渲染进程和会话回收
+        // 同时进行。超时则让本次调用失败，绝不再叠一个同名窗口。
         let _ = existing.close();
+        for _ in 0..20 {
+            if app.get_webview_window(LABEL).is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        if app.get_webview_window(LABEL).is_some() {
+            return Err(AppError::BadRequest(
+                "上一个书源网页窗口尚未关闭，请稍后重试".to_string(),
+            ));
+        }
     }
 
     // 让验证窗口用**书源自己的 User-Agent**，而不是 WebView2 的默认桌面 UA。

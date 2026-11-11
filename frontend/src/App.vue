@@ -391,10 +391,8 @@ body {
   .article-list-panel,
   .article-content-panel,
   .article-page-card,
-  .rss-manage-hero,
-  .rss-manage-tools,
-  .rss-sources,
-  .rss-editor,
+  .rss-manage-view .workspace,
+  .rss-manage-view .import-dialog,
   .recent-search-input,
   .filter-chip,
   .recent-clear-btn

@@ -14,7 +14,7 @@ describe('useReaderSelection mouse drag gate', () => {
     selection.handleMouseUpSelection(mouseEvent(100, 100))
     runScheduledFrame()
 
-    expect(container.removeAllRanges).toHaveBeenCalledTimes(2)
+    expect(container.rangeCount).toBe(0)
   })
 
   it('clears click selection before starting a page turn', () => {
@@ -24,7 +24,7 @@ describe('useReaderSelection mouse drag gate', () => {
     selection.handleMouseUpSelection(mouseEvent(100, 100))
     selection.clearSelectionBeforePageTurn()
 
-    expect(container.removeAllRanges).toHaveBeenCalledTimes(2)
+    expect(container.rangeCount).toBe(0)
   })
 
   it('clears an existing selection before starting a page turn', () => {
@@ -42,7 +42,38 @@ describe('useReaderSelection mouse drag gate', () => {
     selection.handleMouseUpSelection(mouseEvent(100, 100))
     selection.updateSelectionMenu()
 
-    expect(container.removeAllRanges).toHaveBeenCalledTimes(2)
+    expect(container.rangeCount).toBe(0)
+  })
+
+  it('collapses an existing selection when clicking inside reader text', () => {
+    const { selection, container } = setup()
+    const range = { startContainer: {}, startOffset: 0, endContainer: {}, endOffset: 1 }
+    container.getRangeAt = () => ({ cloneRange: () => range })
+    container.isCollapsed = false
+    container.toString = () => 'selected'
+
+    const event = mouseEvent(100, 100)
+    selection.handleMouseDownSelection(event)
+    selection.handleMouseUpSelection(mouseEvent(100, 100))
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(container.removeAllRanges).toHaveBeenCalledOnce()
+    expect(selection.suppressNextReaderClick.value).toBe(true)
+  })
+
+  it('allows selecting another area after collapsing an existing selection', () => {
+    const { selection, container } = setup()
+    const range = { startContainer: {}, startOffset: 0, endContainer: {}, endOffset: 1 }
+    container.getRangeAt = () => ({ cloneRange: () => range })
+    container.isCollapsed = false
+    container.toString = () => 'selected'
+
+    selection.handleMouseDownSelection(mouseEvent(100, 100))
+    selection.handleMouseMoveSelection(mouseEvent(130, 100))
+    selection.handleMouseUpSelection(mouseEvent(130, 100))
+
+    expect(container.removeAllRanges).toHaveBeenCalledOnce()
+    expect(selection.suppressNextReaderClick.value).toBe(true)
   })
 
   it('clears selection again after the page transition settles', () => {
@@ -52,7 +83,7 @@ describe('useReaderSelection mouse drag gate', () => {
     selection.clearSelectionAfterPageTurn(0)
     runScheduledTimer()
 
-    expect(container.removeAllRanges).toHaveBeenCalledTimes(2)
+    expect(container.rangeCount).toBe(0)
   })
 
   it('allows selection after the pointer actually drags', () => {
@@ -63,6 +94,30 @@ describe('useReaderSelection mouse drag gate', () => {
     selection.handleMouseUpSelection(mouseEvent(104, 100))
 
     expect(container.removeAllRanges).not.toHaveBeenCalled()
+    expect(selection.suppressNextReaderClick.value).toBe(true)
+  })
+
+  it('disables word selection on the second click of a double click', () => {
+    const { selection, container } = setup()
+    const event = mouseEvent(100, 100, 0, false, 2)
+
+    selection.handleMouseDownSelection(event)
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(selection.suppressNextReaderClick.value).toBe(false)
+    expect(container.removeAllRanges).toHaveBeenCalledOnce()
+  })
+
+  it('keeps drag selection available after a disabled double click', () => {
+    const { selection, container } = setup()
+    const doubleClick = mouseEvent(100, 100, 0, false, 2)
+    selection.handleMouseDownSelection(doubleClick)
+
+    selection.handleMouseDownSelection(mouseEvent(100, 100))
+    selection.handleMouseMoveSelection(mouseEvent(140, 100))
+    selection.handleMouseUpSelection(mouseEvent(140, 100))
+
+    expect(container.removeAllRanges).toHaveBeenCalledOnce()
     expect(selection.suppressNextReaderClick.value).toBe(true)
   })
 
@@ -152,7 +207,12 @@ function setup() {
   const container = {
     contains: () => true,
     rangeCount: 1,
-    removeAllRanges: vi.fn(),
+    isCollapsed: true,
+    toString: () => '',
+    getRangeAt: () => ({ cloneRange: () => ({}) }),
+    removeAllRanges: vi.fn(() => {
+      container.rangeCount = 0
+    }),
   }
   vi.stubGlobal('window', {
     getSelection: () => container,
@@ -185,12 +245,25 @@ function setup() {
   }
 }
 
-function mouseEvent(clientX: number, clientY: number, button = 0, touchGenerated = false) {
-  return {
+function mouseEvent(clientX: number, clientY: number, button = 0, touchGenerated = false, detail = 1): MouseEvent {
+  const event: {
+    clientX: number
+    clientY: number
+    button: number
+    detail: number
+    defaultPrevented: boolean
+    sourceCapabilities: { firesTouchEvents: boolean }
+    preventDefault: () => void
+  } = {
     clientX,
     clientY,
     button,
+    detail,
     defaultPrevented: false,
     sourceCapabilities: { firesTouchEvents: touchGenerated },
-  } as unknown as MouseEvent
+    preventDefault() {
+      event.defaultPrevented = true
+    },
+  }
+  return event as unknown as MouseEvent
 }

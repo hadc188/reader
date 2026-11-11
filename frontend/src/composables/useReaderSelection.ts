@@ -19,6 +19,7 @@ interface MouseSelectionGate {
   startY: number
   dragged: boolean
   suppressClick: boolean
+  collapsedExistingSelection: boolean
 }
 
 const MOUSE_SELECTION_DRAG_THRESHOLD_PX = 4
@@ -102,11 +103,31 @@ export function useReaderSelection(
       sourceCapabilities?: { firesTouchEvents?: boolean }
     }).sourceCapabilities
     if (sourceCapabilities?.firesTouchEvents) return
+    if (event.detail > 1) {
+      event.preventDefault()
+      clearClickSelection()
+      hideSelectionMenu()
+      mouseSelectionUnlocked.value = false
+      mouseSelectionGate = null
+      return
+    }
+    const existingSelection = window.getSelection?.()
+    const hadExistingSelection = Boolean(
+      existingSelection?.rangeCount
+      && !existingSelection.isCollapsed
+      && existingSelection.toString().trim(),
+    )
+    if (hadExistingSelection) {
+      existingSelection?.removeAllRanges()
+      hideSelectionMenu()
+      suppressClickSelectionUntil = Date.now() + CLICK_SELECTION_SUPPRESSION_MS
+    }
     mouseSelectionUnlocked.value = false
     mouseSelectionGate = {
       startX: event.clientX,
       startY: event.clientY,
       dragged: false,
+      collapsedExistingSelection: hadExistingSelection,
       suppressClick: Date.now() - lastClickEndedAt < RAPID_CLICK_MS
         && Math.hypot(event.clientX - lastClickX, event.clientY - lastClickY) < RAPID_CLICK_DISTANCE_PX,
     }
@@ -130,6 +151,14 @@ export function useReaderSelection(
       gate.dragged
       || Math.hypot(event.clientX - gate.startX, event.clientY - gate.startY) >= MOUSE_SELECTION_DRAG_THRESHOLD_PX
     )
+    if (gate?.collapsedExistingSelection && !dragged) {
+      mouseSelectionUnlocked.value = false
+      lastClickEndedAt = Date.now()
+      lastClickX = event.clientX
+      lastClickY = event.clientY
+      suppressNextReaderClick.value = true
+      return
+    }
     if (gate?.suppressClick && !dragged) {
       mouseSelectionUnlocked.value = false
       lastClickEndedAt = Date.now()

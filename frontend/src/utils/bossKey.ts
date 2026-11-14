@@ -4,6 +4,8 @@ export interface BossKeyCaptureResult {
 }
 
 export const DEFAULT_BOSS_KEY_SHORTCUT = 'CommandOrControl+Shift+H'
+export const DEFAULT_TITLEBAR_SHORTCUT = 'Alt+T'
+export const DEFAULT_BORDERLESS_SHORTCUT = 'Alt+B'
 const FUNCTION_KEY_PATTERN = /^F([1-9]|1[0-2])$/
 
 /** 可以单独绑定、不必再配修饰键的主键。
@@ -40,6 +42,16 @@ export function hasSystemKey(shortcut: string): boolean {
 export function normalizeBossKeyShortcut(shortcut: string | null): string {
   const value = shortcut?.trim() || ''
   return value && !hasSystemKey(value) ? value : DEFAULT_BOSS_KEY_SHORTCUT
+}
+
+export function normalizeTitlebarShortcut(shortcut: string | null): string {
+  const value = shortcut?.trim() || ''
+  return value && !hasSystemKey(value) ? value : DEFAULT_TITLEBAR_SHORTCUT
+}
+
+export function normalizeBorderlessShortcut(shortcut: string | null): string {
+  const value = shortcut?.trim() || ''
+  return value && !hasSystemKey(value) ? value : DEFAULT_BORDERLESS_SHORTCUT
 }
 
 function resolveMainKey(event: KeyboardEvent): string | null {
@@ -106,4 +118,20 @@ export function formatBossKey(shortcut: string): string {
     .split('+')
     .map((part) => KEY_DISPLAY[part.trim()] || part)
     .join(' + ')
+}
+
+/** 快捷键匹配键盘事件，格式与老板键捕获结果一致。 */
+export function matchesShortcut(
+  event: Pick<KeyboardEvent, 'key' | 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>,
+  shortcut: string,
+): boolean {
+  if (event.metaKey) return false
+  const parts = shortcut.split('+')
+  const main = parts.pop() || ''
+  const modifiers = new Set(parts.map((part) => part.toLowerCase()))
+  if (event.ctrlKey !== modifiers.has('control')) return false
+  if (event.altKey !== modifiers.has('alt')) return false
+  if (event.shiftKey !== modifiers.has('shift')) return false
+  const resolved = resolveMainKey(event as KeyboardEvent)
+  return resolved?.toLowerCase() === main.toLowerCase()
 }

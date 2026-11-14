@@ -12,7 +12,13 @@ import type { DesktopUpdateProgress, VersionUpdateInfo } from '../types'
 import { applySystemTheme } from '../utils/systemUi'
 import type { LegadoWebdavConfig } from '../api/webdav'
 import { invokeRaw } from '../api/invoke'
-import { normalizeBossKeyShortcut } from '../utils/bossKey'
+import {
+  DEFAULT_BORDERLESS_SHORTCUT,
+  normalizeBossKeyShortcut,
+  normalizeBorderlessShortcut,
+  normalizeTitlebarShortcut,
+  DEFAULT_TITLEBAR_SHORTCUT,
+} from '../utils/bossKey'
 
 export const useAppStore = defineStore('app', () => {
   const STATS_KEY = 'reader-stats'
@@ -20,6 +26,11 @@ export const useAppStore = defineStore('app', () => {
   const LEGADO_WEBDAV_KEY = 'reader-legado-webdav'
   const LEGADO_SYNC_ENABLED_KEY = 'reader-legado-sync-enabled'
   const BOSS_KEY_KEY = 'reader-boss-key'
+  const BORDERLESS_MODE_KEY = 'reader-borderless-mode'
+  const LEGACY_WINDOW_SHADOW_KEY = 'reader-window-shadow'
+  const BORDERLESS_SHORTCUT_KEY = 'reader-borderless-shortcut'
+  const HIDE_TITLEBAR_KEY = 'reader-hide-titlebar'
+  const TITLEBAR_SHORTCUT_KEY = 'reader-titlebar-shortcut'
   const NETWORK_PROXY_MODE_KEY = 'reader-network-proxy-mode'
   const NETWORK_PROXY_URL_KEY = 'reader-network-proxy-url'
   // ─── Theme ───
@@ -128,6 +139,79 @@ export const useAppStore = defineStore('app', () => {
       await applyBossKey().catch(() => undefined)
       throw error
     }
+  }
+
+  const savedTitlebarShortcut = localStorage.getItem(TITLEBAR_SHORTCUT_KEY)
+  const hideTitlebar = ref(localStorage.getItem(HIDE_TITLEBAR_KEY) === 'enabled')
+  const titlebarShortcut = ref(normalizeTitlebarShortcut(savedTitlebarShortcut))
+  if (savedTitlebarShortcut !== titlebarShortcut.value) {
+    localStorage.setItem(TITLEBAR_SHORTCUT_KEY, titlebarShortcut.value)
+  }
+
+  function setHideTitlebar(value: boolean) {
+    hideTitlebar.value = value
+    localStorage.setItem(HIDE_TITLEBAR_KEY, value ? 'enabled' : 'disabled')
+  }
+
+  function setTitlebarShortcut(value: string) {
+    titlebarShortcut.value = normalizeTitlebarShortcut(value)
+    localStorage.setItem(TITLEBAR_SHORTCUT_KEY, titlebarShortcut.value)
+  }
+
+  function resetTitlebarShortcut() {
+    setTitlebarShortcut(DEFAULT_TITLEBAR_SHORTCUT)
+  }
+
+  function toggleTitlebar() {
+    setHideTitlebar(!hideTitlebar.value)
+  }
+
+  // 无边框模式开启 = 关闭原生阴影。旧键曾保存“阴影是否开启”，只迁移一次。
+  const legacyWindowShadow = localStorage.getItem(LEGACY_WINDOW_SHADOW_KEY)
+  const savedBorderlessMode = localStorage.getItem(BORDERLESS_MODE_KEY)
+  const borderlessMode = ref(
+    savedBorderlessMode !== null
+      ? savedBorderlessMode === 'enabled'
+      : legacyWindowShadow === 'disabled',
+  )
+  if (savedBorderlessMode === null && legacyWindowShadow !== null) {
+    localStorage.setItem(BORDERLESS_MODE_KEY, borderlessMode.value ? 'enabled' : 'disabled')
+  }
+  const savedBorderlessShortcut = localStorage.getItem(BORDERLESS_SHORTCUT_KEY)
+  const borderlessShortcut = ref(normalizeBorderlessShortcut(savedBorderlessShortcut))
+  if (savedBorderlessShortcut !== borderlessShortcut.value) {
+    localStorage.setItem(BORDERLESS_SHORTCUT_KEY, borderlessShortcut.value)
+  }
+
+  async function applyWindowShadow() {
+    if (!isTauriRuntime()) return
+    await invokeRaw('set_window_shadow', { enabled: !borderlessMode.value })
+  }
+
+  async function setBorderlessMode(value: boolean) {
+    const previous = borderlessMode.value
+    borderlessMode.value = value
+    try {
+      await applyWindowShadow()
+      localStorage.setItem(BORDERLESS_MODE_KEY, value ? 'enabled' : 'disabled')
+    } catch (error) {
+      borderlessMode.value = previous
+      await applyWindowShadow().catch(() => undefined)
+      throw error
+    }
+  }
+
+  async function toggleBorderlessMode() {
+    await setBorderlessMode(!borderlessMode.value)
+  }
+
+  function setBorderlessShortcut(value: string) {
+    borderlessShortcut.value = normalizeBorderlessShortcut(value)
+    localStorage.setItem(BORDERLESS_SHORTCUT_KEY, borderlessShortcut.value)
+  }
+
+  function resetBorderlessShortcut() {
+    setBorderlessShortcut(DEFAULT_BORDERLESS_SHORTCUT)
   }
 
   // ─── Network proxy ───
@@ -652,6 +736,11 @@ export const useAppStore = defineStore('app', () => {
     closeToTray, setCloseToTray, toggleCloseToTray,
     legadoWebdavConfig, setLegadoWebdavConfig, legadoSyncEnabled, setLegadoSyncEnabled,
     bossKeyEnabled, bossKeyShortcut, applyBossKey, setBossKeyEnabled, setBossKeyShortcut,
+    borderlessMode, borderlessShortcut,
+    applyWindowShadow, setBorderlessMode, toggleBorderlessMode,
+    setBorderlessShortcut, resetBorderlessShortcut,
+    hideTitlebar, titlebarShortcut,
+    setHideTitlebar, setTitlebarShortcut, resetTitlebarShortcut, toggleTitlebar,
     networkProxyMode, networkProxyUrl, networkProxyStatus, applyNetworkProxy, setNetworkProxy,
     versionUpdate, versionUpdateLoading, desktopUpdateLoading, desktopUpdateProgress, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
     autoCheckUpdate, setAutoCheckUpdate, runStartupVersionCheck,

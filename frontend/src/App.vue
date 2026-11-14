@@ -4,6 +4,7 @@
     :class="{
       'has-custom-background': showCustomBackground,
       'mini-mode': appStore.miniMode,
+      'titlebar-hidden': appStore.hideTitlebar,
     }"
     :style="appShellStyle"
   >
@@ -16,7 +17,14 @@
     <!-- 标题栏只在桌面端渲染: 它整套是为无边框窗口服务的(拖动区、最小化/
          最大化/关闭、迷你模式)。浏览器里没有窗口可控制, 留着只会显示三个
          点了没反应的按钮, 还白占 30px 顶部空间。 -->
-    <TitleBar v-if="!appStore.isWebMode" :surface="titlebarSurface" />
+    <TitleBar v-if="!appStore.isWebMode && !appStore.hideTitlebar" :surface="titlebarSurface" />
+    <div
+      v-if="!appStore.isWebMode && appStore.hideTitlebar"
+      class="hidden-titlebar-drag"
+      data-tauri-drag-region
+      @dblclick="toggleHiddenTitlebarMaximize"
+      aria-hidden="true"
+    ></div>
     <div class="app-body">
       <AppTopBar v-if="showHeader" />
       <main class="app-main" :class="{ 'with-bottom-nav': showBottomNav, 'without-header': !showHeader }">
@@ -55,6 +63,7 @@
 import { computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useAppStore } from './stores/app'
 import { useReaderStore } from './stores/reader'
 import AppTopBar from './components/AppTopBar.vue'
@@ -71,6 +80,7 @@ import { resolveWindowClose } from './utils/windowClose'
 import { resolveShellBackgroundImage } from './utils/readerColor'
 import { resetFullscreenIntent, toggleAppFullscreen } from './composables/useAppFullscreen'
 import { resolveHotkeyAction, type HotkeyActionId } from './utils/readerHotkeys'
+import { matchesShortcut } from './utils/bossKey'
 
 const route = useRoute()
 const appStore = useAppStore()
@@ -106,9 +116,9 @@ const shellBackgroundImage = computed(() => {
   }, onReader)
 })
 const appShellStyle = computed(() => ({
-  background: route.name === 'reader'
-    ? readerStore.readerTheme.body
-    : 'var(--color-bg)',
+  // 阅读页自己的 CSS 背景层负责可见底色；外壳保持透明，才能让窗口
+  // 不透明度真正叠加到桌面，而不是叠在 html/body 的不透明底上。
+  background: route.name === 'reader' ? 'transparent' : 'var(--color-bg)',
 }))
 const customBackgroundStyle = computed(() => {
   // 透明度要跟着**实际铺出去的那张图**走: 铺的是阅读页专属图就用它的透明度,
@@ -116,12 +126,13 @@ const customBackgroundStyle = computed(() => {
   // (铺的是桌面图)也会误用阅读页专属图的透明度。
   const usingReaderImage = route.name === 'reader'
     && Boolean(readerStore.config.readerBackgroundImage)
+  const imageOpacity = usingReaderImage
+    ? readerStore.config.readerImageOpacity
+    : readerStore.config.backgroundOpacity
   return {
     // 图铺在外壳最底层(标题栏也在其中), 因此标题栏必须透明才能透出背景。
     backgroundImage: shellBackgroundImage.value ? `url("${shellBackgroundImage.value}")` : undefined,
-    opacity: usingReaderImage
-      ? readerStore.config.readerImageOpacity
-      : readerStore.config.backgroundOpacity,
+    opacity: imageOpacity,
   }
 })
 
@@ -130,9 +141,35 @@ const stopBackgroundClassSync = watch(showCustomBackground, (active) => {
   document.body.classList.toggle('custom-background-active', active)
 }, { immediate: true })
 
+const stopReaderTransparentClassSync = watch(
+  () => route.name === 'reader',
+  (onReader) => {
+    if (typeof document === 'undefined') return
+    document.documentElement.classList.toggle('reader-transparent-window', onReader)
+    document.body.classList.toggle('reader-transparent-window', onReader)
+  },
+  { immediate: true },
+)
+
+const stopTitlebarHeightSync = watch(
+  () => appStore.hideTitlebar,
+  (hidden) => {
+    if (typeof document === 'undefined') return
+    for (const element of [document.documentElement, document.body]) {
+      if (hidden) {
+        element.style.setProperty('--titlebar-height', '0px')
+      } else {
+        element.style.removeProperty('--titlebar-height')
+      }
+    }
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   void appStore.runStartupVersionCheck()
   void appStore.applyBossKey().catch(() => undefined)
+  void appStore.applyWindowShadow().catch(() => undefined)
   void appStore.applyNetworkProxy().catch(() => undefined)
   // 恢复上次保存的整窗不透明度。先问平台是否支持，再把值推给窗口 ——
   // 不支持时设置项不会渲染，也不会发无意义的 IPC。
@@ -144,8 +181,8 @@ onMounted(() => {
 })
 
 /** 窗口不透明度按页面取值：非阅读页用应用窗口的 `windowOpacity`，阅读页
- *  由「应用到阅读页」决定跟随应用值还是用自己的 `readerWindowOpacity`。
- *  这里监听路由而不是页面内组件，保证直接跳转/返回都能换成正确的档位。 */
+ *  使用自己的 `readerWindowOpacity`。这里监听路由，保证直接跳转/返回
+ *  都能换成正确的档位。 */
 watch(
   () => route.name,
   (name) => {
@@ -155,7 +192,57 @@ watch(
 
 let closeUnlisten: (() => void) | undefined
 let legadoUnlisten: (() => void) | undefined
+let windowShownUnlisten: (() => void) | undefined
 let handlingCloseRequest = false
+
+async function toggleHiddenTitlebarMaximize() {
+  if (!appStore.hideTitlebar) return
+  const window = getCurrentWindow()
+  if (await window.isMaximized()) {
+    await window.unmaximize()
+  } else {
+    await window.maximize()
+  }
+}
+
+function notifyTitlebarChange() {
+  appStore.showToast(
+    appStore.hideTitlebar ? '已隐藏标题栏' : '已显示标题栏',
+    'success',
+  )
+}
+
+function handleTitlebarShortcut(event: KeyboardEvent) {
+  if (appStore.isWebMode || !matchesShortcut(event, appStore.titlebarShortcut)) return
+  const target = event.target as HTMLElement | null
+  if (target?.closest('.boss-key-recorder')) return
+  if (target?.matches('input, textarea, select, [contenteditable="true"]')) return
+  event.preventDefault()
+  event.stopPropagation()
+  appStore.toggleTitlebar()
+  notifyTitlebarChange()
+}
+
+function notifyBorderlessChange() {
+  appStore.showToast(
+    appStore.borderlessMode ? '已进入无边框模式' : '已退出无边框模式',
+    'success',
+  )
+}
+
+function handleBorderlessShortcut(event: KeyboardEvent) {
+  if (appStore.isWebMode || !matchesShortcut(event, appStore.borderlessShortcut)) return
+  const target = event.target as HTMLElement | null
+  if (target?.closest('.boss-key-recorder')) return
+  if (target?.matches('input, textarea, select, [contenteditable="true"]')) return
+  event.preventDefault()
+  event.stopPropagation()
+  void appStore.toggleBorderlessMode()
+    .then(notifyBorderlessChange)
+    .catch((error) => {
+      appStore.showToast((error as Error).message || '无边框模式切换失败', 'error')
+    })
+}
 
 /**
  * 处理 `legado://` 一键导入。
@@ -184,6 +271,13 @@ onMounted(() => {
     void consumePendingLegadoDeepLink()
   }).then((un) => {
     legadoUnlisten = un
+  })
+  listen<unknown>('window-shown', () => {
+    // 老板键/托盘恢复后，按当前路由统一原生窗口状态；阅读页原生 alpha
+    // 始终为 1，背景透明度由 ReaderView 的 CSS 图层负责。
+    void readerStore.syncWindowOpacityForRoute(route.name === 'reader')
+  }).then((un) => {
+    windowShownUnlisten = un
   })
 })
 
@@ -271,16 +365,27 @@ function handleGlobalFullscreenKey(e: KeyboardEvent) {
 onMounted(() => {
   if (typeof window === 'undefined') return
   window.addEventListener('keydown', handleGlobalFullscreenKey)
+  window.addEventListener('keydown', handleTitlebarShortcut, true)
+  window.addEventListener('keydown', handleBorderlessShortcut, true)
 })
 
 onBeforeUnmount(() => {
   closeUnlisten?.()
   legadoUnlisten?.()
+  windowShownUnlisten?.()
   stopBackgroundClassSync()
-  window.removeEventListener('keydown', handleGlobalFullscreenKey)
+  stopReaderTransparentClassSync()
+  stopTitlebarHeightSync()
   if (typeof document !== 'undefined') {
-    document.body.classList.remove('custom-background-active')
+    document.documentElement.classList.remove('reader-transparent-window')
+    document.body.classList.remove('reader-transparent-window')
+    document.documentElement.style.removeProperty('--titlebar-height')
+    document.body.style.removeProperty('--titlebar-height')
   }
+  window.removeEventListener('keydown', handleGlobalFullscreenKey)
+  window.removeEventListener('keydown', handleTitlebarShortcut, true)
+  window.removeEventListener('keydown', handleBorderlessShortcut, true)
+  document.body.classList.remove('custom-background-active')
 })
 </script>
 
@@ -291,6 +396,17 @@ body {
   overflow: hidden;
 }
 
+html.reader-transparent-window,
+body.reader-transparent-window,
+body.reader-transparent-window #app {
+  background-color: transparent !important;
+}
+
+html.reader-transparent-window body,
+html.reader-transparent-window body #app {
+  background-color: transparent !important;
+}
+
 .app-shell {
   height: var(--app-height, 100dvh);
   overflow: hidden;
@@ -298,6 +414,20 @@ body {
   flex-direction: column;
   position: relative;
   transition: background var(--duration-normal);
+}
+
+.app-shell.titlebar-hidden {
+  --titlebar-height: 0px;
+}
+
+.hidden-titlebar-drag {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 10px;
+  z-index: calc(var(--z-modal) + 19);
+  background: transparent;
 }
 
 .app-custom-background {

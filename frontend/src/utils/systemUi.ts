@@ -19,24 +19,29 @@ function upsertMeta(name: string, content: string, media?: string) {
   return meta
 }
 
-export function applySystemTheme(mode: SystemThemeMode, themeColor?: string) {
+export function applySystemTheme(
+  mode: SystemThemeMode,
+  themeColor?: string,
+  options: { transparentBackground?: boolean } = {},
+) {
   if (typeof document === 'undefined') return
 
   const resolvedThemeColor = themeColor || (mode === 'dark' ? '#141414' : '#faf9f7')
+  const background = options.transparentBackground ? 'transparent' : resolvedThemeColor
   const root = document.documentElement
   const app = document.getElementById('app')
 
   root.setAttribute('data-theme', mode)
   root.style.setProperty('color-scheme', mode)
   root.style.colorScheme = mode
-  root.style.background = resolvedThemeColor
-  root.style.backgroundColor = resolvedThemeColor
-  document.body.style.background = resolvedThemeColor
-  document.body.style.backgroundColor = resolvedThemeColor
+  root.style.background = background
+  root.style.backgroundColor = background
+  document.body.style.background = background
+  document.body.style.backgroundColor = background
   document.body.style.colorScheme = mode
   if (app) {
-    app.style.background = resolvedThemeColor
-    app.style.backgroundColor = resolvedThemeColor
+    app.style.background = background
+    app.style.backgroundColor = background
     app.style.colorScheme = mode
   }
 

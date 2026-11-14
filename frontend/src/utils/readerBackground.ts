@@ -24,12 +24,14 @@ export const DEFAULT_READER_PANEL_OPACITY = 1
  *  设置面板的滑块只跑这一段（50%-100%），拖到最左就是这一档。 */
 export const READER_PANEL_OPACITY_MIN = 0.5
 
-/** 整窗不透明度下限: 再低正文与控件会淡到难以阅读。
- *  必须与 Rust 侧 `WINDOW_OPACITY_MIN` 保持一致。 */
-export const READER_WINDOW_OPACITY_MIN = 0.1
+/** 阅读页背景不透明度下限。0 表示完全透明，只保留正文与控件。 */
+export const READER_WINDOW_OPACITY_MIN = 0
 
 /** 整窗不透明度默认值: 1 = 不透明，保持旧版观感。 */
 export const DEFAULT_READER_WINDOW_OPACITY = 1
+
+/** 正文文字不透明度默认值: 1 = 主题文字原色，保持旧版观感。 */
+export const DEFAULT_READER_TEXT_OPACITY = 1
 
 /** 透明度滑块的步长(1%)。旧版是 5%, 用户反馈太粗。 */
 export const READER_BACKGROUND_OPACITY_STEP = 0.01
@@ -49,13 +51,26 @@ export function normalizeReaderPanelOpacity(value: unknown): number {
   return Math.max(READER_PANEL_OPACITY_MIN, Math.min(1, numeric))
 }
 
-/** 整窗不透明度归一化。非法值回落 1(不透明)，有效值钳到 [0.3, 1]。
- *  下限与 Rust 侧 `normalize_window_opacity` 相同，避免前端允许拖动到
- *  原生窗口命令又把它夹回去造成的“滑块与画面不同步”。 */
+/** 阅读页背景不透明度归一化。非法值回落 1(不透明)，有效值钳到 [0, 1]。 */
 export function normalizeReaderWindowOpacity(value: unknown): number {
   const numeric = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(numeric)) return DEFAULT_READER_WINDOW_OPACITY
   return Math.max(READER_WINDOW_OPACITY_MIN, Math.min(1, numeric))
+}
+
+/** 正文文字不透明度归一化。
+ *  允许到 0：用户可能只想让背景图透出来，不显示文字（例如临时遮住正文）。
+ *  非法输入回落 1，避免旧存档缺字段时文字突然变淡。 */
+export function normalizeReaderTextOpacity(value: unknown): number {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric)) return DEFAULT_READER_TEXT_OPACITY
+  return Math.max(0, Math.min(1, numeric))
+}
+
+/** 生成阅读页标题栏/正文底板共用的半透明背景。 */
+export function readerWindowBackground(color: string, opacity: unknown): string {
+  const percent = Math.round(normalizeReaderWindowOpacity(opacity) * 100)
+  return `color-mix(in srgb, ${color} ${percent}%, transparent)`
 }
 
 /** 存储值(0~1) → 界面上的百分比整数。 */

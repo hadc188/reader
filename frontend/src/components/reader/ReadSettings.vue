@@ -167,100 +167,126 @@
             </div>
           </div>
 
-          <div class="setting-row">
-            <label>面板不透明度</label>
-            <div class="range-field">
-              <!-- 滑块只在有效区间里跑：最左 = 下限(50%)，填充为空；往右到 100% 填满。
-                   这样「拖柄位置 = 填充比例 = 右侧数字在区间里的位置」三者永远一致，
-                   也不会出现「最左端还留着一截实体进度」的错觉。 -->
-              <div
-                class="range-track"
-                :style="{ '--fill': panelOpacityPercent + '%' }"
-                :title="`最低 ${panelOpacityFloorPercent}%，再低抽屉里的文字会透出正文`"
-              >
-                <input
-                  class="settings-slider"
-                  type="range"
-                  :min="panelOpacityFloorPercent"
-                  max="100"
-                  step="1"
-                  aria-label="面板不透明度"
-                  :value="readerOpacityToPercent(config.panelOpacity)"
-                  @input="updatePanelOpacityPercent(($event.target as HTMLInputElement).value)"
-                >
+          <details class="opacity-disclosure">
+            <summary>
+              <span>透明度</span>
+              <span class="opacity-disclosure-note">面板单独调节</span>
+            </summary>
+            <div class="opacity-disclosure-body">
+              <div class="setting-row">
+                <label>文字不透明度</label>
+                <div class="range-field">
+                  <div class="range-track" :style="{ '--fill': readerTextOpacityPercent + '%' }">
+                    <input
+                      class="settings-slider"
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      aria-label="文字不透明度"
+                      :value="readerOpacityToPercent(config.readerTextOpacity)"
+                      @input="updateReaderTextOpacityPercent(($event.target as HTMLInputElement).value)"
+                    >
+                  </div>
+                  <label class="range-value">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      :value="readerOpacityToPercent(config.readerTextOpacity)"
+                      @change="applyReaderTextOpacityPercent(($event.target as HTMLInputElement).value, $event.target as HTMLInputElement)"
+                    >
+                    <span>%</span>
+                  </label>
+                  <button
+                    class="link-btn reset-solid"
+                    :disabled="config.readerTextOpacity >= 1"
+                    title="把正文文字恢复为实色（100%）"
+                    @click="resetReaderTextOpacity"
+                  >实色</button>
+                </div>
               </div>
-              <label class="range-value">
-                <input
-                  type="number"
-                  :min="panelOpacityFloorPercent"
-                  max="100"
-                  step="1"
-                  :value="readerOpacityToPercent(config.panelOpacity)"
-                  @change="applyPanelOpacityPercent(($event.target as HTMLInputElement).value, $event.target as HTMLInputElement)"
-                >
-                <span>%</span>
-              </label>
-              <!-- 常驻而非 v-if：半透明时才出现的按钮会把滑块挤短一截，
-                   拖动过程中数值跨过 100% 时轨道宽度跳变，看起来就是"进度条长短在闪"。 -->
-              <button
-                class="link-btn reset-solid"
-                :disabled="config.panelOpacity >= 1"
-                title="把面板恢复为实色（100%）"
-                @click="resetPanelOpacity"
-              >实色</button>
-            </div>
-          </div>
 
-          <!-- 整窗不透明度：只对桌面壳生效（Windows）。Web 模式没有窗口可调，
-               直接不渲染这一行。
-
-               语义由桌面设置里的「应用到阅读页」唯一决定：
-               - 开启时阅读页跟随应用窗口，这里只读显示共享值；
-               - 关闭时阅读页用自己的 `readerWindowOpacity`，可独立调整。 -->
-          <div v-if="!appStore.isWebMode && store.windowOpacitySupported" class="setting-row">
-            <label>窗口不透明度</label>
-            <div class="range-field">
-              <div
-                class="range-track"
-                :style="{ '--fill': windowOpacityPercent + '%' }"
-                :title="config.applyWindowOpacityToReader
-                  ? '当前跟随「设置 → 外观 → 窗口透明度」，可在那里统一调整'
-                  : `最低 ${windowOpacityFloorPercent}%，再低正文会淡到难以阅读`"
-              >
-                <input
-                  class="settings-slider"
-                  type="range"
-                  :min="windowOpacityFloorPercent"
-                  max="100"
-                  step="1"
-                  aria-label="窗口不透明度"
-                  :disabled="config.applyWindowOpacityToReader"
-                  :value="readerOpacityToPercent(readerWindowOpacityValue)"
-                  @input="updateWindowOpacityPercent(($event.target as HTMLInputElement).value)"
-                >
+              <div class="setting-row">
+                <label>面板不透明度</label>
+                <div class="range-field">
+                  <div
+                    class="range-track"
+                    :style="{ '--fill': panelOpacityPercent + '%' }"
+                    :title="`最低 ${panelOpacityFloorPercent}%，再低抽屉里的文字会透出正文`"
+                  >
+                    <input
+                      class="settings-slider"
+                      type="range"
+                      :min="panelOpacityFloorPercent"
+                      max="100"
+                      step="1"
+                      aria-label="面板不透明度"
+                      :value="readerOpacityToPercent(config.panelOpacity)"
+                      @input="updatePanelOpacityPercent(($event.target as HTMLInputElement).value)"
+                    >
+                  </div>
+                  <label class="range-value">
+                    <input
+                      type="number"
+                      :min="panelOpacityFloorPercent"
+                      max="100"
+                      step="1"
+                      :value="readerOpacityToPercent(config.panelOpacity)"
+                      @change="applyPanelOpacityPercent(($event.target as HTMLInputElement).value, $event.target as HTMLInputElement)"
+                    >
+                    <span>%</span>
+                  </label>
+                  <button
+                    class="link-btn reset-solid"
+                    :disabled="config.panelOpacity >= 1"
+                    title="把面板恢复为实色（100%）"
+                    @click="resetPanelOpacity"
+                  >实色</button>
+                </div>
               </div>
-              <label class="range-value">
-                <input
-                  type="number"
-                  :min="windowOpacityFloorPercent"
-                  max="100"
-                  step="1"
-                  :disabled="config.applyWindowOpacityToReader"
-                  :value="readerOpacityToPercent(readerWindowOpacityValue)"
-                  @change="applyWindowOpacityPercent(($event.target as HTMLInputElement).value, $event.target as HTMLInputElement)"
-                >
-                <span>%</span>
-              </label>
-              <button
-                class="link-btn reset-solid"
-                :disabled="config.applyWindowOpacityToReader || config.readerWindowOpacity >= 1"
-                :title="config.applyWindowOpacityToReader
-                  ? '请先在「设置 → 外观」里关闭「应用到阅读页」'
-                  : '把阅读页窗口恢复为不透明（100%）'"
-                @click="resetWindowOpacity"
-              >实色</button>
+
+              <div v-if="!appStore.isWebMode && store.windowOpacitySupported" class="setting-row">
+                <label>背景不透明度</label>
+                <div class="range-field">
+                  <div
+                    class="range-track"
+                    :style="{ '--fill': readerWindowOpacityPercent + '%' }"
+                    :title="`最低 ${windowOpacityFloorPercent}%，只影响窗口背景，不影响文字`"
+                  >
+                    <input
+                      class="settings-slider"
+                      type="range"
+                      :min="windowOpacityFloorPercent"
+                      max="100"
+                      step="1"
+                      aria-label="背景不透明度"
+                      :value="readerOpacityToPercent(config.readerWindowOpacity)"
+                      @input="updateReaderWindowOpacityPercent(($event.target as HTMLInputElement).value)"
+                    >
+                  </div>
+                  <label class="range-value">
+                    <input
+                      type="number"
+                      :min="windowOpacityFloorPercent"
+                      max="100"
+                      step="1"
+                      :value="readerOpacityToPercent(config.readerWindowOpacity)"
+                      @change="applyReaderWindowOpacityPercent(($event.target as HTMLInputElement).value, $event.target as HTMLInputElement)"
+                    >
+                    <span>%</span>
+                  </label>
+                  <button
+                    class="link-btn reset-solid"
+                    :disabled="config.readerWindowOpacity >= 1"
+                    title="把阅读页背景恢复为不透明（100%）"
+                    @click="resetReaderWindowOpacity"
+                  >实色</button>
+                </div>
+              </div>
             </div>
-          </div>
+          </details>
         </div>
       </div>
 
@@ -1462,11 +1488,13 @@ import {
 } from '../../stores/reader'
 import {
   DEFAULT_READER_PANEL_OPACITY,
+  DEFAULT_READER_TEXT_OPACITY,
   DEFAULT_READER_WINDOW_OPACITY,
   READER_BACKGROUND_OPACITY_STEP,
   READER_PANEL_OPACITY_MIN,
   READER_WINDOW_OPACITY_MIN,
   normalizeReaderPanelOpacity,
+  normalizeReaderTextOpacity,
   normalizeReaderWindowOpacity,
   percentToReaderOpacity,
   prepareReaderBackgroundImage,
@@ -1557,6 +1585,7 @@ const pageWidthPercent = computed(() => rangePercent(config.value.pageWidth, REA
 const pageVerticalPercent = computed(() => rangePercent(config.value.pageVerticalPadding, 0, READER_PAGE_VERTICAL_PADDING_MAX))
 const animateDurationPercent = computed(() => rangePercent(config.value.animateDuration, 0, 1000))
 const readerImageOpacityPercent = computed(() => readerOpacityToPercent(config.value.readerImageOpacity))
+const readerTextOpacityPercent = computed(() => readerOpacityToPercent(config.value.readerTextOpacity))
 /** 面板不透明度的有效下限（百分比整数），滑块的 min 就是它。 */
 const panelOpacityFloorPercent = computed(() => Math.round(READER_PANEL_OPACITY_MIN * 100))
 
@@ -1571,17 +1600,9 @@ const panelOpacityPercent = computed(() => rangePercent(
 /** 整窗不透明度下限（百分比整数），与 Rust 侧下限保持一致。 */
 const windowOpacityFloorPercent = computed(() => Math.round(READER_WINDOW_OPACITY_MIN * 100))
 
-/** 阅读页滑块当前代表的值：跟随应用窗口时显示共享值，否则显示阅读页自己的值。
- *  这样开关打开时滑块停在"实际生效的那个数"上，不会突然跳到另一个历史值。 */
-const readerWindowOpacityValue = computed(() => (
-  config.value.applyWindowOpacityToReader
-    ? config.value.windowOpacity
-    : config.value.readerWindowOpacity
-))
-
 /** 滑块填充按 [下限, 100] 归一，理由同面板不透明度。 */
-const windowOpacityPercent = computed(() => rangePercent(
-  readerOpacityToPercent(readerWindowOpacityValue.value),
+const readerWindowOpacityPercent = computed(() => rangePercent(
+  readerOpacityToPercent(config.value.readerWindowOpacity),
   windowOpacityFloorPercent.value,
   100,
 ))
@@ -1690,24 +1711,38 @@ function resetPanelOpacity() {
   store.updateConfig('panelOpacity', DEFAULT_READER_PANEL_OPACITY)
 }
 
-/** 拖动整窗不透明度：把区间内的百分比换算回 0-1 存储。 */
-function updateWindowOpacityPercent(raw: string) {
+function updateReaderTextOpacityPercent(raw: string) {
   const percent = Number(raw)
   if (!Number.isFinite(percent)) return
-  // 跟随模式下滑块是禁用的，这里只是兜底：真被拖动也不该改到应用级共享值。
-  if (config.value.applyWindowOpacityToReader) return
+  store.updateConfig('readerTextOpacity', normalizeReaderTextOpacity(percent / 100))
+}
+
+function applyReaderTextOpacityPercent(raw: string, input: HTMLInputElement) {
+  const parsed = percentToReaderOpacity(raw)
+  if (parsed === null) {
+    syncOpacityInput(input, store.config.readerTextOpacity)
+    return
+  }
+  const next = normalizeReaderTextOpacity(parsed)
+  store.updateConfig('readerTextOpacity', next)
+  syncOpacityInput(input, next)
+}
+
+function resetReaderTextOpacity() {
+  store.updateConfig('readerTextOpacity', DEFAULT_READER_TEXT_OPACITY)
+}
+
+/** 阅读页背景不透明度：只写 readerWindowOpacity，不再联动应用级窗口值。 */
+function updateReaderWindowOpacityPercent(raw: string) {
+  const percent = Number(raw)
+  if (!Number.isFinite(percent)) return
   store.updateConfig('readerWindowOpacity', normalizeReaderWindowOpacity(percent / 100))
 }
 
-/** 数字框输入整窗不透明度：非数字保持原值，越界夹到合法区间。 */
-function applyWindowOpacityPercent(raw: string, input: HTMLInputElement) {
+function applyReaderWindowOpacityPercent(raw: string, input: HTMLInputElement) {
   const parsed = percentToReaderOpacity(raw)
   if (parsed === null) {
-    syncOpacityInput(input, readerWindowOpacityValue.value)
-    return
-  }
-  if (config.value.applyWindowOpacityToReader) {
-    syncOpacityInput(input, readerWindowOpacityValue.value)
+    syncOpacityInput(input, store.config.readerWindowOpacity)
     return
   }
   const next = normalizeReaderWindowOpacity(parsed)
@@ -1715,8 +1750,7 @@ function applyWindowOpacityPercent(raw: string, input: HTMLInputElement) {
   syncOpacityInput(input, next)
 }
 
-function resetWindowOpacity() {
-  if (config.value.applyWindowOpacityToReader) return
+function resetReaderWindowOpacity() {
   store.updateConfig('readerWindowOpacity', DEFAULT_READER_WINDOW_OPACITY)
 }
 
@@ -2506,6 +2540,61 @@ onMounted(async () => {
   border-radius: var(--sk-radius);
   background: var(--sk-card-bg);
   border: 1px solid var(--sk-card-border);
+}
+
+/* 透明度是一组低频外观参数，默认折叠，避免正文设置面板被三条滑块拉长。 */
+.opacity-disclosure {
+  border-top: 1px solid var(--sk-line);
+}
+
+.opacity-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 46px;
+  padding: 6px 0;
+  color: var(--sk-label);
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.opacity-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.opacity-disclosure > summary::after {
+  content: '展开';
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 5px 10px;
+  border: 1px solid var(--sk-line);
+  border-radius: 999px;
+  background: var(--settings-field-bg);
+  color: var(--sk-muted);
+  font-size: 11px;
+  line-height: 1;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.opacity-disclosure > summary:hover::after {
+  border-color: var(--sk-line-strong);
+  background: var(--settings-field-bg-hover);
+  color: var(--settings-font, currentColor);
+}
+
+.opacity-disclosure[open] > summary::after {
+  content: '收起';
+}
+
+.opacity-disclosure-note {
+  color: var(--sk-muted);
+  font-size: 11px;
+}
+
+.opacity-disclosure-body {
+  padding-bottom: 3px;
 }
 
 /* ─── 行：96px 标签列 + 控件列，全面板只有一条文本竖线 ─── */
@@ -3777,6 +3866,15 @@ onMounted(async () => {
 
   .group-card {
     padding: 2px 12px;
+  }
+
+  .opacity-disclosure > summary {
+    align-items: center;
+    min-height: 42px;
+  }
+
+  .opacity-disclosure-note {
+    display: none;
   }
 
   .http-tts-picker,

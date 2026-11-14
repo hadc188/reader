@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::app::window_state::{
@@ -103,11 +103,45 @@ pub fn reapply_window_opacity(window: &tauri::WebviewWindow) {
     let _ = apply_window_opacity(window, opacity);
 }
 
+/// 统一显示主窗口的入口。
+///
+/// 老板键、托盘和单实例唤起都走这里，确保每次都重放整窗透明度并取消最小化；
+/// 只调用 `show()` 会让部分显示路径看起来正常、老板键恢复时却丢失透明度。
+pub fn show_main_window(window: &tauri::WebviewWindow) {
+    reapply_window_opacity(window);
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    // show 之后再重放一次：WebView/分层窗口在首次显示时会重建合成层，
+    // 只在 show 前设置，隐藏后恢复仍有概率退回不透明。
+    let window_after_show = window.clone();
+    let app_handle = window.app_handle().clone();
+    let _ = window.app_handle().run_on_main_thread(move || {
+        reapply_window_opacity(&window_after_show);
+        // 原生 alpha 已经重放后再通知前端，避免前端过早把它改回 100%。
+        let _ = app_handle.emit("window-shown", ());
+    });
+}
+
 /// 当前平台是否支持整窗不透明度。前端据此决定是否展示设置项，
 /// 避免 macOS/Linux 上出现一个拖了没反应的滑块。
 #[tauri::command]
 pub fn is_window_opacity_supported() -> bool {
     cfg!(target_os = "windows")
+}
+
+/// 切换主窗口的原生阴影。
+///
+/// 只调用 Tauri 的 shadow 开关，不改窗口边框、缩放样式或 DWM 非客户区。
+/// 这样关闭阴影时仍是当前验证过的无边框形态。
+#[tauri::command]
+pub fn set_window_shadow(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    window
+        .set_shadow(enabled)
+        .map_err(|error| format!("设置窗口阴影失败：{error}"))
 }
 
 /// 本轮关闭请求是否已被前端接管。
@@ -290,10 +324,16 @@ pub fn configure_boss_key(
             if let Some(window) = app.get_webview_window("main") {
                 if window.is_visible().unwrap_or(false) {
                     let _ = window.hide();
-                } else {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                    return;
                 }
+                // 全局快捷键回调可能不在 Tauri 主线程上，Windows 的 show /
+                // 分层窗口调用必须回到主线程，否则偶发显示但样式未恢复。
+                let app_handle = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        show_main_window(&window);
+                    }
+                });
             }
         })
         .map_err(|error| format!("快捷键注册失败：{error}"))

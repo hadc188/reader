@@ -257,6 +257,26 @@ export function hotkeyIdFromEvent(event: {
   return withModifiers(base, event)
 }
 
+/** 单按 Alt 或 F10 是否应该阻止浏览器的系统菜单默认行为。
+ *
+ *  Windows/WebView 里两者都会短暂把焦点交给系统菜单；阅读页没有菜单，
+ *  这会让随后的滚动/翻页输入被吞掉。Alt+E 这类组合不属于单按，仍放行给
+ *  桌面老板键和普通快捷键。 */
+export function shouldPreventSystemMenuKey(event: {
+  key: string
+  ctrlKey?: boolean
+  metaKey?: boolean
+  altKey?: boolean
+  shiftKey?: boolean
+  repeat?: boolean
+}): boolean {
+  return (event.key === 'Alt' || event.key === 'F10')
+    && !event.ctrlKey
+    && !event.metaKey
+    && !event.shiftKey
+    && !event.repeat
+}
+
 /* ─── 鼠标键位 ───
  *  左键(button 0)与右键(button 2)刻意不参与: 它们是点击翻页、呼出控件与
  *  自定义右键菜单的载体, 绑成快捷键会把日常操作全劫持掉。

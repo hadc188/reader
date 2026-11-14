@@ -22,6 +22,7 @@ import {
   normalizeHotkeyBindings,
   resolveHotkeyAction,
   setHotkeyCaptureActive,
+  shouldPreventSystemMenuKey,
   unbindActionFromKey,
   type HotkeyBindings,
 } from './readerHotkeys'
@@ -254,6 +255,20 @@ describe('hotkeyIdFromEvent', () => {
 
   it('lower-cases single characters so Shift does not create a second binding', () => {
     expect(hotkeyIdFromEvent({ key: 'K', shiftKey: true })).toBe('Shift+k')
+  })
+})
+
+describe('system menu key guard', () => {
+  it('prevents the bare Alt and F10 system menus in the reader', () => {
+    expect(shouldPreventSystemMenuKey({ key: 'Alt' })).toBe(true)
+    expect(shouldPreventSystemMenuKey({ key: 'F10' })).toBe(true)
+  })
+
+  it('leaves key combinations available for boss key and hotkeys', () => {
+    expect(shouldPreventSystemMenuKey({ key: 'e', altKey: true })).toBe(false)
+    expect(shouldPreventSystemMenuKey({ key: 'Alt', altKey: true, ctrlKey: true })).toBe(false)
+    expect(shouldPreventSystemMenuKey({ key: 'F10', shiftKey: true })).toBe(false)
+    expect(shouldPreventSystemMenuKey({ key: 'F10', ctrlKey: true })).toBe(false)
   })
 })
 

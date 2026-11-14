@@ -3,20 +3,21 @@
     class="reader-view"
     :class="{ 'disable-system-callout': disableSystemCallout }"
     :style="{
-      background: shellPaintsBackground ? 'transparent' : theme.body,
-      color: theme.fontColor,
+      background: readerWindowBackground,
+      color: effectiveFontColor,
       colorScheme: readerColorScheme,
       fontFamily: currentFontFamily,
       '--color-primary': '#c97f3a',
       '--reader-selection-bg': theme.fontColor,
       '--reader-selection-color': selectionTextColor,
+      '--reader-text-opacity': String(effectiveTextOpacity),
+      '--reader-text-color': effectiveFontColor,
     }"
     @click="handleBackgroundClick"
     @pointermove="handleReaderPointerMove"
     @pointerleave="handleReaderPointerLeave"
     @contextmenu.prevent="handleContextMenu"
   >
-
     <!-- 章节加载阶段：Teleport 到 body，避免被阅读容器的层叠/定位影响 -->
     <Teleport to="body">
       <Transition name="fade">
@@ -475,6 +476,7 @@ import { shouldPreferServerReadingPosition, toMillis, type ReadingPositionSnapsh
 import { isLocalBook, isLocalEpubBook } from '../utils/localBook'
 import { PDF_PAGE_ATTR, isPdfBook, releasePdfBook, renderPdfChapterPages } from '../utils/pdfPages'
 import { rewriteCssAssetUrls, toReaderAssetUrl } from '../utils/localEpubAsset'
+import { readerWindowBackground as composeReaderWindowBackground } from '../utils/readerBackground'
 import { processSourceImageOptions, reserveImageSpace } from '../utils/sourceImageOptions'
 import { repairSourceImageHtml } from '../utils/sourceImageHtml'
 import { handleReaderFontSizeWheel } from '../utils/readerFontSize'
@@ -504,6 +506,7 @@ import {
   isPointerHotkeyBlocked,
   mouseButtonHotkeyAction as resolveMouseButtonHotkeyAction,
   resolveHotkeyAction,
+  shouldPreventSystemMenuKey,
   type HotkeyActionId,
 } from '../utils/readerHotkeys'
 import type { Book } from '../types'
@@ -581,6 +584,11 @@ const loadStageText = computed(() => {
   }
 })
 const theme = computed(() => store.readerTheme)
+const effectiveFontColor = computed(() => theme.value.fontColor)
+const effectiveTextOpacity = computed(() => config.value.readerTextOpacity)
+const readerWindowBackground = computed(() => (
+  composeReaderWindowBackground(theme.value.body, config.value.readerWindowOpacity)
+))
 /** 选区背景固定为正文色，文字按背景亮度取黑/白，避免浅色主题下文字发灰看不清。 */
 const selectionTextColor = computed(() => {
   const hex = theme.value.fontColor.replace('#', '')
@@ -3669,6 +3677,11 @@ function isKeyboardHotkeyBlocked(): boolean {
 
 function handleKeydown(e: KeyboardEvent) {
   const keyId = hotkeyIdFromEvent(e)
+  // 用户自定义绑定的 F10 组合键优先；裸 Alt/F10 没有绑定动作时才阻止系统菜单。
+  if (shouldPreventSystemMenuKey(e) && (!keyId || !store.hotkeyBindings[keyId]?.length)) {
+    e.preventDefault()
+    return
+  }
   if (!keyId) return
   // 「返回」不受输入框限制。搜索面板一打开就把焦点放进输入框, 若连 Esc 也拦掉,
   // 用户在搜索框里按 Esc 会毫无反应(面板关不掉, 也退不出阅读页), 只能先用鼠标
@@ -4065,7 +4078,11 @@ onMounted(async () => {
       },
     )
     store.fetchVoices()
-  applySystemTheme(store.isNight ? 'dark' : appStore.theme, store.currentTheme.body)
+  applySystemTheme(
+    store.isNight ? 'dark' : appStore.theme,
+    store.currentTheme.body,
+    { transparentBackground: true },
+  )
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     window.speechSynthesis.onvoiceschanged = () => store.fetchVoices()
   }
@@ -4144,7 +4161,7 @@ onUnmounted(() => {
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     window.speechSynthesis.onvoiceschanged = null
   }
-  applySystemTheme(appStore.theme)
+  applySystemTheme(appStore.theme, undefined, { transparentBackground: true })
   store.closePanel()
   // 工具栏可见性是持久化的 store 状态: 不清掉的话, 在「工具栏已呼出」的状态下
   // 退出阅读页, 下次进来工具栏会默认展开, 而不是干净的全屏阅读态。
@@ -4383,7 +4400,7 @@ watch(() => store.isSpeaking, (speaking) => {
 watch(
   [() => store.isNight, () => store.currentTheme.body, () => appStore.theme],
   ([isNight, body]) => {
-    applySystemTheme(isNight ? 'dark' : appStore.theme, body)
+    applySystemTheme(isNight ? 'dark' : appStore.theme, body, { transparentBackground: true })
   },
   { immediate: true },
 )
@@ -4396,6 +4413,7 @@ watch(
   display: flex;
   position: relative;
   overflow: hidden;
+  isolation: isolate;
   transition: background 0.3s, color 0.3s;
   padding-top: var(--safe-area-top);
   box-sizing: border-box;
@@ -4798,6 +4816,13 @@ watch(
 }
 
 .chapter-text {
+  /* 透明度只作用于文字色，图片与布局不受影响。子元素统一继承这个合成色，
+     避免正文里的 span/strong 仍用实色。 */
+  color: color-mix(
+    in srgb,
+    var(--reader-text-color) calc(var(--reader-text-opacity, 1) * 100%),
+    transparent
+  );
   word-break: normal;
   overflow-wrap: anywhere;
   text-align: justify;

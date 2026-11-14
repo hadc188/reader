@@ -26,9 +26,11 @@ import { saveRecentReadBook } from '../utils/recentBooks'
 import {
   DEFAULT_READER_BACKGROUND_OPACITY,
   DEFAULT_READER_PANEL_OPACITY,
+  DEFAULT_READER_TEXT_OPACITY,
   DEFAULT_READER_WINDOW_OPACITY,
   normalizeReaderBackgroundOpacity,
   normalizeReaderPanelOpacity,
+  normalizeReaderTextOpacity,
   normalizeReaderWindowOpacity,
 } from '../utils/readerBackground'
 import { normalizeReaderColor } from '../utils/readerColor'
@@ -165,19 +167,24 @@ export interface ReadConfig {
   readerBackgroundImage: string
   /** 阅读页背景图透明度。 */
   readerImageOpacity: number
+  /** 正文文字不透明度, 与整窗透明度/背景图透明度彼此独立。
+   *  1 为主题文字原色, 0 为完全透明。只影响正文文字, 不改变底图与窗口 alpha。 */
+  readerTextOpacity: number
+  /** 迷你模式专用正文颜色；空串表示沿用 readerTheme.fontColor。 */
+  miniFontColor: string
+  /** 迷你模式专用正文文字不透明度；跟随模式下取 readerTextOpacity。 */
+  miniTextOpacity: number | null
   /** 阅读页浮层（目录/书签/设置抽屉、右键菜单等）的底板不透明度, 1 为实色。
    *  阅读页铺了背景图时, 半透明底板能让用户边调设置边看到正文变化。 */
   panelOpacity: number
   /** 应用窗口整体不透明度, 1 为实色。仅 Windows 桌面端生效: 通过分层窗口
    *  让整个应用窗口透出桌面, 与背景图透明度/面板不透明度是三个独立维度。 */
   windowOpacity: number
-  /** 阅读页专属的窗口不透明度。
-   *  只在 `applyWindowOpacityToReader` 关闭时生效 —— 那时窗口有两套值：
-   *  应用窗口用 `windowOpacity`，阅读页用这个；开启时阅读页直接跟随
-   *  `windowOpacity`，这份值保留但不参与渲染（关掉开关能立刻回到原样）。 */
+  /** 阅读页专属的背景不透明度。
+   *  阅读页通过透明 WebView2 上的 CSS 半透明层实现，文字与面板不受影响。
+   *  应用其它页面仍使用原生整窗 `windowOpacity`。 */
   readerWindowOpacity: number
-  /** 是否让阅读页沿用应用窗口的不透明度（与背景图的 `applyBackgroundToReader`
-   *  同一套语义）。开启时阅读页与应用窗口完全一致；关闭时两者各用各的值。 */
+  /** 旧存档字段。保留读取以兼容历史配置，当前不再参与阅读页渲染。 */
   applyWindowOpacityToReader: boolean
 }
 
@@ -210,6 +217,9 @@ const defaultConfig: ReadConfig = {
   readerBackgroundColor: '',
   readerBackgroundImage: '',
   readerImageOpacity: DEFAULT_READER_BACKGROUND_OPACITY,
+  readerTextOpacity: DEFAULT_READER_TEXT_OPACITY,
+  miniFontColor: '',
+  miniTextOpacity: null,
   panelOpacity: DEFAULT_READER_PANEL_OPACITY,
   windowOpacity: DEFAULT_READER_WINDOW_OPACITY,
   readerWindowOpacity: DEFAULT_READER_WINDOW_OPACITY,
@@ -312,6 +322,11 @@ function loadConfig(): ReadConfig {
         readerBackgroundImage: localStorage.getItem(READER_PAGE_BACKGROUND_IMAGE_KEY)
           || (typeof savedConfig.readerBackgroundImage === 'string' ? savedConfig.readerBackgroundImage : ''),
         readerImageOpacity: normalizeReaderBackgroundOpacity(savedConfig.readerImageOpacity),
+        readerTextOpacity: normalizeReaderTextOpacity(savedConfig.readerTextOpacity),
+        miniFontColor: normalizeReaderColor(savedConfig.miniFontColor),
+        miniTextOpacity: typeof savedConfig.miniTextOpacity === 'number'
+          ? normalizeReaderTextOpacity(savedConfig.miniTextOpacity)
+          : null,
         panelOpacity: normalizeReaderPanelOpacity(savedConfig.panelOpacity),
         windowOpacity: normalizeReaderWindowOpacity(savedConfig.windowOpacity),
         readerWindowOpacity: normalizeReaderWindowOpacity(savedConfig.readerWindowOpacity),
@@ -897,8 +912,8 @@ export const useReaderStore = defineStore('reader', () => {
     }
   }
 
-  /** 最近一次同步时是否在阅读页。切换「应用到阅读页」开关时要用它重算，
-   *  否则在阅读页里关掉开关不会立刻生效。 */
+  /** 最近一次同步时是否在阅读页。阅读页需要把原生窗口恢复为不透明，
+   *  其余页面继续使用应用级窗口透明度。 */
   let lastSyncOnReader = false
 
   /**
@@ -908,32 +923,19 @@ export const useReaderStore = defineStore('reader', () => {
    * 非 Windows 平台由 capability 查询提前排除。失败时静默忽略 ——
    * 透明度是装饰性偏好，不该让阅读页因为平台不支持而报错。
    *
-   * 语义与「桌面背景图 → 应用到阅读页」一致：
-   * - 勾选「应用到阅读页」：阅读页直接跟随应用窗口的 `windowOpacity`；
-   * - 不勾选：两套值各自独立，阅读页用 `readerWindowOpacity`。
-   *
-   * 非阅读页永远用 `windowOpacity`，所以书架/设置页不受阅读页那套值影响。
+   * 阅读页的原生 alpha 必须为 1：窗口本身透明由 Tauri 的 transparent
+   * 配置提供，半透明视觉由 ReaderView 的 CSS 背景层负责。
    */
   async function syncWindowOpacityForRoute(onReader: boolean) {
     lastSyncOnReader = onReader
     if (!isTauriRuntime() || !windowOpacitySupported.value) return
-    const opacity = onReader
-      ? (config.applyWindowOpacityToReader ? config.windowOpacity : config.readerWindowOpacity)
-      : config.windowOpacity
+    const opacity = onReader ? 1 : config.windowOpacity
     try {
       await invokeRaw('set_window_opacity', { opacity })
     } catch { /* 非 Windows 或窗口尚未就绪 */ }
   }
 
   watch(() => config.windowOpacity, () => {
-    void syncWindowOpacityForRoute(lastSyncOnReader)
-  })
-
-  watch(() => config.readerWindowOpacity, () => {
-    if (lastSyncOnReader) void syncWindowOpacityForRoute(true)
-  })
-
-  watch(() => config.applyWindowOpacityToReader, () => {
     void syncWindowOpacityForRoute(lastSyncOnReader)
   })
 
@@ -1059,6 +1061,9 @@ export const useReaderStore = defineStore('reader', () => {
       readerBackgroundColor: config.readerBackgroundColor,
       readerBackgroundImage: config.readerBackgroundImage,
       readerImageOpacity: config.readerImageOpacity,
+      readerTextOpacity: config.readerTextOpacity,
+      miniFontColor: config.miniFontColor,
+      miniTextOpacity: config.miniTextOpacity,
       panelOpacity: config.panelOpacity,
       windowOpacity: config.windowOpacity,
       readerWindowOpacity: config.readerWindowOpacity,

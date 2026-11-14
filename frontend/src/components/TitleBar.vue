@@ -51,6 +51,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { isTauriRuntime } from '../api/transport'
+import { readerWindowBackground as composeReaderWindowBackground } from '../utils/readerBackground'
 
 const { surface = null } = defineProps<{
   surface?: 'settings' | 'reader-panel' | null
@@ -84,6 +85,12 @@ const titlebarStyle = computed(() => {
     : 'var(--color-bg-elevated)'
 
   if (isReader.value) {
+    const readerBackground = readerStore.readerTheme
+    const readerFontColor = readerBackground.fontColor
+    const readerWindowBackground = composeReaderWindowBackground(
+      readerBackground.body,
+      readerStore.config.readerWindowOpacity,
+    )
     return {
       '--titlebar-surface-background': surfaceBackground,
       // 阅读中(工具栏收起): 透明 —— 有背景图时透出图, 无图时透出主题底色。
@@ -92,11 +99,11 @@ const titlebarStyle = computed(() => {
       // 「阅读配色」里设的自定义色 —— 用了它, 设了自定义阅读背景色之后标题栏
       // 与工具栏/toolbar 仍停在预设色上, 和正文底色对不上。
       background: needsSolidChrome.value
-        ? readerStore.readerTheme.popup
+        ? readerBackground.popup
         : hasCustomBackground.value
         ? 'transparent'
-        : readerStore.readerTheme.body,
-      color: readerStore.readerTheme.fontColor,
+        : readerWindowBackground,
+      color: readerFontColor,
     }
   }
   return {

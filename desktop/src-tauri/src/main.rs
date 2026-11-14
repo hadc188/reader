@@ -100,9 +100,7 @@ fn reveal(window: &tauri::WebviewWindow, state: &RevealState) {
 /// 显示主窗口前先恢复 WebView2 的正常内存级别。
 fn show_main_window(window: &tauri::WebviewWindow) {
     webview_memory::apply(window, webview_memory::MemoryLevel::Normal);
-    let _ = window.show();
-    let _ = window.unminimize();
-    let _ = window.set_focus();
+    reader_rust::api::commands::window::show_main_window(window);
 }
 
 fn main() {
@@ -269,7 +267,11 @@ fn start(app: &mut App, paths: &portable::Paths) -> anyhow::Result<()> {
         .inner_size(InitialGeometry::DEFAULT_WIDTH, InitialGeometry::DEFAULT_HEIGHT)
         .min_inner_size(min_width, min_height)
         // 自定义标题栏: 隐藏原生边框。
-        .decorations(false);
+        .decorations(false)
+        .shadow(true)
+        // 阅读页的“窗口不透明度”由透明 WebView2 + CSS 半透明底合成，
+        // 不再依赖整窗 LWA_ALPHA，因此原窗口必须允许透明背景。
+        .transparent(true);
     // WebView2 默认把 profile 放在 `%LOCALAPPDATA%\<identifier>`, 与程序目录
     // 无关 —— 两个便携副本会共用同一份 localStorage(issue #20 第 4 条)。
     // 显式指到数据目录下, 让"拷一个文件夹"真的带走全部状态。

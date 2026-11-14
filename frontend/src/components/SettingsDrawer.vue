@@ -185,6 +185,64 @@
                 <span class="boss-key-hint">{{ recordingBossKey ? 'Esc 取消' : '点击修改' }}</span>
               </button>
             </div>
+            <div v-if="isDesktopApp" class="boss-key-setting">
+              <div class="setting-switch-row compact-row">
+                <div class="setting-switch-copy">
+                  <span>无边框模式</span>
+                </div>
+                <button
+                  class="switch-control"
+                  :class="{ on: appStore.borderlessMode }"
+                  type="button"
+                  role="switch"
+                  :aria-checked="appStore.borderlessMode"
+                  @click="toggleBorderlessModeSetting"
+                ><span></span></button>
+              </div>
+              <button
+                class="boss-key-recorder"
+                :class="{ recording: recordingBorderlessShortcut }"
+                type="button"
+                aria-label="切换无边框模式快捷键"
+                @click="startBorderlessRecording"
+                @keydown="recordBorderlessShortcut"
+                @blur="recordingBorderlessShortcut = false"
+              >
+                <span class="boss-key-value">
+                  {{ recordingBorderlessShortcut ? '请按下新的快捷键' : formatBossKey(appStore.borderlessShortcut) }}
+                </span>
+                <span class="boss-key-hint">{{ recordingBorderlessShortcut ? 'Esc 取消' : '点击修改' }}</span>
+              </button>
+            </div>
+            <div v-if="isDesktopApp" class="boss-key-setting">
+              <div class="setting-switch-row compact-row">
+                <div class="setting-switch-copy">
+                  <span>隐藏标题栏</span>
+                </div>
+                <button
+                  class="switch-control"
+                  :class="{ on: appStore.hideTitlebar }"
+                  type="button"
+                  role="switch"
+                  :aria-checked="appStore.hideTitlebar"
+                  @click="appStore.toggleTitlebar()"
+                ><span></span></button>
+              </div>
+              <button
+                class="boss-key-recorder"
+                :class="{ recording: recordingTitlebarShortcut }"
+                type="button"
+                aria-label="切换标题栏快捷键"
+                @click="startTitlebarRecording"
+                @keydown="recordTitlebarShortcut"
+                @blur="recordingTitlebarShortcut = false"
+              >
+                <span class="boss-key-value">
+                  {{ recordingTitlebarShortcut ? '请按下新的快捷键' : formatBossKey(appStore.titlebarShortcut) }}
+                </span>
+                <span class="boss-key-hint">{{ recordingTitlebarShortcut ? 'Esc 取消' : '点击修改' }}</span>
+              </button>
+            </div>
             <!-- 与上面的「老板键」同一层级: 都是自带边框的卡片, 不再额外加小标题,
                  否则两个相邻分组的标题层级不一致(一个有标题、一个没有)。 -->
             <WebAccessSetting v-if="isDesktopApp" />
@@ -418,23 +476,7 @@
                   <span class="opacity-unit">%</span>
                 </label>
               </div>
-              <div class="setting-switch-row">
-                <div class="setting-switch-copy">
-                  <span>应用到阅读页</span>
-                  <small>{{ windowOpacityDescription }}</small>
-                </div>
-                <button
-                  class="switch-control"
-                  :class="{ on: readerStore.config.applyWindowOpacityToReader }"
-                  type="button"
-                  role="switch"
-                  :aria-checked="readerStore.config.applyWindowOpacityToReader"
-                  aria-label="将窗口透明度应用到阅读页"
-                  @click="toggleWindowOpacityForReader"
-                >
-                  <span></span>
-                </button>
-              </div>
+              <small class="window-opacity-note">只影响书架、设置等非阅读页面；阅读页在阅读设置中单独调节。</small>
             </div>
           </section>
 
@@ -484,7 +526,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, type Ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
@@ -520,6 +562,8 @@ const isDesktopApp = isTauriRuntime()
 const backgroundInputRef = ref<HTMLInputElement | null>(null)
 const processingBackground = ref(false)
 const recordingBossKey = ref(false)
+const recordingBorderlessShortcut = ref(false)
+const recordingTitlebarShortcut = ref(false)
 
 /**
  * 设置分类。Web 端只留「外观」——
@@ -686,6 +730,76 @@ function startBossKeyRecording(event: MouseEvent) {
   ;(event.currentTarget as HTMLButtonElement).focus()
 }
 
+async function toggleBorderlessModeSetting() {
+  try {
+    await appStore.toggleBorderlessMode()
+    appStore.showToast(
+      appStore.borderlessMode ? '已进入无边框模式' : '已退出无边框模式',
+      'success',
+    )
+  } catch (error) {
+    appStore.showToast((error as Error).message || '无边框模式设置失败', 'error')
+  }
+}
+
+function startShortcutRecording(
+  event: MouseEvent,
+  recording: Ref<boolean>,
+) {
+  recording.value = true
+  ;(event.currentTarget as HTMLButtonElement).focus()
+}
+
+function recordSystemShortcut(
+  event: KeyboardEvent,
+  recording: Ref<boolean>,
+  apply: (shortcut: string) => void,
+  successMessage: string,
+) {
+  if (!recording.value || event.repeat) return
+  event.preventDefault()
+  event.stopPropagation()
+  const result = captureBossKey(event)
+  if (result.error === 'cancel') {
+    recording.value = false
+    return
+  }
+  if (result.error) {
+    appStore.showToast(result.error, 'error')
+    return
+  }
+  if (!result.shortcut) return
+  apply(result.shortcut)
+  recording.value = false
+  appStore.showToast(successMessage, 'success')
+}
+
+function startBorderlessRecording(event: MouseEvent) {
+  startShortcutRecording(event, recordingBorderlessShortcut)
+}
+
+function recordBorderlessShortcut(event: KeyboardEvent) {
+  recordSystemShortcut(
+    event,
+    recordingBorderlessShortcut,
+    appStore.setBorderlessShortcut,
+    '无边框模式快捷键已更新',
+  )
+}
+
+function startTitlebarRecording(event: MouseEvent) {
+  startShortcutRecording(event, recordingTitlebarShortcut)
+}
+
+function recordTitlebarShortcut(event: KeyboardEvent) {
+  recordSystemShortcut(
+    event,
+    recordingTitlebarShortcut,
+    appStore.setTitlebarShortcut,
+    '标题栏快捷键已更新',
+  )
+}
+
 async function recordBossKey(event: KeyboardEvent) {
   if (!recordingBossKey.value || event.repeat) return
   event.preventDefault()
@@ -776,12 +890,6 @@ function syncBackgroundOpacityInput(input: HTMLInputElement, applied: number) {
 /** 窗口透明度下限（百分比整数），与 Rust 侧保持一致。 */
 const windowOpacityFloorPercent = Math.round(READER_WINDOW_OPACITY_MIN * 100)
 
-const windowOpacityDescription = computed(() => (
-  readerStore.config.applyWindowOpacityToReader
-    ? '阅读页与应用窗口使用同一档透明度'
-    : '阅读页使用自己的透明度，可在阅读设置里单独调整'
-))
-
 function updateWindowOpacityPercent(raw: string) {
   const percent = Number(raw)
   if (!Number.isFinite(percent)) return
@@ -797,16 +905,6 @@ function applyWindowOpacityPercent(raw: string, input: HTMLInputElement) {
   const next = normalizeReaderWindowOpacity(parsed)
   readerStore.updateConfig('windowOpacity', next)
   syncBackgroundOpacityInput(input, next)
-}
-
-function toggleWindowOpacityForReader() {
-  const next = !readerStore.config.applyWindowOpacityToReader
-  // 关闭时若阅读页还停在默认的 100%，先继承当前应用窗口的档位 ——
-  // 否则一关开关阅读页会毫无征兆地跳回实色，与"两套值分开调"的预期不符。
-  if (!next && readerStore.config.readerWindowOpacity >= 1) {
-    readerStore.updateConfig('readerWindowOpacity', readerStore.config.windowOpacity)
-  }
-  readerStore.updateConfig('applyWindowOpacityToReader', next)
 }
 
 function removeBackgroundImage() {
@@ -1259,6 +1357,14 @@ async function handleCheckVersionUpdate() {
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-lg);
   background: var(--color-bg);
+}
+
+.window-opacity-note {
+  display: block;
+  margin-top: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .background-actions {

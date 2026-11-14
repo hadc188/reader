@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_READER_BACKGROUND_OPACITY,
   DEFAULT_READER_PANEL_OPACITY,
+  DEFAULT_READER_TEXT_OPACITY,
   DEFAULT_READER_WINDOW_OPACITY,
   MAX_BACKGROUND_DIMENSION,
   READER_BACKGROUND_OPACITY_STEP,
@@ -11,8 +12,10 @@ import {
   backgroundUploadFileName,
   normalizeReaderBackgroundOpacity,
   normalizeReaderPanelOpacity,
+  normalizeReaderTextOpacity,
   normalizeReaderWindowOpacity,
   percentToReaderOpacity,
+  readerWindowBackground,
   readerOpacityToPercent,
 } from './readerBackground'
 
@@ -65,13 +68,40 @@ describe('window opacity', () => {
     expect(normalizeReaderWindowOpacity(1)).toBe(1)
   })
 
-  it('clamps to the readable floor shared with the Rust command', () => {
-    // 与 src/api/commands/window.rs 的 WINDOW_OPACITY_MIN 必须一致，
-    // 否则滑块位置会与原生窗口的实际 alpha 脱节。
-    expect(READER_WINDOW_OPACITY_MIN).toBe(0.1)
-    expect(normalizeReaderWindowOpacity(0.1)).toBe(READER_WINDOW_OPACITY_MIN)
-    expect(normalizeReaderWindowOpacity(0)).toBe(READER_WINDOW_OPACITY_MIN)
+  it('allows a fully transparent reader background', () => {
+    expect(READER_WINDOW_OPACITY_MIN).toBe(0)
+    expect(normalizeReaderWindowOpacity(0)).toBe(0)
+    expect(normalizeReaderWindowOpacity(0.42)).toBe(0.42)
     expect(normalizeReaderWindowOpacity(2)).toBe(1)
+  })
+})
+
+describe('reader text opacity', () => {
+  it('defaults to fully opaque so text looks as before', () => {
+    expect(DEFAULT_READER_TEXT_OPACITY).toBe(1)
+    expect(normalizeReaderTextOpacity(undefined)).toBe(1)
+    expect(normalizeReaderTextOpacity('invalid')).toBe(1)
+  })
+
+  it('accepts an independent translucency including fully transparent', () => {
+    expect(normalizeReaderTextOpacity(0.55)).toBe(0.55)
+    expect(normalizeReaderTextOpacity(0)).toBe(0)
+    expect(normalizeReaderTextOpacity(1)).toBe(1)
+  })
+
+  it('clamps values above full opacity', () => {
+    expect(normalizeReaderTextOpacity(2)).toBe(1)
+  })
+})
+
+describe('reader window background', () => {
+  it('keeps titlebar and page backdrop on the same opacity source', () => {
+    expect(readerWindowBackground('#123456', 0.42)).toBe(
+      'color-mix(in srgb, #123456 42%, transparent)',
+    )
+    expect(readerWindowBackground('#123456', 2)).toBe(
+      'color-mix(in srgb, #123456 100%, transparent)',
+    )
   })
 })
 

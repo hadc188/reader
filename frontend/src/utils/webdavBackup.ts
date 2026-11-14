@@ -204,23 +204,222 @@ export function serializeWebdavBackup(payload: WebdavBackupPayload) {
   return JSON.stringify(payload, null, 2)
 }
 
+/**
+ * 手机端 Legado 的 Room 实体大量字段是 Kotlin 非空类型；Gson 反序列化时
+ * 显式 `null` 会绕过构造器默认值直接写入字段，随后 Room 在 `bindString` /
+ * `bindLong` 处抛 "Parameter specified as non-null is null"。
+ *
+ * 桌面端 Rust 模型里这些字段多为 `Option<T>`，`None` 会序列化成 `null`。
+ * 因此生成手机端兼容归档前必须递归清掉 null，并给手机端带默认值的非空字段
+ * 补齐默认值 —— 只影响兼容包，不影响 `reader-rust.json` 的原样备份。
+ */
+function stripNullValues(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item !== null && item !== undefined)
+      .map(stripNullValues)
+  }
+  if (value !== null && typeof value === 'object') {
+    const record: JsonRecord = {}
+    for (const [key, item] of Object.entries(value as JsonRecord)) {
+      if (item === null || item === undefined) continue
+      record[key] = stripNullValues(item)
+    }
+    return record
+  }
+  return value
+}
+
+function recordOf(value: unknown): JsonRecord {
+  return (stripNullValues(value) ?? {}) as JsonRecord
+}
+
+function textValue(value: unknown, fallback = '') {
+  return typeof value === 'string' ? value : fallback
+}
+
+function numberValue(value: unknown, fallback = 0) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+function booleanValue(value: unknown, fallback: boolean) {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+function compactRecords<T>(
+  items: T[],
+  normalize: (value: T, fallbackValue: number) => JsonRecord | null,
+): JsonRecord[] {
+  const records: JsonRecord[] = []
+  // 同批缺省主键必须互不相同: 用固定基准 + 序号, 避免 Date.now() 随机兜底撞值。
+  const fallbackBase = Date.now()
+  for (const [index, item] of items.entries()) {
+    const record = normalize(item, fallbackBase + index)
+    if (record !== null) records.push(record)
+  }
+  return records
+}
+
+function toLegadoBook(value: Book): JsonRecord | null {
+  const record = recordOf(value)
+  const bookUrl = textValue(record.bookUrl)
+  const origin = textValue(record.origin)
+  if (!bookUrl.trim() || !origin.trim()) return null
+  return {
+    ...record,
+    name: textValue(record.name),
+    author: textValue(record.author),
+    bookUrl,
+    origin,
+    originName: textValue(record.originName),
+    tocUrl: textValue(record.tocUrl),
+    type: numberValue(record.type, 0),
+    group: numberValue(record.group, 0),
+    latestChapterTime: numberValue(record.latestChapterTime, 0),
+    lastCheckTime: numberValue(record.lastCheckTime, 0),
+    lastCheckCount: numberValue(record.lastCheckCount, 0),
+    totalChapterNum: numberValue(record.totalChapterNum, 0),
+    durChapterIndex: numberValue(record.durChapterIndex, 0),
+    durVolumeIndex: numberValue(record.durVolumeIndex, 0),
+    chapterInVolumeIndex: numberValue(record.chapterInVolumeIndex, 0),
+    durChapterPos: numberValue(record.durChapterPos, 0),
+    durChapterTime: numberValue(record.durChapterTime, 0),
+    canUpdate: booleanValue(record.canUpdate, true),
+    order: numberValue(record.order, 0),
+    originOrder: numberValue(record.originOrder, 0),
+    syncTime: numberValue(record.syncTime, 0),
+    // 手机端 downloadUrls 是 List<String>?，桌面端存的是字符串；类型不符时
+    // Gson 会把整条书架记录判为解析失败（Go 端遗留字段）。统一丢弃，避免
+    // 一条脏字段拖垮整本书。
+    downloadUrls: undefined,
+  }
+}
+
+function toLegadoBookGroup(value: BookGroup): JsonRecord | null {
+  const record = recordOf(value)
+  const groupName = textValue(record.groupName)
+  if (!groupName.trim()) return null
+  return {
+    ...record,
+    groupId: numberValue(record.groupId, 1),
+    groupName,
+    order: numberValue(record.orderNo ?? record.order, 0),
+    enableRefresh: booleanValue(record.enableRefresh, true),
+    show: booleanValue(record.show, true),
+    bookSort: numberValue(record.bookSort, -1),
+    onlyUpdateRead: booleanValue(record.onlyUpdateRead, false),
+  }
+}
+
+function toLegadoBookmark(value: Bookmark, fallbackTime = Date.now()): JsonRecord | null {
+  const record = recordOf(value)
+  const bookName = textValue(record.bookName)
+  const bookAuthor = textValue(record.bookAuthor)
+  if (!bookName && !bookAuthor) return null
+  return {
+    ...record,
+    // 手机端 time 是主键；缺失/0 会让多条书签互相覆盖。
+    time: numberValue(record.time, 0) || fallbackTime,
+    bookName,
+    bookAuthor,
+    chapterIndex: numberValue(record.chapterIndex, 0),
+    chapterPos: numberValue(record.chapterPos, 0),
+    chapterName: textValue(record.chapterName),
+    bookText: textValue(record.bookText),
+    content: textValue(record.content),
+  }
+}
+
+function toLegadoBookSource(value: BookSource): JsonRecord | null {
+  const record = recordOf(value)
+  const bookSourceName = textValue(record.bookSourceName)
+  const bookSourceUrl = textValue(record.bookSourceUrl)
+  if (!bookSourceName.trim() || !bookSourceUrl.trim()) return null
+  return {
+    ...record,
+    bookSourceName,
+    bookSourceUrl,
+    bookSourceType: numberValue(record.bookSourceType, 0),
+    customOrder: numberValue(record.customOrder, 0),
+    enabled: booleanValue(record.enabled, true),
+    enabledExplore: booleanValue(record.enabledExplore, true),
+    enabledCookieJar: booleanValue(record.enabledCookieJar, true),
+    lastUpdateTime: numberValue(record.lastUpdateTime, 0),
+    respondTime: numberValue(record.respondTime, 180000),
+    weight: numberValue(record.weight, 0),
+    eventListener: booleanValue(record.eventListener, false),
+    customButton: booleanValue(record.customButton, false),
+  }
+}
+
+function toLegadoRssSource(value: RssSource): JsonRecord | null {
+  const record = recordOf(value)
+  const sourceName = textValue(record.sourceName)
+  const sourceUrl = textValue(record.sourceUrl)
+  if (!sourceName.trim() || !sourceUrl.trim()) return null
+  return {
+    ...record,
+    sourceName,
+    sourceUrl,
+    sourceIcon: textValue(record.sourceIcon),
+    enabled: booleanValue(record.enabled, true),
+    singleUrl: booleanValue(record.singleUrl, false),
+    articleStyle: numberValue(record.articleStyle, 0),
+    enableJs: booleanValue(record.enableJs, true),
+    loadWithBaseUrl: booleanValue(record.loadWithBaseUrl, true),
+    showWebLog: booleanValue(record.showWebLog, false),
+    lastUpdateTime: numberValue(record.lastUpdateTime, 0),
+    customOrder: numberValue(record.customOrder, 0),
+    type: numberValue(record.type, 0),
+    preload: booleanValue(record.preload, false),
+    cacheFirst: booleanValue(record.cacheFirst, false),
+  }
+}
+
+function toLegadoReplaceRule(value: ReplaceRule, fallbackId = Date.now()): JsonRecord | null {
+  const record = recordOf(value)
+  const name = textValue(record.name)
+  const pattern = textValue(record.pattern)
+  if (!name.trim() || !pattern.trim()) return null
+  return {
+    ...record,
+    // 手机端 id 是自增主键：0 会被 Room 当成"未赋值"重新分配，
+    // 多条 0 会撞成同一主键。桌面端 0 视为缺省，给一个稳定且不重复的值。
+    id: numberValue(record.id, 0) || fallbackId,
+    name,
+    pattern,
+    replacement: textValue(record.replacement),
+    scopeTitle: booleanValue(record.scopeTitle, false),
+    scopeContent: booleanValue(record.scopeContent, true),
+    isEnabled: booleanValue(record.isEnabled, true),
+    isRegex: booleanValue(record.isRegex, true),
+    timeoutMillisecond: numberValue(record.timeoutMillisecond, 3000),
+    order: numberValue(record.order, 0),
+  }
+}
+
 export function createCompatibleBackupArchiveFiles(
   payload: WebdavBackupPayload,
 ): BackupArchiveFile[] {
-  const commonBooks = payload.bookshelf.books.filter((book) => !isReaderLocalBook(book))
-  const commonGroups = payload.bookshelf.groups.map((group) => ({
-    ...group,
-    order: group.orderNo || 0,
-  }))
+  const commonBooks = compactRecords(
+    payload.bookshelf.books.filter((book) => !isReaderLocalBook(book)),
+    toLegadoBook,
+  )
+  const commonGroups = compactRecords(payload.bookshelf.groups, toLegadoBookGroup)
+  const commonBookmarks = compactRecords(payload.bookmarks, toLegadoBookmark)
+  const commonBookSources = compactRecords(payload.bookSources, toLegadoBookSource)
+  const commonRssSources = compactRecords(payload.rssSources, toLegadoRssSource)
+  const commonReplaceRules = compactRecords(payload.replaceRules, toLegadoReplaceRule)
 
   return [
     { name: 'reader-rust.json', content: serializeWebdavBackup(payload) },
     { name: 'bookshelf.json', content: JSON.stringify(commonBooks) },
-    { name: 'bookmark.json', content: JSON.stringify(payload.bookmarks) },
+    { name: 'bookmark.json', content: JSON.stringify(commonBookmarks) },
     { name: 'bookGroup.json', content: JSON.stringify(commonGroups) },
-    { name: 'bookSource.json', content: JSON.stringify(payload.bookSources) },
-    { name: 'rssSources.json', content: JSON.stringify(payload.rssSources) },
-    { name: 'replaceRule.json', content: JSON.stringify(payload.replaceRules) },
+    { name: 'bookSource.json', content: JSON.stringify(commonBookSources) },
+    { name: 'rssSources.json', content: JSON.stringify(commonRssSources) },
+    { name: 'replaceRule.json', content: JSON.stringify(commonReplaceRules) },
   ]
 }
 
@@ -622,11 +821,16 @@ function isLegadoLocalBook(value: JsonRecord) {
     || (type & 0b100000000) !== 0
 }
 
-function isReaderLocalBook(book: Book) {
-  return book.origin === 'local-txt'
-    || book.origin === 'local-epub'
-    || book.origin === 'local-pdf'
-    || book.bookUrl.startsWith('local-txt:')
-    || book.bookUrl.startsWith('local-epub:')
-    || book.bookUrl.startsWith('local-pdf:')
+function isReaderLocalBook(book: Book | null | undefined) {
+  // IPC 数据理论上非空，但旧备份/异常数据可能把字段写成 null；
+  // 这里先收口，避免判断本身抛 TypeError。
+  if (!book) return false
+  const origin = typeof book.origin === 'string' ? book.origin : ''
+  const bookUrl = typeof book.bookUrl === 'string' ? book.bookUrl : ''
+  return origin === 'local-txt'
+    || origin === 'local-epub'
+    || origin === 'local-pdf'
+    || bookUrl.startsWith('local-txt:')
+    || bookUrl.startsWith('local-epub:')
+    || bookUrl.startsWith('local-pdf:')
 }

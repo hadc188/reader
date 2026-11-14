@@ -110,6 +110,215 @@ describe('compatible backup archives', () => {
     expect(embedded.customFonts).toHaveLength(1)
   })
 
+  it('clears null values and fills Legado non-null defaults in compatible files', () => {
+    // 桌面端 Rust 模型大量字段是 Option<T>, None 会序列化为 null;
+    // 手机端 Gson 会把显式 null 直接写进 Kotlin 非空字段, Room 随后在
+    // bindString/bindLong/bindBoolean 抛 "Parameter specified as non-null is null"。
+    // 兼容包导出必须只输出手机端能安全恢复的数据。
+    const payload = createPayload()
+    const booksWithNulls = [
+      {
+        name: '网络书',
+        author: '作者',
+        bookUrl: 'https://example.test/book',
+        origin: 'https://source.test',
+        tocUrl: null as unknown as string,
+        originName: null as unknown as string,
+        type: null as unknown as number,
+        group: null as unknown as number,
+        canUpdate: null as unknown as boolean,
+        durChapterIndex: null as unknown as number,
+        durChapterPos: null as unknown as number,
+        durChapterTime: null as unknown as number,
+        totalChapterNum: null as unknown as number,
+        latestChapterTime: null as unknown as number,
+        lastCheckTime: null as unknown as number,
+        downloadUrls: 'https://download.test/a.txt',
+      },
+      {
+        name: '缺地址',
+        author: '',
+        bookUrl: null as unknown as string,
+        origin: 'https://source.test',
+      },
+    ]
+    payload.bookshelf.books = booksWithNulls as unknown as typeof payload.bookshelf.books
+    payload.bookshelf.groups = [
+      { groupId: 2, groupName: '收藏', orderNo: 3, bookSort: null as unknown as number },
+    ]
+    payload.bookSources = [
+      {
+        bookSourceName: '测试源',
+        bookSourceUrl: 'https://source.test',
+        bookSourceType: null as unknown as number,
+        enabled: null as unknown as boolean,
+      },
+    ]
+    payload.rssSources = [
+      {
+        sourceName: '测试订阅',
+        sourceUrl: 'https://rss.test',
+        sourceIcon: null as unknown as string,
+        enabled: null as unknown as boolean,
+      },
+    ]
+    payload.bookmarks = [
+      {
+        bookName: '网络书',
+        bookAuthor: '作者',
+        time: null as unknown as number,
+        chapterIndex: null as unknown as number,
+      },
+    ]
+    payload.replaceRules = [
+      {
+        id: 1,
+        name: '测试规则',
+        pattern: 'a',
+        replacement: '',
+        isEnabled: null as unknown as boolean,
+        isRegex: null as unknown as boolean,
+        order: 0,
+        timeoutMillisecond: null as unknown as number,
+      },
+    ]
+
+    const files = createCompatibleBackupArchiveFiles(payload)
+    const fileMap = Object.fromEntries(files.map((file) => [file.name, file.content]))
+    const containsNull = (value: unknown): boolean => {
+      if (value === null) return true
+      if (Array.isArray(value)) return value.some(containsNull)
+      if (typeof value === 'object' && value !== null) {
+        return Object.values(value as Record<string, unknown>).some(containsNull)
+      }
+      return false
+    }
+    for (const name of [
+      'bookshelf.json',
+      'bookmark.json',
+      'bookGroup.json',
+      'bookSource.json',
+      'rssSources.json',
+      'replaceRule.json',
+    ]) {
+      expect(fileMap[name]).toBeDefined()
+      expect(containsNull(JSON.parse(fileMap[name]))).toBe(false)
+    }
+
+    const books = JSON.parse(fileMap['bookshelf.json']) as Array<Record<string, unknown>>
+    expect(books).toHaveLength(1)
+    expect(books[0]).toMatchObject({
+      name: '网络书',
+      originName: '',
+      tocUrl: '',
+      type: 0,
+      group: 0,
+      canUpdate: true,
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTime: 0,
+      totalChapterNum: 0,
+      latestChapterTime: 0,
+      lastCheckTime: 0,
+    })
+    // 手机端 downloadUrls 是 List<String>?，桌面端字符串会让 Gson 解析整条失败。
+    expect(books[0]).not.toHaveProperty('downloadUrls')
+
+    const groups = JSON.parse(fileMap['bookGroup.json']) as Array<Record<string, unknown>>
+    expect(groups[0]).toMatchObject({
+      groupId: 2,
+      groupName: '收藏',
+      order: 3,
+      enableRefresh: true,
+      show: true,
+      bookSort: -1,
+      onlyUpdateRead: false,
+    })
+
+    const bookSources = JSON.parse(fileMap['bookSource.json']) as Array<Record<string, unknown>>
+    expect(bookSources[0]).toMatchObject({
+      bookSourceType: 0,
+      enabled: true,
+      enabledExplore: true,
+      enabledCookieJar: true,
+      lastUpdateTime: 0,
+      respondTime: 180000,
+      weight: 0,
+      eventListener: false,
+      customButton: false,
+    })
+
+    const rssSources = JSON.parse(fileMap['rssSources.json']) as Array<Record<string, unknown>>
+    expect(rssSources[0]).toMatchObject({
+      sourceIcon: '',
+      enabled: true,
+      singleUrl: false,
+      articleStyle: 0,
+      enableJs: true,
+      loadWithBaseUrl: true,
+      showWebLog: false,
+      lastUpdateTime: 0,
+      customOrder: 0,
+      type: 0,
+      preload: false,
+      cacheFirst: false,
+    })
+
+    const bookmarks = JSON.parse(fileMap['bookmark.json']) as Array<Record<string, unknown>>
+    expect(bookmarks[0]).toMatchObject({
+      bookName: '网络书',
+      bookAuthor: '作者',
+      chapterIndex: 0,
+      chapterPos: 0,
+      chapterName: '',
+      bookText: '',
+      content: '',
+    })
+    expect(typeof bookmarks[0]?.time).toBe('number')
+
+    const rules = JSON.parse(fileMap['replaceRule.json']) as Array<Record<string, unknown>>
+    expect(rules[0]).toMatchObject({
+      name: '测试规则',
+      pattern: 'a',
+      replacement: '',
+      scopeTitle: false,
+      scopeContent: true,
+      isEnabled: true,
+      isRegex: true,
+      timeoutMillisecond: 3000,
+      order: 0,
+    })
+
+    // reader-rust.json 仍是桌面端自己的原样备份, 不做手机端字段归一化。
+    expect(fileMap['reader-rust.json']).toContain('"tocUrl": null')
+  })
+
+  it('gives records without primary keys distinct fallbacks in one archive', () => {
+    // 手机端 bookmark.time / replaceRule.id 是主键; 缺省时若多条取同一个
+    // Date.now(), 后写的一条会覆盖前一条。同批必须互不相同。
+    const payload = createPayload()
+    payload.bookmarks = [
+      { bookName: '书', bookAuthor: '作者', chapterIndex: 0, chapterPos: 0 },
+      { bookName: '书', bookAuthor: '作者', chapterIndex: 1, chapterPos: 0 },
+      { bookName: '书', bookAuthor: '作者', chapterIndex: 2, chapterPos: 0 },
+    ]
+    payload.replaceRules = [
+      { id: 0, name: '规则1', pattern: 'a', replacement: '', isEnabled: true, isRegex: true, order: 0 },
+      { id: 0, name: '规则2', pattern: 'b', replacement: '', isEnabled: true, isRegex: true, order: 1 },
+      { id: 0, name: '规则3', pattern: 'c', replacement: '', isEnabled: true, isRegex: true, order: 2 },
+    ]
+
+    const files = createCompatibleBackupArchiveFiles(payload)
+    const fileMap = Object.fromEntries(files.map((file) => [file.name, file.content]))
+    const times = (JSON.parse(fileMap['bookmark.json']) as Array<{ time: number }>).map((v) => v.time)
+    const ids = (JSON.parse(fileMap['replaceRule.json']) as Array<{ id: number }>).map((v) => v.id)
+
+    expect(new Set(times).size).toBe(times.length)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(times.every((value) => Number.isSafeInteger(value) && value > 0)).toBe(true)
+    expect(ids.every((value) => Number.isSafeInteger(value) && value > 0)).toBe(true)
+  })
+
   it('分组级排序偏好在 Legado 归档往返中保留', () => {
     // Legado 的 BookGroup 用 bookSort 表达「本分组使用哪种排序」;
     // 缺这个字段时从手机端恢复后每个分组都会退回「跟随全局」。

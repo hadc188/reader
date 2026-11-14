@@ -183,20 +183,40 @@ export const useAppStore = defineStore('app', () => {
     localStorage.setItem(BORDERLESS_SHORTCUT_KEY, borderlessShortcut.value)
   }
 
-  async function applyWindowShadow() {
+  /** 无边框实现：目前只有 Windows 可切换原生阴影。 */
+  const borderlessKind = ref<'shadow' | 'none'>(
+    typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
+      ? 'shadow'
+      : 'none',
+  )
+
+  async function detectBorderlessKind() {
+    if (!isTauriRuntime()) {
+      borderlessKind.value = 'none'
+      return
+    }
+    try {
+      borderlessKind.value = await invokeRaw<'shadow' | 'none'>('window_borderless_kind')
+    } catch {
+      borderlessKind.value = 'none'
+    }
+  }
+
+  async function applyBorderlessMode() {
     if (!isTauriRuntime()) return
-    await invokeRaw('set_window_shadow', { enabled: !borderlessMode.value })
+    if (borderlessKind.value === 'none') return
+    await invokeRaw('set_borderless_mode', { enabled: borderlessMode.value })
   }
 
   async function setBorderlessMode(value: boolean) {
     const previous = borderlessMode.value
     borderlessMode.value = value
     try {
-      await applyWindowShadow()
+      await applyBorderlessMode()
       localStorage.setItem(BORDERLESS_MODE_KEY, value ? 'enabled' : 'disabled')
     } catch (error) {
       borderlessMode.value = previous
-      await applyWindowShadow().catch(() => undefined)
+      await applyBorderlessMode().catch(() => undefined)
       throw error
     }
   }
@@ -736,8 +756,9 @@ export const useAppStore = defineStore('app', () => {
     closeToTray, setCloseToTray, toggleCloseToTray,
     legadoWebdavConfig, setLegadoWebdavConfig, legadoSyncEnabled, setLegadoSyncEnabled,
     bossKeyEnabled, bossKeyShortcut, applyBossKey, setBossKeyEnabled, setBossKeyShortcut,
-    borderlessMode, borderlessShortcut,
-    applyWindowShadow, setBorderlessMode, toggleBorderlessMode,
+    borderlessMode, borderlessShortcut, borderlessKind,
+    detectBorderlessKind,
+    applyBorderlessMode, setBorderlessMode, toggleBorderlessMode,
     setBorderlessShortcut, resetBorderlessShortcut,
     hideTitlebar, titlebarShortcut,
     setHideTitlebar, setTitlebarShortcut, resetTitlebarShortcut, toggleTitlebar,

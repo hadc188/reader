@@ -130,18 +130,38 @@ pub fn is_window_opacity_supported() -> bool {
     cfg!(target_os = "windows")
 }
 
-/// 切换主窗口的原生阴影。
+/// 当前平台“无边框模式”的实现类型。
 ///
-/// 只调用 Tauri 的 shadow 开关，不改窗口边框、缩放样式或 DWM 非客户区。
-/// 这样关闭阴影时仍是当前验证过的无边框形态。
+/// 目前只有 Windows 提供可切换的原生阴影；macOS/Linux 不提供无边框模式。
 #[tauri::command]
-pub fn set_window_shadow(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+pub fn window_borderless_kind() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "shadow"
+    } else {
+        "none"
+    }
+}
+
+/// Windows: 无边框模式开启 = 关闭阴影。
+#[cfg(target_os = "windows")]
+fn apply_borderless_mode(window: &tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    window
+        .set_shadow(!enabled)
+        .map_err(|error| format!("设置窗口阴影失败：{error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_borderless_mode(_window: &tauri::WebviewWindow, _enabled: bool) -> Result<(), String> {
+    Ok(())
+}
+
+/// 切换无边框模式（仅 Windows 生效）。
+#[tauri::command]
+pub fn set_borderless_mode(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "主窗口不存在".to_string())?;
-    window
-        .set_shadow(enabled)
-        .map_err(|error| format!("设置窗口阴影失败：{error}"))
+    apply_borderless_mode(&window, enabled)
 }
 
 /// 本轮关闭请求是否已被前端接管。

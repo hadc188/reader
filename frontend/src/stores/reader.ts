@@ -899,8 +899,9 @@ export const useReaderStore = defineStore('reader', () => {
   /* ─── Reading config ─── */
   const config = reactive<ReadConfig>(loadConfig())
 
-  /** 整窗不透明度是否可用。默认 false: 只有桌面壳明确回答支持时才渲染入口，
-   *  这样 Web 模式与 macOS/Linux 都不会出现“拖了没反应”的滑块。 */
+  /** 应用窗口整窗不透明度是否可用（仅 Windows）。
+   *  默认 false: 只有桌面壳明确回答支持时才渲染入口，避免 macOS/Linux
+   *  出现“拖了没反应”的滑块。阅读页背景不透明度不依赖这个能力。 */
   const windowOpacitySupported = ref(false)
 
   async function detectWindowOpacitySupport() {

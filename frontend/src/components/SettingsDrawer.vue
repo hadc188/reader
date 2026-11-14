@@ -185,7 +185,7 @@
                 <span class="boss-key-hint">{{ recordingBossKey ? 'Esc 取消' : '点击修改' }}</span>
               </button>
             </div>
-            <div v-if="isDesktopApp" class="boss-key-setting">
+            <div v-if="isDesktopApp && appStore.borderlessKind === 'shadow'" class="boss-key-setting">
               <div class="setting-switch-row compact-row">
                 <div class="setting-switch-copy">
                   <span>无边框模式</span>

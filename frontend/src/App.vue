@@ -17,9 +17,9 @@
     <!-- 标题栏只在桌面端渲染: 它整套是为无边框窗口服务的(拖动区、最小化/
          最大化/关闭、迷你模式)。浏览器里没有窗口可控制, 留着只会显示三个
          点了没反应的按钮, 还白占 30px 顶部空间。 -->
-    <TitleBar v-if="!appStore.isWebMode && !appStore.hideTitlebar" :surface="titlebarSurface" />
+    <TitleBar v-if="usesCustomChrome && !appStore.hideTitlebar" :surface="titlebarSurface" />
     <div
-      v-if="!appStore.isWebMode && appStore.hideTitlebar"
+      v-if="usesCustomChrome && appStore.hideTitlebar"
       class="hidden-titlebar-drag"
       data-tauri-drag-region
       @dblclick="toggleHiddenTitlebarMaximize"
@@ -87,6 +87,7 @@ const appStore = useAppStore()
 const readerStore = useReaderStore()
 
 const showHeader = computed(() => route.name !== 'reader' && !appStore.miniMode)
+const usesCustomChrome = computed(() => !appStore.isWebMode)
 /* Web 端不渲染底部导航: 只剩书架和最近阅读两项, 用顶部的书架/最近入口
    就够切换, 底部常驻一条导航反而占掉手机的阅读高度。 */
 const showBottomNav = computed(
@@ -153,10 +154,10 @@ const stopReaderTransparentClassSync = watch(
 
 const stopTitlebarHeightSync = watch(
   () => appStore.hideTitlebar,
-  (hidden) => {
+  (withoutCustomTitlebar) => {
     if (typeof document === 'undefined') return
     for (const element of [document.documentElement, document.body]) {
-      if (hidden) {
+      if (withoutCustomTitlebar) {
         element.style.setProperty('--titlebar-height', '0px')
       } else {
         element.style.removeProperty('--titlebar-height')
@@ -169,7 +170,9 @@ const stopTitlebarHeightSync = watch(
 onMounted(() => {
   void appStore.runStartupVersionCheck()
   void appStore.applyBossKey().catch(() => undefined)
-  void appStore.applyWindowShadow().catch(() => undefined)
+  void appStore.detectBorderlessKind()
+    .then(() => appStore.applyBorderlessMode())
+    .catch(() => undefined)
   void appStore.applyNetworkProxy().catch(() => undefined)
   // 恢复上次保存的整窗不透明度。先问平台是否支持，再把值推给窗口 ——
   // 不支持时设置项不会渲染，也不会发无意义的 IPC。

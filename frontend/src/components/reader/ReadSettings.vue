@@ -247,7 +247,9 @@
                 </div>
               </div>
 
-              <div v-if="!appStore.isWebMode && store.windowOpacitySupported" class="setting-row">
+              <!-- 阅读页背景由透明 WebView2/WebKit + CSS 半透明层合成，
+                   不依赖 Windows 原生整窗 alpha，因此 macOS/Linux 同样可用。 -->
+              <div v-if="!appStore.isWebMode" class="setting-row">
                 <label>背景不透明度</label>
                 <div class="range-field">
                   <div

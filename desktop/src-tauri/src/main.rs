@@ -266,7 +266,7 @@ fn start(app: &mut App, paths: &portable::Paths) -> anyhow::Result<()> {
         .title("阅读")
         .inner_size(InitialGeometry::DEFAULT_WIDTH, InitialGeometry::DEFAULT_HEIGHT)
         .min_inner_size(min_width, min_height)
-        // 自定义标题栏: 隐藏原生边框。
+        // 自定义标题栏: 三端都使用自绘标题栏。
         .decorations(false)
         .shadow(true)
         // 阅读页的“窗口不透明度”由透明 WebView2 + CSS 半透明底合成，

@@ -777,6 +777,75 @@ describe('explore source enabled filter', () => {
   })
 })
 
+// ── 分类翻页终止 ──
+
+describe('explore pagination', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    getBookSourcesMock.mockReset()
+    exploreBookMock.mockReset()
+    getExploreKindsMock.mockReset()
+    runExploreActionMock.mockReset()
+    exploreBookMock.mockResolvedValue([])
+    getExploreKindsMock.mockResolvedValue([])
+    runExploreActionMock.mockResolvedValue(idleOutcome())
+  })
+
+  /**
+   * 有些接口型分类在越过末页后仍返回 200 和**末页的重复数据**。
+   * 只按「返回非空」判断 hasMore 会让无限滚动永远继续、列表里堆满重复项；
+   * 与 legado `SearchBookMergeUtils.appendReplacing` 一样，按书源 + 书籍地址
+   * 去重后没有新增就必须停。
+   */
+  it('stops when a page only repeats books already loaded', async () => {
+    const sourceStore = useSourceStore()
+    sourceStore.sources = [{
+      bookSourceName: '分页源',
+      bookSourceUrl: 'https://paged.example',
+      enabledExplore: true,
+      exploreUrl: JSON.stringify([{ title: '列表', url: '/list?page={{page}}' }]),
+    }]
+    const first = { name: '第一本', author: '作者', bookUrl: '/book/1', origin: 'https://paged.example' }
+    const second = { name: '第二本', author: '作者', bookUrl: '/book/2', origin: 'https://paged.example' }
+    exploreBookMock
+      .mockResolvedValueOnce([first, second])
+      .mockResolvedValueOnce([first, second])
+
+    const store = useExploreStore()
+    await store.init()
+    expect(store.books).toHaveLength(2)
+    expect(store.hasMore).toBe(true)
+
+    await store.fetchMore()
+
+    expect(store.books).toHaveLength(2)
+    expect(store.hasMore).toBe(false)
+  })
+
+  it('keeps loading while pages introduce new books', async () => {
+    const sourceStore = useSourceStore()
+    sourceStore.sources = [{
+      bookSourceName: '分页源',
+      bookSourceUrl: 'https://paged.example',
+      enabledExplore: true,
+      exploreUrl: JSON.stringify([{ title: '列表', url: '/list?page={{page}}' }]),
+    }]
+    const first = { name: '第一本', author: '作者', bookUrl: '/book/1', origin: 'https://paged.example' }
+    const second = { name: '第二本', author: '作者', bookUrl: '/book/2', origin: 'https://paged.example' }
+    exploreBookMock
+      .mockResolvedValueOnce([first])
+      .mockResolvedValueOnce([first, second])
+
+    const store = useExploreStore()
+    await store.init()
+
+    await store.fetchMore()
+
+    expect(store.books.map((book) => book.name)).toEqual(['第一本', '第二本'])
+    expect(store.hasMore).toBe(true)
+  })
+})
+
 function sourceWithExplore(): BookSource {
   return {
     bookSourceName: 'm.epsilon.example.com',

@@ -86,6 +86,18 @@ describe('searchSessionCache', () => {
     expect(cache.get(key)!.lastIndex).toBe(-1)
   })
 
+  it('records the source page and whether more pages exist', () => {
+    // 续搜要回到同一页，而不是从第 1 页重新扫；是否还有下一页也得一起存，
+    // 否则从阅读页返回后「加载更多」按钮会消失。
+    const cache = createSearchSessionCache()
+    const key = searchSessionKey({ keyword: '遮天' })
+    cache.set(key, '遮天', [book('遮天')], false, 3, 2, true, false)
+    const entry = cache.get(key)!
+    expect(entry.page).toBe(2)
+    expect(entry.morePages).toBe(true)
+    expect(entry.moreSources).toBe(false)
+  })
+
   it('evicts least recently used entries past the limit', () => {
     const cache = createSearchSessionCache({ limit: 2 })
     const k1 = searchSessionKey({ keyword: '一' })

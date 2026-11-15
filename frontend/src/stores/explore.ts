@@ -564,8 +564,27 @@ export const useExploreStore = defineStore('explore', () => {
       if (token !== booksToken) return
 
       if (result && result.length > 0) {
-        books.value.push(...result)
-        page.value++
+        // 与 legado 的 `SearchBookMergeUtils.appendReplacing` 对齐：
+        // 有些站点（含接口型分类）在超出末页后仍返回 200，但内容是
+        // **最后一页的重复数据**，只按「有返回」判断会让滚动永远继续。
+        // 这里按书源 + bookUrl 去重，只有确实新增了书才允许翻下一页。
+        const existing = new Set(
+          books.value.map(exploreBookKey).filter((key): key is string => key !== null),
+        )
+        const appended = result.filter((book) => {
+          const key = exploreBookKey(book)
+          // 信息不足的书不参与去重：宁可重复展示，也不能误删合法条目。
+          if (key === null) return true
+          if (existing.has(key)) return false
+          existing.add(key)
+          return true
+        })
+        if (appended.length > 0) {
+          books.value.push(...appended)
+          page.value++
+        } else {
+          hasMore.value = false
+        }
       } else {
         hasMore.value = false
       }
@@ -627,3 +646,15 @@ export const useExploreStore = defineStore('explore', () => {
     resetAndFetch,
   }
 })
+
+/** 发现页去重键，等价于 legado `stableSearchBookKey()` 的「书源 + 书籍地址」。 */
+function exploreBookKey(book: SearchBook): string | null {
+  const source = (book.origin || '').trim() || (book.originName || '').trim()
+  const url = (book.bookUrl || '').trim()
+  if (url) return `${source}|${url}`
+  if ((book.name || '').trim() || (book.author || '').trim()) {
+    return `${source}|${book.name || ''}|${book.author || ''}`
+  }
+  if ((book.coverUrl || '').trim()) return `${source}|${book.coverUrl}`
+  return null
+}

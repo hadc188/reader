@@ -34,6 +34,12 @@ export interface SearchSessionEntry {
    * 而不是从头再搜一遍。`-1` 表示还没收到任何批次。
    */
   lastIndex: number
+  /** 已拉到的书源页（1 起）；续搜时从这里继续同一页。 */
+  page: number
+  /** 该页是否还有结果（决定能否再拉下一页）。 */
+  morePages: boolean
+  /** 是否还有未扫描完的书源（分批续扫用）。 */
+  moreSources: boolean
   savedAt: number
 }
 
@@ -51,7 +57,16 @@ export interface SearchSessionCacheOptions {
 
 export interface SearchSessionCache {
   get(key: string): SearchSessionEntry | undefined
-  set(key: string, keyword: string, results: SearchBook[], complete?: boolean, lastIndex?: number): void
+  set(
+    key: string,
+    keyword: string,
+    results: SearchBook[],
+    complete?: boolean,
+    lastIndex?: number,
+    page?: number,
+    morePages?: boolean,
+    moreSources?: boolean,
+  ): void
   /** 只丢掉某一组条件的结果（重搜当前词时用），不影响其它关键词。 */
   delete(key: string): void
   clear(): void
@@ -145,7 +160,16 @@ export function createSearchSessionCache(
       return entry
     },
 
-    set(key, keyword, results, complete = true, lastIndex = -1) {
+    set(
+      key,
+      keyword,
+      results,
+      complete = true,
+      lastIndex = -1,
+      page = 1,
+      morePages = false,
+      moreSources = false,
+    ) {
       if (!key || !results.length) return
       // 先清过期的，再按 LRU 上限裁 —— 否则过期记录会占着名额把新结果挤掉。
       pruneExpired()
@@ -156,6 +180,9 @@ export function createSearchSessionCache(
         results: results.slice(),
         complete,
         lastIndex,
+        page,
+        morePages,
+        moreSources,
         savedAt: now(),
       })
       while (entries.size > limit) {

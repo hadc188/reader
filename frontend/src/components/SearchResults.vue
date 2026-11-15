@@ -1,5 +1,5 @@
 <template>
-  <div ref="resultsContainerRef" class="search-results">
+  <div ref="resultsContainerRef" class="search-results" @scroll="handleResultsScroll">
     <div class="search-header">
       <h2>
         搜索 "{{ searchKey }}"
@@ -73,11 +73,11 @@
     </div>
 
     <BookGrid
-      :books="displayResults"
+      :books="rankedResults"
       :is-search="true"
       :shelf-book-urls="shelfBookUrls"
       :shelf-book-keys="shelfBookKeys"
-      :loading="isSearching && displayResults.length === 0"
+      :loading="isSearching && rankedResults.length === 0"
       :animate="false"
       empty-text="未找到相关书籍"
       @click="handleBookClick"
@@ -85,41 +85,6 @@
       @addToShelf="handleAddToShelf"
       @contextmenu="handleBookContextMenu"
     />
-
-    <div v-if="totalPages > 1" class="pagination">
-      <div class="pagination-count">{{ pageRangeText }}</div>
-      <div class="pagination-controls">
-        <button
-          type="button"
-          class="page-btn"
-          :disabled="currentPage <= 1"
-          @click="goToPage(currentPage - 1)"
-        >
-          上一页
-        </button>
-        <template v-for="(item, index) in pageItems" :key="`${item}-${index}`">
-          <span v-if="item === 'ellipsis'" class="page-ellipsis">…</span>
-          <button
-            v-else
-            type="button"
-            class="page-btn page-number"
-            :class="{ active: item === currentPage }"
-            :aria-current="item === currentPage ? 'page' : undefined"
-            @click="goToPage(item)"
-          >
-            {{ item }}
-          </button>
-        </template>
-        <button
-          type="button"
-          class="page-btn"
-          :disabled="currentPage >= totalPages"
-          @click="goToPage(currentPage + 1)"
-        >
-          下一页
-        </button>
-      </div>
-    </div>
 
     <BookDetailModal
       v-model="showBookDetail"
@@ -181,6 +146,20 @@ let searchGeneration = 0
  * 每轮新搜索开始时置 -1。
  */
 let searchLastIndex = -1
+/**
+ * 当前已经拉到的搜索页（每个书源各自的 page）。
+ *
+ * 多源搜索的“更多”有两层：书源清单还没走完（`lastIndex < 总数`），以及
+ * 同一批书源还有下一页（legado 滚动到底 `searchPage++`）。第二层以前完全
+ * 缺失，所以 JSON 接口站点（如搬山人）只能看到第 1 页。
+ */
+const searchPage = ref(1)
+/** 本次搜索后端是否报告「这一页还有结果」。 */
+const hasMorePages = ref(false)
+/** 后端是否还有未扫描的书源（分批续扫时用）。 */
+const hasMoreSources = ref(false)
+/** 当前页（可能分几次扫完书源）是否已经收到过任意结果。 */
+let pageHadResults = false
 const coverCacheSession = createCoverCacheSession()
 /**
  * 搜索结果的会话缓存。
@@ -243,27 +222,7 @@ const enabledSourceSignature = computed(() => {
   return sourceOptions.value.map((source) => source.bookSourceUrl).join('\n')
 })
 
-/**
- * 搜索结果每页条数。
- *
- * 多源搜索动辄上千条(实测 1964 条), 而 BookGrid 是 `v-for` 全量渲染 + TransitionGroup,
- * 全部铺进 DOM 会让布局/样式重算成本随条数线性增长, 滚动直接掉帧。
- * 因此按页渲染, 只把当前页交给 BookGrid。
- *
- * **已知局限**: 分页只降低**渲染**量, 没有改动下面 `rankedResults` 的全量
- * filter/map/sort —— 搜索**进行中**每收到一批 SSE 消息仍会整体重算一遍
- * (见 onmessage 里整体替换 `searchResults`)。用户反馈的"搜索完成后卡顿"
- * 主因是 DOM 数量, 所以这里已足够; 若之后要优化搜索过程本身, 应改
- * `shallowRef` + 分帧提交, 而不是继续加大分页。
- */
-const SEARCH_RESULT_PAGE_SIZE = 100
-
-const currentPage = ref(1)
-
-/** 页码按钮项: 数字直接跳页, `'ellipsis'` 渲染成省略号。 */
-type PageItem = number | 'ellipsis'
-
-/** 全部命中结果(已完成按书源可用性与相关度过滤排序), 用于展示总数与分页。 */
+/** 全部命中结果(已完成按书源可用性与相关度过滤排序)。 */
 const rankedResults = computed<SearchBook[]>(() => {
   const enriched = results.value
     .filter((book) => enabledSourceUrls.value.has(book.origin))
@@ -282,70 +241,47 @@ const rankedResults = computed<SearchBook[]>(() => {
   return rankSearchResults(enriched, searchKey.value)
 })
 
-/** 真正交给 BookGrid 渲染的当前页切片。 */
-const displayResults = computed<SearchBook[]>(() => {
-  const start = (currentPage.value - 1) * SEARCH_RESULT_PAGE_SIZE
-  return rankedResults.value.slice(start, start + SEARCH_RESULT_PAGE_SIZE)
-})
-
-const totalPages = computed(() =>
-  Math.max(1, Math.ceil(rankedResults.value.length / SEARCH_RESULT_PAGE_SIZE))
-)
-
-/** 当前页第一条/最后一条在全部结果中的序号(1-based), 用于"第 X-Y 条"提示。 */
-const pageRangeText = computed(() => {
-  const total = rankedResults.value.length
-  if (total === 0) return ''
-  const start = (currentPage.value - 1) * SEARCH_RESULT_PAGE_SIZE + 1
-  const end = Math.min(total, currentPage.value * SEARCH_RESULT_PAGE_SIZE)
-  return `第 ${start}-${end} 条，共 ${total} 条`
-})
-
 /**
- * 计算要渲染的页码按钮。
+ * 拉下一批书源搜索结果。
  *
- * 结果多时页数可达几十页, 全列出来会把分页条撑成一条长带; 只保留首页、末页
- * 与当前页附近的若干页, 中间用省略号。`siblingCount` 是当前页两侧各保留几个。
+ * 先续完当前页剩余书源；全部书源都搜过且本页有结果时，再把每个书源的
+ * `page` 加一并从第一个书源重新扫一遍 —— 与 legado `SearchModel.search()`
+ * 的 `searchPage++` 语义一致。
  */
-const pageItems = computed<PageItem[]>(() => {
-  const total = totalPages.value
-  const current = currentPage.value
-  const siblingCount = 1
-  // 页数少时直接全列(不留省略号, 免得比页码还占地方)。
-  const maxWithoutEllipsis = 7
-  if (total <= maxWithoutEllipsis) {
-    return Array.from({ length: total }, (_, index) => index + 1)
+function loadMore() {
+  if (isSearching.value) return
+  const key = shelfStore.searchKey
+  if (!key) return
+  // 书源清单可能按分组/单源过滤，前端拿不到后端实际列表长度，
+  // 因此只以后端的 `hasMore` 为准，不用 sourceOptions 猜。
+  if (hasMoreSources.value) {
+    continueSearchFrom(searchLastIndex + 1)
+    return
   }
+  if (!hasMorePages.value) return
+  searchPage.value += 1
+  // 新的一页必须从第一个书源重新扫: 沿用上一页的 lastIndex 会跳过
+  // 新页前面的书源。
+  searchLastIndex = -1
+  pageHadResults = false
+  continueSearchFrom(-1)
+}
 
-  const first = 1
-  const last = total
-  const left = Math.max(first + 1, current - siblingCount)
-  const right = Math.min(last - 1, current + siblingCount)
-  const items: PageItem[] = [first]
-  if (left > first + 1) items.push('ellipsis')
+/** 从指定书源下标续拉当前搜索页（-1 = 从头开始）。 */
+function continueSearchFrom(startIndex: number) {
+  const key = shelfStore.searchKey
+  if (!key) return
+  const sessionKey = currentSearchSessionKey(key)
+  shelfStore.isSearching = true
+  streamSearch(key, sessionKey, startIndex, searchPage.value)
+}
 
-  for (let page = left; page <= right; page += 1) {
-    items.push(page)
-  }
-
-  if (right < last - 1) items.push('ellipsis')
-  items.push(last)
-  return items
-})
-
-/**
- * 跳页。
- *
- * 页码变化后把滚动容器回到顶部: 停在底部再翻页会看到新一页的末尾,
- * 用户会以为"没翻动"。用 nextTick 等 DOM 更新完再滚, 否则滚的是旧高度。
- */
-function goToPage(page: number) {
-  const target = Math.min(Math.max(1, page), totalPages.value)
-  if (target === currentPage.value) return
-  currentPage.value = target
-  nextTick(() => {
-    resultsContainerRef.value?.scrollTo({ top: 0 })
-  })
+/** 滚动接近底部时自动续拉，行为对齐 legado 的滚动加载。 */
+function handleResultsScroll() {
+  const el = resultsContainerRef.value
+  if (!el || isSearching.value) return
+  const { scrollTop, scrollHeight, clientHeight } = el
+  if (scrollTop + clientHeight >= scrollHeight - 160) loadMore()
 }
 
 function closeEventSource() {
@@ -362,8 +298,6 @@ function refreshSearch() {
   const sessionKey = currentSearchSessionKey(key)
   // 只丢当前这一组条件的结果；别把其它关键词的缓存也清掉。
   if (sessionKey) searchSessionCache.delete(sessionKey)
-  // 手动重搜必须先回到第 1 页，否则新结果可能比原来少、当前页会落到空页上。
-  currentPage.value = 1
   doSearch(key, true)
 }
 
@@ -428,8 +362,10 @@ function doSearch(key: string, force = false) {
   // 真正的 `generation` 在 `streamSearch()` 里再取一次，两处语义不同，别合并。
   searchGeneration += 1
   searchLastIndex = -1
-  // 新搜索从第一页开始: 沿用上一次的页码会落在空页上(新结果更少时)。
-  currentPage.value = 1
+  searchPage.value = 1
+  hasMorePages.value = false
+  hasMoreSources.value = false
+  pageHadResults = false
 
   if (searchScope.value === 'group' && !selectedGroup.value) {
     releaseSearchCovers()
@@ -457,6 +393,16 @@ function doSearch(key: string, force = false) {
       resultsFromCache.value = true
       // 断点要在续搜前恢复：`streamSearch` 里每次落库都读它。
       searchLastIndex = cached.lastIndex
+      // 旧缓存条目没有这些字段（热更新/老进程内条目），不能直接参与
+      // Math.max —— `Math.max(1, undefined)` 是 NaN，会让请求页码变成 NaN。
+      const cachedPage = Number.isFinite(cached.page) ? Math.floor(cached.page) : 1
+      searchPage.value = Math.max(1, cachedPage)
+      hasMorePages.value = Boolean(cached.morePages)
+      hasMoreSources.value = Boolean(cached.moreSources)
+      // 续搜只覆盖剩余书源: 之前批次已拿到的结果无法从缓存字段区分,
+      // 按「有」处理, 避免剩余批次恰好为空时误判整页无结果。
+      const resumedMidPage = !cached.complete && cached.lastIndex >= 0 && hasMoreSources.value
+      pageHadResults = resumedMidPage || hasMorePages.value
       // 未完成 + 已过保质期：断点续搜没有意义了（那个 key 是对旧书源列表算的，
       // 隔太久书源可能已经增删过），直接按新搜索重跑，别拿过期结果垫底。
       const expiredAndIncomplete = !cached.complete && searchSessionCache.isStale(cached)
@@ -468,17 +414,24 @@ function doSearch(key: string, force = false) {
         shelfStore.searchResults = []
         shelfStore.isSearching = true
         searchLastIndex = -1
-        streamSearch(key, sessionKey, -1)
+        searchPage.value = 1
+        hasMorePages.value = false
+        hasMoreSources.value = false
+        pageHadResults = false
+        streamSearch(key, sessionKey, -1, 1)
       } else {
         // 上次还没搜完就离开了（典型：搜索进行中点书进阅读页）。
         // 手机端这时搜索仍在 SearchViewModel 里继续跑，回来接着看即可；
         // 本项目的搜索页组件会被卸载、流也随之关闭，所以这里**续搜**：
         // 先把已有结果摆出来，再从断点接着要后面的批次，而不是从头再来。
         shelfStore.isSearching = true
-        streamSearch(key, sessionKey, cached.lastIndex)
+        streamSearch(key, sessionKey, cached.lastIndex, Math.max(1, cached.page))
       }
       nextTick(() => {
         resultsContainerRef.value?.scrollTo({ top: 0 })
+        // 缓存里可能还有下一页且结果不足一屏: 没有分页按钮后, 只能靠
+        // 这里补一次触底判断。
+        handleResultsScroll()
       })
       return
     }
@@ -490,7 +443,7 @@ function doSearch(key: string, force = false) {
 
   shelfStore.searchResults = []
   shelfStore.isSearching = true
-  streamSearch(key, sessionKey, -1)
+  streamSearch(key, sessionKey, -1, 1)
 }
 
 /**
@@ -502,11 +455,12 @@ function doSearch(key: string, force = false) {
  * 离开只是 `pause()`，回来 `resume()` 接着推。这里没有常驻 ViewModel，只能在
  * 重新挂载时根据缓存里的 `lastIndex` 续上 —— 用户看到的连续性是一样的。
  */
-function streamSearch(key: string, sessionKey: string, startIndex: number) {
+function streamSearch(key: string, sessionKey: string, startIndex: number, pageNo = searchPage.value) {
   const generation = ++searchGeneration
 
   const stream = searchBookMultiSSE({
     key,
+    page: pageNo,
     concurrentCount: 24,
     bookSourceGroup: searchScope.value === 'group' ? selectedGroup.value : undefined,
     bookSourceUrl: searchScope.value === 'source' ? selectedSourceUrl.value : undefined,
@@ -530,7 +484,13 @@ function streamSearch(key: string, sessionKey: string, startIndex: number) {
    *
    *  **不能复用 `isCurrentSearch()`**：它含 `eventSource === stream`，而调用点
    *  多在 `eventSource = null` 之后，一判就 false —— 缓存会静默地写不进去。 */
-  const commitSession = (complete: boolean, lastIndex: number) => {
+  const commitSession = (
+    complete: boolean,
+    lastIndex: number,
+    page = searchPage.value,
+    morePages = hasMorePages.value,
+    moreSources = hasMoreSources.value,
+  ) => {
     if (!sessionKey || generation !== searchGeneration) return
     if (shelfStore.searchKey !== key) return
     searchSessionCache.set(
@@ -539,6 +499,9 @@ function streamSearch(key: string, sessionKey: string, startIndex: number) {
       shelfStore.searchResults.slice(),
       complete,
       lastIndex,
+      page,
+      morePages,
+      moreSources,
     )
   }
 
@@ -547,6 +510,7 @@ function streamSearch(key: string, sessionKey: string, startIndex: number) {
     try {
       const data = event.data as { data?: SearchBook[]; lastIndex?: number }
       if (data.data && Array.isArray(data.data)) {
+        if (data.data.length > 0) pageHadResults = true
         const byKey = new Map(shelfStore.searchResults.map((r) => [searchMergeKey(r), r]))
         coverCacheSession.collect(data.data)
         for (const b of data.data) {
@@ -562,21 +526,40 @@ function streamSearch(key: string, sessionKey: string, startIndex: number) {
         shelfStore.searchResults = Array.from(byKey.values())
         // 边收边存：中途离开也不至于什么都没有。
         const nextIndex = typeof data.lastIndex === 'number' ? data.lastIndex : searchLastIndex
-        searchLastIndex = nextIndex
-        commitSession(false, nextIndex)
+        // 书源按完成顺序到达, 断点只能前进不能回退。
+        searchLastIndex = Math.max(searchLastIndex, nextIndex)
+        commitSession(false, searchLastIndex, searchPage.value, false)
       }
     } catch { /* skip */ }
   }
 
   stream.addEventListener('end', (event) => {
     if (!isCurrentSearch()) return
-    const payload = event.data as { lastIndex?: number; hasMore?: boolean }
-    if (typeof payload?.lastIndex === 'number') searchLastIndex = payload.lastIndex
+    const payload = event.data as {
+      lastIndex?: number
+      hasMore?: boolean
+      hasMorePages?: boolean
+    }
+    if (typeof payload?.lastIndex === 'number') {
+      searchLastIndex = Math.max(searchLastIndex, payload.lastIndex)
+    }
     shelfStore.isSearching = false
     stream.close()
     eventSource = null
+    // 单次续拉只覆盖部分书源时, `hasMorePages` 仅代表这一批; 同一页
+    // 可能分多批扫完, 所以只要本页任一批有结果就算“这页还有下一页”。
+    // 与 legado `SearchModel` 的 `hasMore = hasMore || items.isNotEmpty()`
+    // 一致: 搜索结果不做“重复页”推断, 空页才停。
+    hasMorePages.value = pageHadResults || payload?.hasMorePages === true
+    hasMoreSources.value = payload?.hasMore === true
     // 还有更多（后端分页）时不能标 complete，否则回来不会再续。
-    commitSession(payload?.hasMore !== true, searchLastIndex)
+    // 「这一页的书源已经全部扫完」就是一个可复用的完整快照；是否还有
+    // 下一页由 hasMorePages 单独携带，不应让缓存一直处于 incomplete 而
+    // 在从阅读页返回时多发一次空请求。
+    commitSession(!hasMoreSources.value, searchLastIndex)
+    // 结果不足一屏时滚动事件不会触发, 这里主动补一次加载, 否则用户
+    // 看不到任何继续加载的入口。
+    nextTick(() => handleResultsScroll())
   })
 
   stream.addEventListener('error', () => {
@@ -634,7 +617,6 @@ watch(
       shelfStore.searchResults = []
       shelfStore.isSearching = false
       resultsFromCache.value = false
-      currentPage.value = 1
     }
   },
   { immediate: true }
@@ -695,8 +677,13 @@ onUnmounted(() => {
         sessionKey,
         key,
         shelfStore.searchResults.slice(),
-        !shelfStore.isSearching && searchLastIndex >= 0,
+        !shelfStore.isSearching
+          && searchLastIndex >= 0
+          && !hasMoreSources.value,
         searchLastIndex,
+        searchPage.value,
+        hasMorePages.value,
+        hasMoreSources.value,
       )
     }
   }
@@ -913,65 +900,6 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   background: var(--color-bg-elevated);
   color: var(--color-text);
   font-size: var(--text-sm);
-}
-
-.pagination {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-4) 0 var(--space-8);
-}
-
-.pagination-count {
-  font-size: var(--text-sm);
-  color: var(--color-text-tertiary);
-}
-
-.pagination-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-}
-
-.page-btn {
-  min-width: 36px;
-  min-height: 36px;
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
-  cursor: pointer;
-  transition: all var(--duration-fast);
-}
-
-.page-btn:hover:not(:disabled):not(.active) {
-  color: var(--color-primary);
-  border-color: var(--color-primary);
-  background: var(--color-bg-hover);
-}
-
-.page-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.page-number.active {
-  color: var(--color-primary-soft-text);
-  background: var(--color-primary-soft-bg);
-  border-color: var(--color-primary-soft-border);
-  font-weight: 600;
-}
-
-.page-ellipsis {
-  min-width: 24px;
-  text-align: center;
-  color: var(--color-text-tertiary);
-  user-select: none;
 }
 
 @media (max-width: 720px) {

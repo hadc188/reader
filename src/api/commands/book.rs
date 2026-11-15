@@ -331,6 +331,7 @@ pub async fn cancel_book_search(
 #[derive(Debug, Deserialize)]
 pub struct SearchBookMultiSseRequest {
     key: Option<String>,
+    page: Option<i32>,
     #[serde(rename = "bookSourceUrl")]
     book_source_url: Option<String>,
     #[serde(rename = "bookSourceGroup")]
@@ -2217,6 +2218,7 @@ pub async fn search_book_multi_sse(
 ) -> Result<(), AppError> {
     let user_ns = "default";
     let key = req.key.unwrap_or_default();
+    let search_page = req.page.unwrap_or(1).max(1);
     let last_index = req.last_index.unwrap_or(-1);
     let concurrent = req.concurrent_count.unwrap_or(24).max(1) as usize;
     let book_source_url =
@@ -2274,6 +2276,10 @@ pub async fn search_book_multi_sse(
 
         let mut idx = last_index + 1;
         let mut last_idx = last_index;
+        // 当前书源页是否还有任何书源返回了结果。legado 用同一口径判断
+        // 「滚动到底还能不能再拉一页」：只要本页有源返回非空，就让客户端
+        // 继续请求下一页；下一页全空时自然停止。
+        let mut page_has_results = false;
         let mut tasks: FuturesUnordered<_> = FuturesUnordered::new();
 
         // Query EVERY source and emit each source's RAW results. We must NOT
@@ -2295,7 +2301,9 @@ pub async fn search_book_multi_sse(
                 let cur_idx = idx;
                 let user_ns_value = user_ns;
                 tasks.push(tokio::spawn(async move {
-                    let res = svc.search_book(&user_ns_value, &source, &k, 1).await;
+                    let res = svc
+                        .search_book(&user_ns_value, &source, &k, search_page)
+                        .await;
                     (cur_idx, source.book_source_name, res)
                 }));
                 idx += 1;
@@ -2309,14 +2317,17 @@ pub async fn search_book_multi_sse(
             if let Some(res) = next {
                 match res {
                     Ok((cur_idx, _source_name, Ok(list))) => {
-                        last_idx = cur_idx;
+                        // 任务完成顺序与书源下标无关, 不能直接覆盖: 先完成的
+                        // 大下标会被后完成的小下标改回去, 前端续搜就会重复扫。
+                        last_idx = last_idx.max(cur_idx);
                         if !list.is_empty() {
+                            page_has_results = true;
                             let payload = serde_json::json!({"event": "data", "lastIndex": cur_idx, "data": list});
                             let _ = on_event.send(payload);
                         }
                     }
                     Ok((cur_idx, _source_name, Err(e))) => {
-                        last_idx = cur_idx;
+                        last_idx = last_idx.max(cur_idx);
                         tracing::error!("search_book error from {}: {:?}", _source_name, e);
                     }
                     Err(e) => {
@@ -2328,7 +2339,12 @@ pub async fn search_book_multi_sse(
             }
         }
 
-        let _ = on_event.send(json_end(last_idx));
+        let _ = on_event.send(serde_json::json!({
+            "event": "end",
+            "lastIndex": last_idx,
+            "hasMore": (idx as usize) < sources.len(),
+            "hasMorePages": page_has_results
+        }));
     });
 
     Ok(())

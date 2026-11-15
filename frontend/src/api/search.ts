@@ -17,6 +17,8 @@ export function searchBookMulti(params: {
  */
 export function searchBookMultiSSE(params: {
   key: string
+  /** 书源内搜索页码（1 起）；同一书源会按页继续拉取。 */
+  page?: number
   bookSourceGroup?: string
   bookSourceUrl?: string
   concurrentCount?: number
@@ -29,6 +31,7 @@ export function searchBookMultiSSE(params: {
     'search_book_multi_sse',
     {
       key: params.key,
+      page: params.page ?? 1,
       taskId,
       ...(params.bookSourceGroup ? { bookSourceGroup: params.bookSourceGroup } : {}),
       ...(params.bookSourceUrl ? { bookSourceUrl: params.bookSourceUrl } : {}),

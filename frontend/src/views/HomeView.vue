@@ -138,14 +138,35 @@
             <path d="m15 18-6-6 6-6" />
           </svg>
         </button>
-        <div ref="groupTabsRef" class="tabs-scroll" @scroll="updateGroupScrollState" @wheel="handleGroupTabsWheel">
+        <div
+          :ref="setGroupTabsRef"
+          class="tabs-scroll"
+          :class="{ 'is-group-dragging': groupTabsDrag.dragActive.value }"
+          @scroll="updateGroupScrollState"
+          @wheel="handleGroupTabsWheel"
+        >
+          <div
+            v-if="groupTabsDrag.dropMarker.value"
+            class="group-drop-marker"
+            :style="groupTabsDrag.dropMarkerStyle.value"
+          />
           <button
             v-for="group in shelfStore.displayGroups"
             :key="group.groupId"
             :data-group-id="group.groupId"
             class="tab-item"
-            :class="{ active: shelfStore.activeGroupId === group.groupId }"
-            @click="shelfStore.activeGroupId = group.groupId"
+            :class="{
+              active: shelfStore.activeGroupId === group.groupId,
+              'is-group-dragging': groupTabsDrag.draggingGroupId.value === group.groupId && groupTabsDrag.dragActive.value,
+            }"
+            :aria-pressed="shelfStore.activeGroupId === group.groupId"
+            @click="groupTabsDrag.handleClick(group.groupId)"
+            @pointerdown="group.groupId > 0 && handleGroupTabPointerDown($event, group)"
+            @pointermove="groupTabsDrag.handlePointerMove($event)"
+            @touchmove="groupTabsDrag.handleTouchMove($event)"
+            @pointerup="groupTabsDrag.handlePointerUp($event)"
+            @pointercancel="groupTabsDrag.handlePointerCancel($event)"
+            @touchend="groupTabsDrag.handleTouchEnd($event)"
           >
             {{ group.groupName }}
           </button>
@@ -162,6 +183,20 @@
             <path d="m9 18 6-6-6-6" />
           </svg>
         </button>
+        <Teleport to="body">
+          <div
+            v-if="groupTabsDrag.dragActive.value"
+            class="group-drag-ghost"
+            :style="{
+              left: `${groupTabsDrag.ghost.value.x}px`,
+              top: `${groupTabsDrag.ghost.value.y}px`,
+              width: `${groupTabsDrag.ghost.value.width}px`,
+              height: `${groupTabsDrag.ghost.value.height}px`,
+            }"
+          >
+            {{ groupTabsDrag.draggedName.value }}
+          </div>
+        </Teleport>
         <!-- 编辑模式(全选/批量删除)作用于整个分组, 此时隐藏搜索框: 显示筛选
              子集却批量操作看不见的书, 对不可撤销的删除是危险的歧义。 -->
         <div v-if="!shelfStore.editMode" class="shelf-search">
@@ -309,7 +344,8 @@ import ExportBookModal from '../components/ExportBookModal.vue'
 import { showContextMenu, type MenuItem } from '../composables/useContextMenu'
 import { BOOK_SORT_KEYS, BOOK_SORT_OPTIONS, bookSortLabel } from '../utils/bookshelfSort'
 import { filterShelfBooks } from '../utils/bookshelfFilter'
-import type { Book, SearchBook } from '../types'
+import { useGroupDragSort } from '../composables/useGroupDragSort'
+import type { Book, BookGroup, SearchBook } from '../types'
 
 const router = useRouter()
 const shelfStore = useBookshelfStore()
@@ -322,6 +358,23 @@ const bookSearchText = ref('')
 const groupTabsRef = ref<HTMLElement | null>(null)
 const groupScrollLeft = ref(false)
 const groupScrollRight = ref(false)
+let groupTabsResizeObserver: ResizeObserver | null = null
+let groupTabsScrollTimer: number | null = null
+const groupTabsDrag = useGroupDragSort({
+  items: () => shelfStore.displayGroups.map((group) => ({
+    ...group,
+    draggable: group.groupId > 0,
+  })),
+  direction: 'horizontal',
+  disabled: () => shelfStore.editMode,
+  longPressOnTouch: true,
+  onTap: (groupId) => {
+    shelfStore.activeGroupId = groupId
+  },
+  onReorder: async (draggedId, targetId, placement) => {
+    await shelfStore.reorderGroups(draggedId, targetId, placement)
+  },
+})
 /** 书架网格实际展示的书: 当前分组按排序排好后, 再按关键词过滤。 */
 const visibleShelfBooks = computed(() => (
   filterShelfBooks(shelfStore.sortedBooks, bookSearchText.value)
@@ -344,6 +397,16 @@ function updateGroupScrollState() {
   groupScrollRight.value = tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1
 }
 
+function setGroupTabsRef(el: Element | { $el?: Element } | null) {
+  const tabs = el instanceof HTMLElement
+    ? el
+    : el && '$el' in el && el.$el instanceof HTMLElement
+      ? el.$el
+      : null
+  groupTabsRef.value = tabs
+  groupTabsDrag.containerRef.value = tabs
+}
+
 function scrollGroupTabs(direction: -1 | 1) {
   const tabs = groupTabsRef.value
   if (!tabs) return
@@ -351,7 +414,11 @@ function scrollGroupTabs(direction: -1 | 1) {
     left: direction * Math.max(160, tabs.clientWidth * 0.7),
     behavior: 'smooth',
   })
-  window.setTimeout(updateGroupScrollState, 300)
+  if (groupTabsScrollTimer !== null) window.clearTimeout(groupTabsScrollTimer)
+  groupTabsScrollTimer = window.setTimeout(() => {
+    groupTabsScrollTimer = null
+    updateGroupScrollState()
+  }, 300)
 }
 
 function handleGroupTabsWheel(event: WheelEvent) {
@@ -362,6 +429,11 @@ function handleGroupTabsWheel(event: WheelEvent) {
   event.preventDefault()
   tabs.scrollLeft += delta
 }
+
+function handleGroupTabPointerDown(event: PointerEvent, group: BookGroup) {
+  groupTabsDrag.handlePointerDown(event, group.groupId, group.groupName)
+}
+
 const showGroupSelect = ref(false)
 /** 右键「调整分组」时记住目标书; 为空表示走批量(编辑模式多选)路径。 */
 const groupTargetBookUrl = ref('')
@@ -529,20 +601,25 @@ watch(() => shelfStore.editMode, (editing) => {
   if (editing) bookSearchText.value = ''
 })
 
+function observeGroupTabs() {
+  groupTabsResizeObserver?.disconnect()
+  groupTabsResizeObserver = null
+  const tabs = groupTabsRef.value
+  if (!tabs || typeof ResizeObserver === 'undefined') {
+    updateGroupScrollState()
+    return
+  }
+  groupTabsResizeObserver = new ResizeObserver(updateGroupScrollState)
+  groupTabsResizeObserver.observe(tabs)
+  updateGroupScrollState()
+}
+
+watch(groupTabsRef, observeGroupTabs)
+
 watch(() => shelfStore.displayGroups, async () => {
   await nextTick()
   updateGroupScrollState()
 }, { immediate: true })
-
-const groupTabsResizeObserver = new ResizeObserver(() => updateGroupScrollState())
-
-onMounted(() => {
-  if (groupTabsRef.value) groupTabsResizeObserver.observe(groupTabsRef.value)
-})
-
-onBeforeUnmount(() => {
-  groupTabsResizeObserver.disconnect()
-})
 
 watch(() => shelfStore.activeGroupId, async (groupId) => {
   await nextTick()
@@ -676,6 +753,12 @@ watch(sortMenuOpen, (open) => {
 })
 
 onBeforeUnmount(() => {
+  groupTabsResizeObserver?.disconnect()
+  groupTabsResizeObserver = null
+  if (groupTabsScrollTimer !== null) {
+    window.clearTimeout(groupTabsScrollTimer)
+    groupTabsScrollTimer = null
+  }
   window.removeEventListener('click', onSortMenuOutsideClick, true)
   window.removeEventListener('keydown', onSortMenuKeydown)
 })
@@ -795,9 +878,43 @@ onBeforeUnmount(() => {
   min-width: 0;
   display: flex;
   gap: 0;
+  position: relative;
   overflow-x: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
+}
+
+.tabs-scroll.is-group-dragging {
+  cursor: grabbing;
+}
+
+.group-drop-marker {
+  position: absolute;
+  z-index: 2;
+  width: 2px;
+  pointer-events: none;
+  background: var(--color-primary);
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+
+.group-drag-ghost {
+  position: fixed;
+  z-index: calc(var(--z-sticky) + 10);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-3);
+  overflow: hidden;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-bg-elevated) 96%, transparent);
+  box-shadow: var(--shadow-xl);
+  color: var(--color-primary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .tabs-scroll-btn {
@@ -1024,6 +1141,9 @@ onBeforeUnmount(() => {
   transition: color var(--duration-fast);
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
 }
 
 .tab-item:hover {
@@ -1033,6 +1153,10 @@ onBeforeUnmount(() => {
 .tab-item.active {
   color: var(--color-primary);
   border-bottom-color: var(--color-primary);
+}
+
+.tab-item.is-group-dragging {
+  opacity: 0.35;
 }
 
 .shelf-grid-wrapper {

@@ -274,7 +274,11 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
 
   /** 按展示顺序整表落盘。调用方传入完整分组表(含虚拟分组),
    *  这里只重写 orderNo, 不增删任何 id。 */
-  async function reorderGroups(draggedId: number, targetId: number) {
+  async function reorderGroups(
+    draggedId: number,
+    targetId: number,
+    placement: 'before' | 'after' = 'before',
+  ) {
     if (draggedId === targetId) return
     const snapshot = groups.value.slice()
     const next = [...orderedGroups.value]
@@ -286,7 +290,10 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     const visibleNext = [...visible]
     const [moved] = visibleNext.splice(from, 1)
     if (!moved) return
-    visibleNext.splice(to, 0, moved)
+    const insertAt = placement === 'after'
+      ? (from < to ? to : to + 1)
+      : (from < to ? to - 1 : to)
+    visibleNext.splice(insertAt, 0, moved)
 
     const visibleIds = new Set(visibleNext.map((group) => group.groupId))
     let visibleIndex = 0

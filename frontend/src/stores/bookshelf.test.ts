@@ -229,9 +229,37 @@ describe('reorderGroups (调整分组顺序)', () => {
 
     await store.reorderGroups(1, 4)
 
-    expect(store.visibleGroups.map((g) => g.groupName)).toEqual(['仙侠', '都市', '玄幻'])
+    expect(store.visibleGroups.map((g) => g.groupName)).toEqual(['仙侠', '玄幻', '都市'])
     expect(store.visibleGroups.map((g) => g.orderNo)).toEqual([0, 1, 2])
     expect(saveBookGroupOrder).toHaveBeenCalledWith(store.groups)
+  })
+
+  it('默认插到目标分组之前', async () => {
+    vi.mocked(getBookGroups).mockResolvedValue([
+      { groupId: 1, groupName: '玄幻', orderNo: 0 },
+      { groupId: 2, groupName: '仙侠', orderNo: 1 },
+      { groupId: 4, groupName: '都市', orderNo: 2 },
+    ])
+    const store = useBookshelfStore()
+    await store.fetchGroups()
+
+    await store.reorderGroups(2, 1, 'before')
+
+    expect(store.visibleGroups.map((g) => g.groupName)).toEqual(['仙侠', '玄幻', '都市'])
+  })
+
+  it('先移除再插入时, after 只相对于剩余序列中的目标位置', async () => {
+    vi.mocked(getBookGroups).mockResolvedValue([
+      { groupId: 1, groupName: '玄幻', orderNo: 0 },
+      { groupId: 2, groupName: '仙侠', orderNo: 1 },
+      { groupId: 4, groupName: '都市', orderNo: 2 },
+    ])
+    const store = useBookshelfStore()
+    await store.fetchGroups()
+
+    await store.reorderGroups(1, 2, 'after')
+
+    expect(store.visibleGroups.map((g) => g.groupName)).toEqual(['仙侠', '玄幻', '都市'])
   })
 
   it('落盘失败时回滚顺序', async () => {
@@ -257,7 +285,7 @@ describe('reorderGroups (调整分组顺序)', () => {
     const store = useBookshelfStore()
     await store.fetchGroups()
 
-    await store.reorderGroups(1, 2)
+    await store.reorderGroups(2, 1)
 
     expect(store.visibleGroups.map((g) => g.groupName)).toEqual(['仙侠', '玄幻', '都市'])
     expect(store.groups.find((g) => g.groupId === 4)?.bookSort).toBe(4)

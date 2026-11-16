@@ -16,81 +16,101 @@
           <div class="modal-body">
             <div class="create-row">
               <input v-model.trim="newGroupName" class="group-input" placeholder="新建分组名称" @keyup.enter="createGroup" />
-              <button class="primary-btn" :disabled="!newGroupName" @click="createGroup">新建</button>
+              <button class="primary-btn" :disabled="!newGroupName || reordering" @click="createGroup">新建</button>
             </div>
 
             <div class="group-list">
               <div
-                v-for="(group, index) in shelfStore.visibleGroups"
-                :key="group.groupId"
-                class="group-item"
-                :class="{
-                  'is-selected': selectedIds.has(group.groupId),
-                }"
+                :ref="setGroupDragContainer"
+                class="group-list-drag-surface"
+                :class="{ 'is-group-dragging': groupDrag.dragActive.value }"
               >
-                <label class="group-check">
-                  <input
-                    type="checkbox"
-                    :checked="selectedIds.has(group.groupId)"
-                    :aria-label="`选择分组 ${group.groupName}`"
-                    @change="toggleSelect(group.groupId)"
-                  />
-                </label>
-                <input
-                  v-model.trim="editingNames[group.groupId]"
-                  class="group-name-input"
-                  :aria-label="`分组名称 ${group.groupName}`"
-                  @keyup.enter="renameGroup(group.groupId)"
+                <div
+                  v-if="groupDrag.dropMarker.value"
+                  class="group-drop-marker"
+                  :style="groupDrag.dropMarkerStyle.value"
                 />
-                <div class="group-actions">
-                  <button
-                    class="icon-btn"
-                    type="button"
-                    title="上移分组"
-                    aria-label="上移分组"
-                    :disabled="index === 0 || reordering"
-                    @click="moveGroup(group.groupId, -1)"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="m18 15-6-6-6 6" />
+                <div
+                  v-for="group in shelfStore.visibleGroups"
+                  :key="group.groupId"
+                  :data-group-id="group.groupId"
+                  class="group-item"
+                  :class="{
+                    'is-selected': selectedIds.has(group.groupId),
+                    'is-group-dragging': groupDrag.draggingGroupId.value === group.groupId && groupDrag.dragActive.value,
+                  }"
+                  @pointerdown="handleGroupPointerDown($event, group)"
+                  @pointermove="groupDrag.handlePointerMove"
+                  @touchmove="groupDrag.handleTouchMove($event)"
+                  @pointerup="groupDrag.handlePointerUp"
+                  @pointercancel="groupDrag.handlePointerCancel"
+                  @touchend="groupDrag.handleTouchEnd($event)"
+                >
+                  <span class="group-drag-handle" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                      <circle cx="9" cy="6" r="1.35" />
+                      <circle cx="15" cy="6" r="1.35" />
+                      <circle cx="9" cy="12" r="1.35" />
+                      <circle cx="15" cy="12" r="1.35" />
+                      <circle cx="9" cy="18" r="1.35" />
+                      <circle cx="15" cy="18" r="1.35" />
                     </svg>
-                  </button>
-                  <button
-                    class="icon-btn"
-                    type="button"
-                    title="下移分组"
-                    aria-label="下移分组"
-                    :disabled="index === shelfStore.visibleGroups.length - 1 || reordering"
-                    @click="moveGroup(group.groupId, 1)"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="m6 9 6 6 6-6" />
-                    </svg>
-                  </button>
-                  <span class="action-divider" aria-hidden="true"></span>
-                  <button
-                    class="icon-btn"
-                    type="button"
-                    title="保存分组名称"
-                    aria-label="保存分组名称"
-                    @click="renameGroup(group.groupId)"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M20 6 9 17l-5-5" />
-                    </svg>
-                  </button>
-                  <button
-                    class="icon-btn danger"
-                    type="button"
-                    title="删除分组"
-                    aria-label="删除分组"
-                    @click="deleteGroup(group.groupId, group.groupName)"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                    </svg>
-                  </button>
+                  </span>
+                  <label class="group-check">
+                    <input
+                      type="checkbox"
+                      :checked="selectedIds.has(group.groupId)"
+                      :aria-label="`选择分组 ${group.groupName}`"
+                      @change="toggleSelect(group.groupId)"
+                    />
+                  </label>
+                  <input
+                    v-model.trim="editingNames[group.groupId]"
+                    class="group-name-input"
+                    :aria-label="`分组名称 ${group.groupName}`"
+                    @keyup.enter="renameGroup(group.groupId)"
+                  />
+                  <div class="group-actions">
+                    <button
+                      class="icon-btn"
+                      type="button"
+                      title="保存分组名称"
+                      aria-label="保存分组名称"
+                      :disabled="reordering"
+                      @click="renameGroup(group.groupId)"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M20 6 9 17l-5-5" />
+                      </svg>
+                    </button>
+                    <button
+                      class="icon-btn danger"
+                      type="button"
+                      title="删除分组"
+                      aria-label="删除分组"
+                      :disabled="reordering"
+                      @click="deleteGroup(group.groupId, group.groupName)"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
+                <Teleport to="body">
+                  <div
+                    v-if="groupDrag.dragActive.value"
+                    class="group-drag-ghost"
+                    :style="{
+                      left: `${groupDrag.ghost.value.x}px`,
+                      top: `${groupDrag.ghost.value.y}px`,
+                      width: `${groupDrag.ghost.value.width}px`,
+                      height: `${groupDrag.ghost.value.height}px`,
+                    }"
+                  >
+                    {{ groupDrag.draggedName.value }}
+                  </div>
+                </Teleport>
               </div>
               <p v-if="!shelfStore.visibleGroups.length" class="empty-hint">还没有分组</p>
             </div>
@@ -109,7 +129,7 @@
             <span class="selection-count">已选 {{ selectedIds.size }} / {{ shelfStore.visibleGroups.length }}</span>
             <button
               class="danger-btn"
-              :disabled="!selectedIds.size || deleting"
+              :disabled="!selectedIds.size || deleting || reordering"
               @click="deleteSelected"
             >{{ deleting ? '删除中…' : '删除所选' }}</button>
           </div>
@@ -123,6 +143,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useBookshelfStore } from '../../stores/bookshelf'
 import { useAppStore } from '../../stores/app'
+import { useGroupDragSort } from '../../composables/useGroupDragSort'
+import type { BookGroup } from '../../types'
 
 defineProps<{
   modelValue: boolean
@@ -139,6 +161,15 @@ const editingNames = reactive<Record<number, string>>({})
 const selectedIds = reactive(new Set<number>())
 const deleting = ref(false)
 const reordering = ref(false)
+const groupDrag = useGroupDragSort({
+  items: () => shelfStore.visibleGroups,
+  direction: 'vertical',
+  disabled: () => reordering.value,
+  longPressOnTouch: true,
+  onReorder: (draggedId, targetId, placement) => (
+    persistGroupOrder(draggedId, targetId, placement)
+  ),
+})
 
 const allSelected = computed(() => (
   shelfStore.visibleGroups.length > 0 && selectedIds.size === shelfStore.visibleGroups.length
@@ -169,28 +200,36 @@ function toggleSelectAll() {
   }
 }
 
-async function moveGroup(groupId: number, offset: -1 | 1) {
-  const groups = shelfStore.visibleGroups
-  const from = groups.findIndex((group) => group.groupId === groupId)
-  const target = groups[from + offset]
-  if (from < 0 || !target) return
-  await persistGroupOrder(groupId, target.groupId)
-}
-
-async function persistGroupOrder(draggedId: number, targetId: number) {
+async function persistGroupOrder(
+  draggedId: number,
+  targetId: number,
+  placement: 'before' | 'after' = 'before',
+) {
   if (reordering.value) return
   reordering.value = true
   try {
-    await shelfStore.reorderGroups(draggedId, targetId)
-    appStore.showToast('分组顺序已更新', 'success')
+    await shelfStore.reorderGroups(draggedId, targetId, placement)
   } catch (e: unknown) {
-    appStore.showToast((e as Error).message || '调整分组顺序失败', 'error')
+    // 保存失败时分组顺序会自动回滚, 不再额外弹提示。
   } finally {
     reordering.value = false
   }
 }
 
+function handleGroupPointerDown(event: PointerEvent, group: BookGroup) {
+  groupDrag.handlePointerDown(event, group.groupId, group.groupName)
+}
+
+function setGroupDragContainer(el: Element | { $el?: Element } | null) {
+  groupDrag.containerRef.value = el instanceof HTMLElement
+    ? el
+    : el && '$el' in el && el.$el instanceof HTMLElement
+      ? el.$el
+      : null
+}
+
 async function deleteGroup(groupId: number, groupName: string) {
+  if (reordering.value) return
   const ok = await appStore.confirmDialog(`确定删除分组“${groupName}”？`, { title: '删除分组', danger: true })
   if (!ok) return
   try {
@@ -204,7 +243,7 @@ async function deleteGroup(groupId: number, groupName: string) {
 /** 批量删除选中的分组。只弹一次确认 —— 逐个确认会让"批量"失去意义。 */
 async function deleteSelected() {
   const ids = [...selectedIds]
-  if (!ids.length || deleting.value) return
+  if (!ids.length || deleting.value || reordering.value) return
   const ok = await appStore.confirmDialog(
     `确定删除选中的 ${ids.length} 个分组？分组内的书会移到未分组，不会被删除。`,
     { title: '批量删除分组', danger: true },
@@ -223,7 +262,7 @@ async function deleteSelected() {
 }
 
 async function createGroup() {
-  if (!newGroupName.value) return
+  if (!newGroupName.value || reordering.value) return
   try {
     await shelfStore.saveGroup(newGroupName.value)
     newGroupName.value = ''
@@ -234,6 +273,7 @@ async function createGroup() {
 }
 
 async function renameGroup(groupId: number) {
+  if (reordering.value) return
   const name = editingNames[groupId]?.trim()
   if (!name) return
   try {
@@ -392,16 +432,75 @@ async function renameGroup(groupId: number) {
   gap: 2px;
 }
 
+.group-list-drag-surface {
+  position: relative;
+}
+
 .group-item {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   padding: 4px var(--space-2);
+  position: relative;
   border-radius: var(--radius-md);
   border: 1px solid transparent;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
   transition:
     background-color 0.18s var(--ease-out),
     border-color 0.18s var(--ease-out);
+}
+
+.group-item:active {
+  cursor: grabbing;
+}
+
+.group-item.is-group-dragging {
+  opacity: 0.35;
+}
+
+.group-drag-handle {
+  width: 18px;
+  height: 28px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-tertiary);
+  pointer-events: none;
+}
+
+.group-drag-handle svg {
+  width: 17px;
+  height: 17px;
+}
+
+.group-drop-marker {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  background: var(--color-primary);
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+
+.group-drag-ghost {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 2);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  overflow: hidden;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-bg-elevated) 96%, transparent);
+  box-shadow: var(--shadow-xl);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .group-item:hover {
@@ -486,13 +585,6 @@ async function renameGroup(groupId: number) {
 .icon-btn svg {
   width: 15px;
   height: 15px;
-}
-
-.action-divider {
-  width: 1px;
-  height: 16px;
-  margin: 6px 2px;
-  background: var(--color-border-light);
 }
 
 .group-check {

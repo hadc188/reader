@@ -8,6 +8,7 @@ import {
   saveBook as apiSaveBook,
   saveBookGroupId as apiSaveBookGroupId,
   saveBookGroup as apiSaveBookGroup,
+  saveBookGroupOrder as apiSaveBookGroupOrder,
   deleteBookGroups as apiDeleteBookGroups,
   saveBooks as apiSaveBooks,
 } from '../api/bookshelf'
@@ -149,6 +150,15 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   /** 内置标签名: 同名分组再出现一次同样是重复项。 */
   const BUILTIN_GROUP_NAMES = new Set(['全部', '未分组'])
 
+  /** 匹配 `orderNo` 后按数组原序稳定排列: showAll 把原始 groups 放在末尾,
+   *  展示时再整体归位。这样相邻移动只换 id, 不会把任何一条从表中丢掉。 */
+  const orderedGroups = computed(() => {
+    const next = [...groups.value].sort((a, b) => (
+    (a.orderNo ?? 0) - (b.orderNo ?? 0)
+    ))
+    return next
+  })
+
   const displayGroups = computed(() => {
     const all: BookGroup = { groupId: -1, groupName: '全部' }
     const ungrouped: BookGroup = { groupId: 0, groupName: '未分组' }
@@ -168,7 +178,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
    *  「全部 / 本地 / 音频」这些 Legado 虚拟分组, 还能把它们删掉, 删了就直接
    *  污染备份数据; 而标签栏里又看不到它们, 前后不一致。 */
   const visibleGroups = computed(() => (
-    groups.value.filter((group) => (
+    orderedGroups.value.filter((group) => (
       group.groupId > 0 && !BUILTIN_GROUP_NAMES.has(group.groupName)
     ))
   ))
@@ -253,11 +263,48 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     await apiSaveBookGroup({
       groupId,
       groupName,
-      orderNo: groups.value.length,
+      orderNo: groupId === 0
+        ? Math.max(-1, ...groups.value.map((group) => group.orderNo ?? 0)) + 1
+        : groups.value.find((group) => group.groupId === groupId)?.orderNo ?? 0,
     })
     await fetchGroups()
     if (groupId !== 0) return groupId
     return groups.value.find((group) => !knownIds.has(group.groupId))?.groupId ?? 0
+  }
+
+  /** 按展示顺序整表落盘。调用方传入完整分组表(含虚拟分组),
+   *  这里只重写 orderNo, 不增删任何 id。 */
+  async function reorderGroups(draggedId: number, targetId: number) {
+    if (draggedId === targetId) return
+    const snapshot = groups.value.slice()
+    const next = [...orderedGroups.value]
+    const visible = visibleGroups.value
+    const from = visible.findIndex((group) => group.groupId === draggedId)
+    const to = visible.findIndex((group) => group.groupId === targetId)
+    if (from < 0 || to < 0) return
+
+    const visibleNext = [...visible]
+    const [moved] = visibleNext.splice(from, 1)
+    if (!moved) return
+    visibleNext.splice(to, 0, moved)
+
+    const visibleIds = new Set(visibleNext.map((group) => group.groupId))
+    let visibleIndex = 0
+    const reordered = next.map((group) => {
+      if (!visibleIds.has(group.groupId)) return group
+      const nextGroup = visibleNext[visibleIndex++]!
+      return nextGroup.orderNo === visibleIndex - 1
+        ? nextGroup
+        : { ...nextGroup, orderNo: visibleIndex - 1 }
+    })
+    groups.value = reordered
+
+    try {
+      await apiSaveBookGroupOrder(groups.value)
+    } catch (error) {
+      groups.value = snapshot
+      throw error
+    }
   }
 
   async function removeGroup(groupId: number) {
@@ -519,7 +566,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     groups, activeGroupId, displayGroups, visibleGroups, filteredBooks,
     sortMode, activeGroupSort, effectiveSortMode, sortedBooks,
     setSortMode, setActiveGroupSort,
-    fetchGroups, saveGroup, removeGroup, removeGroups,
+    fetchGroups, saveGroup, reorderGroups, removeGroup, removeGroups,
     searchResults, isSearching, searchKey,
     searchScope, searchGroup, searchSourceUrl, startSearch, clearSearch, isSearchMode,
     editMode,

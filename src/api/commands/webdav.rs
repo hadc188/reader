@@ -763,7 +763,7 @@ fn parse_webdav_backup_entries(
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
-    let root_path = webdav_root_path(root_url)?;
+    webdav_root_path(root_url)?;
     let mut reader = Reader::from_reader(Cursor::new(body));
     reader.trim_text(true);
     let mut buffer = Vec::new();
@@ -785,17 +785,25 @@ fn parse_webdav_backup_entries(
                 let value = text.unescape().map_err(|error| AppError::BadRequest(error.to_string()))?;
                 match field.as_str() {
                     "href" => {
-                        if let Some(name) = webdav_href_file_name(&value, &root_path) {
-                            if name.starts_with("backup") && name.to_ascii_lowercase().ends_with(".zip") {
-                                current = Some(LegadoWebdavBackupEntry { name, size: 0, last_modified: 0 });
+                        if let Some(name) = webdav_href_last_segment(&value) {
+                            if name.starts_with("backup") {
+                                current = Some(LegadoWebdavBackupEntry {
+                                    name,
+                                    size: 0,
+                                    last_modified: 0,
+                                });
                             }
                         }
                     }
                     "getcontentlength" => {
-                        if let Some(entry) = current.as_mut() { entry.size = value.trim().parse().unwrap_or(0); }
+                        if let Some(entry) = current.as_mut() {
+                            entry.size = value.trim().parse().unwrap_or(0);
+                        }
                     }
                     "getlastmodified" => {
-                        if let Some(entry) = current.as_mut() { entry.last_modified = parse_http_date_millis(value.trim()); }
+                        if let Some(entry) = current.as_mut() {
+                            entry.last_modified = parse_http_date_millis(value.trim());
+                        }
                     }
                     _ => {}
                 }
@@ -803,7 +811,9 @@ fn parse_webdav_backup_entries(
             }
             Ok(Event::End(event)) => {
                 if String::from_utf8_lossy(event.local_name().as_ref()).eq_ignore_ascii_case("response") {
-                    if let Some(entry) = current.take() { entries.push(entry); }
+                    if let Some(entry) = current.take() {
+                        entries.push(entry);
+                    }
                 }
                 field.clear();
             }
@@ -822,9 +832,10 @@ fn propfind_method() -> Result<reqwest::Method, AppError> {
         .map_err(|error| AppError::Internal(error.into()))
 }
 
-/// 把 PROPFIND 的根 URL 归一成可前缀匹配的路径（去掉末尾斜杠）。
+/// 校验并解析 PROPFIND 的根 URL。
 ///
-/// `href` 里既有绝对路径也有裸文件名，都要先与它对齐才能取出相对名。
+/// 备份列表不再要求 href 与它前缀匹配（改为取末段，与手机端一致）；
+/// 这里仍保留 URL 校验，避免无效地址静默返回空列表。
 fn webdav_root_path(root_url: &str) -> Result<String, AppError> {
     Ok(url::Url::parse(root_url)
         .map_err(|_| AppError::BadRequest("网盘地址格式无效".to_string()))?
@@ -850,6 +861,31 @@ fn webdav_href_file_name(href: &str, root_path: &str) -> Option<String> {
     Some(
         urlencoding::decode(relative)
             .unwrap_or_else(|_| relative.into())
+            .into_owned(),
+    )
+}
+
+/// 与手机端 `WebDav.parseBody` 一致，从 href 取最后一段文件名。
+///
+/// 不能先要求 href 与客户端配置目录完全对齐：服务端可能返回
+/// `/dav/...`、相对路径或带反向代理前缀的绝对路径。手机端只做解码、
+/// 去掉末尾 `/`，再取最后一个 `/` 后面的内容；这里保持同一规则。
+fn webdav_href_last_segment(href: &str) -> Option<String> {
+    let href = href.trim();
+    if href.is_empty() {
+        return None;
+    }
+    let path = url::Url::parse(href)
+        .map(|url| url.path().to_string())
+        .unwrap_or_else(|_| href.to_string());
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
+    if name.is_empty() {
+        return None;
+    }
+    Some(
+        urlencoding::decode(name)
+            .unwrap_or_else(|_| name.into())
             .into_owned(),
     )
 }
@@ -1701,21 +1737,70 @@ mod tests {
     }
 
     #[test]
-    fn parse_webdav_backup_entries_skips_non_zip_and_subdirs() {
+    fn parse_webdav_backup_entries_matches_legado_href_prefix() {
         let root = "https://dav.example.com/dav/legado/";
         let body = br#"<multistatus xmlns="DAV:">
   <response><href>/dav/legado/backup-ok.zip</href></response>
   <response><href>/dav/legado/other.zip</href></response>
   <response><href>/dav/legado/nested/backup-deep.zip</href></response>
   <response><href>/dav/legado/backup-readme.txt</href></response>
+  <response><href>/dav/legado/backup-no-extension</href></response>
 </multistatus>"#;
         let entries = parse_webdav_backup_entries(body, root).unwrap();
-        // 只收「backup 开头 + .zip 结尾」且位于本层的条目。
-        assert_eq!(entries.len(), 1);
+        // 与手机端 WebDav.parseBody + AppCloudStorage.backupFiles 对齐：
+        // 从 href 取末段，只按 backup 前缀过滤。
+        assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].name, "backup-ok.zip");
+        assert_eq!(entries[1].name, "backup-deep.zip");
+        assert_eq!(entries[2].name, "backup-readme.txt");
+        assert_eq!(entries[3].name, "backup-no-extension");
         // 未提供 size/date 时取默认值。
         assert_eq!(entries[0].size, 0);
         assert_eq!(entries[0].last_modified, 0);
+    }
+
+    #[test]
+    fn parse_webdav_backup_entries_handles_response_order_independent() {
+        let root = "https://reader.example.com/reader3/dav/legado/";
+        let date = "Fri, 02 Oct 2026 10:00:00 GMT";
+        let body = br#"<d:multistatus xmlns:d="DAV:">
+  <d:response>
+    <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat>
+    <d:href>/dav/legado/</d:href>
+  </d:response>
+  <d:response>
+    <d:href>/dav/legado/backup-after-root.zip</d:href>
+    <d:propstat><d:prop>
+      <d:getlastmodified>Fri, 02 Oct 2026 10:00:00 GMT</d:getlastmodified>
+      <d:getcontentlength>1000</d:getcontentlength>
+      <d:resourcetype/>
+    </d:prop></d:propstat>
+  </d:response>
+</d:multistatus>"#;
+        let entries = parse_webdav_backup_entries(body, root).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "backup-after-root.zip");
+        assert_eq!(entries[0].size, 1000);
+        assert_eq!(
+            entries[0].last_modified,
+            chrono::DateTime::parse_from_rfc2822(date)
+                .unwrap()
+                .timestamp_millis()
+        );
+    }
+
+    #[test]
+    fn parse_webdav_backup_entries_accepts_href_with_foreign_prefix() {
+        let root = "https://reader.example.com/reader3/dav/legado/";
+        // 服务端返回自己的 WebDAV 前缀时，桌面端也必须像手机端一样列出。
+        let body = br#"<multistatus xmlns="DAV:">
+  <response><href>/dav/reader3/dav/legado/backup-2026-11-15-reader-desktop-164324.zip</href></response>
+  <response><href>backup-relative.zip</href></response>
+</multistatus>"#;
+        let entries = parse_webdav_backup_entries(body, root).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "backup-2026-11-15-reader-desktop-164324.zip");
+        assert_eq!(entries[1].name, "backup-relative.zip");
     }
 
     #[test]

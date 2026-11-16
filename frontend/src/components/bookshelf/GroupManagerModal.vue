@@ -21,10 +21,12 @@
 
             <div class="group-list">
               <div
-                v-for="group in shelfStore.visibleGroups"
+                v-for="(group, index) in shelfStore.visibleGroups"
                 :key="group.groupId"
                 class="group-item"
-                :class="{ 'is-selected': selectedIds.has(group.groupId) }"
+                :class="{
+                  'is-selected': selectedIds.has(group.groupId),
+                }"
               >
                 <label class="group-check">
                   <input
@@ -41,8 +43,53 @@
                   @keyup.enter="renameGroup(group.groupId)"
                 />
                 <div class="group-actions">
-                  <button class="ghost-btn" @click="renameGroup(group.groupId)">保存</button>
-                  <button class="ghost-btn danger" @click="deleteGroup(group.groupId, group.groupName)">删除</button>
+                  <button
+                    class="icon-btn"
+                    type="button"
+                    title="上移分组"
+                    aria-label="上移分组"
+                    :disabled="index === 0 || reordering"
+                    @click="moveGroup(group.groupId, -1)"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="m18 15-6-6-6 6" />
+                    </svg>
+                  </button>
+                  <button
+                    class="icon-btn"
+                    type="button"
+                    title="下移分组"
+                    aria-label="下移分组"
+                    :disabled="index === shelfStore.visibleGroups.length - 1 || reordering"
+                    @click="moveGroup(group.groupId, 1)"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
+                  </button>
+                  <span class="action-divider" aria-hidden="true"></span>
+                  <button
+                    class="icon-btn"
+                    type="button"
+                    title="保存分组名称"
+                    aria-label="保存分组名称"
+                    @click="renameGroup(group.groupId)"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M20 6 9 17l-5-5" />
+                    </svg>
+                  </button>
+                  <button
+                    class="icon-btn danger"
+                    type="button"
+                    title="删除分组"
+                    aria-label="删除分组"
+                    @click="deleteGroup(group.groupId, group.groupName)"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    </svg>
+                  </button>
                 </div>
               </div>
               <p v-if="!shelfStore.visibleGroups.length" class="empty-hint">还没有分组</p>
@@ -91,6 +138,7 @@ const newGroupName = ref('')
 const editingNames = reactive<Record<number, string>>({})
 const selectedIds = reactive(new Set<number>())
 const deleting = ref(false)
+const reordering = ref(false)
 
 const allSelected = computed(() => (
   shelfStore.visibleGroups.length > 0 && selectedIds.size === shelfStore.visibleGroups.length
@@ -118,6 +166,27 @@ function toggleSelectAll() {
     selectedIds.clear()
   } else {
     shelfStore.visibleGroups.forEach((group) => selectedIds.add(group.groupId))
+  }
+}
+
+async function moveGroup(groupId: number, offset: -1 | 1) {
+  const groups = shelfStore.visibleGroups
+  const from = groups.findIndex((group) => group.groupId === groupId)
+  const target = groups[from + offset]
+  if (from < 0 || !target) return
+  await persistGroupOrder(groupId, target.groupId)
+}
+
+async function persistGroupOrder(draggedId: number, targetId: number) {
+  if (reordering.value) return
+  reordering.value = true
+  try {
+    await shelfStore.reorderGroups(draggedId, targetId)
+    appStore.showToast('分组顺序已更新', 'success')
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '调整分组顺序失败', 'error')
+  } finally {
+    reordering.value = false
   }
 }
 
@@ -378,39 +447,52 @@ async function renameGroup(groupId: number) {
   flex-shrink: 0;
 }
 
-/* 行内操作按钮: 默认无边框无底色, 悬停才浮现 —— 避免每行挂两个方框。 */
-.ghost-btn {
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   border-radius: var(--radius-md);
   border: 1px solid transparent;
-  padding: 7px var(--space-3);
   background: transparent;
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
   transition:
     background-color 0.18s var(--ease-out),
     color 0.18s var(--ease-out),
     transform 0.12s var(--ease-out);
 }
 
-.ghost-btn:hover {
+.icon-btn:hover:not(:disabled) {
   background: var(--color-bg-active);
   color: var(--color-text);
 }
 
-.ghost-btn:active {
+.icon-btn:active:not(:disabled) {
   transform: translateY(1px);
 }
 
-.ghost-btn.danger {
-  /* 默认用次级文字色: 每行常驻一个红字会让列表很吵(4 行就是 4 个红点),
-     而破坏性动作的提示应在指针真正靠近时才出现。 */
-  color: var(--color-text-tertiary);
+.icon-btn:disabled {
+  opacity: 0.28;
+  cursor: default;
 }
 
-.ghost-btn.danger:hover {
+.icon-btn.danger:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-danger) 12%, transparent);
   color: var(--color-danger);
+}
+
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.action-divider {
+  width: 1px;
+  height: 16px;
+  margin: 6px 2px;
+  background: var(--color-border-light);
 }
 
 .group-check {

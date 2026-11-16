@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useBookshelfStore } from './bookshelf'
-import { getBookshelfWithCacheInfo, getBookGroups, saveBooks } from '../api/bookshelf'
+import {
+  getBookshelfWithCacheInfo,
+  getBookGroups,
+  saveBookGroupOrder,
+  saveBooks,
+} from '../api/bookshelf'
 
 vi.mock('../api/bookshelf', () => ({
   getBookshelfWithCacheInfo: vi.fn(),
@@ -10,6 +15,7 @@ vi.mock('../api/bookshelf', () => ({
   deleteBooks: vi.fn(),
   saveBookGroupId: vi.fn(),
   saveBookGroup: vi.fn(),
+  saveBookGroupOrder: vi.fn(),
   deleteBookGroup: vi.fn(),
   saveBooks: vi.fn(),
 }))
@@ -188,6 +194,95 @@ describe('displayGroups (书架分组标签)', () => {
     await store.fetchGroups()
 
     expect(store.activeGroupId).toBe(-1)
+  })
+
+  it('按 orderNo 排列标签, 内置标签仍固定在两端', async () => {
+    vi.mocked(getBookGroups).mockResolvedValue([
+      { groupId: 4, groupName: '仙侠', orderNo: 2 },
+      { groupId: -1, groupName: '全部', orderNo: 9 },
+      { groupId: 2, groupName: '玄幻', orderNo: 0 },
+      { groupId: 8, groupName: '都市', orderNo: 1 },
+    ])
+
+    const store = useBookshelfStore()
+    await store.fetchGroups()
+
+    expect(store.displayGroups.map((g) => g.groupName)).toEqual(['全部', '玄幻', '都市', '仙侠', '未分组'])
+  })
+})
+
+describe('reorderGroups (调整分组顺序)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(saveBookGroupOrder).mockResolvedValue('success')
+  })
+
+  it('按目标位置重排并整表落盘', async () => {
+    vi.mocked(getBookGroups).mockResolvedValue([
+      { groupId: -1, groupName: '全部', orderNo: 0 },
+      { groupId: 1, groupName: '玄幻', orderNo: 1 },
+      { groupId: 2, groupName: '仙侠', orderNo: 2 },
+      { groupId: 4, groupName: '都市', orderNo: 3 },
+    ])
+    const store = useBookshelfStore()
+    await store.fetchGroups()
+
+    await store.reorderGroups(1, 4)
+
+    expect(store.visibleGroups.map((g) => g.groupName)).toEqual(['仙侠', '都市', '玄幻'])
+    expect(store.visibleGroups.map((g) => g.orderNo)).toEqual([0, 1, 2])
+    expect(saveBookGroupOrder).toHaveBeenCalledWith(store.groups)
+  })
+
+  it('落盘失败时回滚顺序', async () => {
+    vi.mocked(getBookGroups).mockResolvedValue([
+      { groupId: 1, groupName: '玄幻', orderNo: 0 },
+      { groupId: 2, groupName: '仙侠', orderNo: 1 },
+    ])
+    vi.mocked(saveBookGroupOrder).mockRejectedValueOnce(new Error('boom'))
+    const store = useBookshelfStore()
+    await store.fetchGroups()
+
+    await expect(store.reorderGroups(1, 2)).rejects.toThrow('boom')
+    expect(store.visibleGroups.map((g) => g.groupName)).toEqual(['玄幻', '仙侠'])
+  })
+
+  it('原始数组顺序与 orderNo 不同时, 仍按可见相邻位置移动', async () => {
+    vi.mocked(getBookGroups).mockResolvedValue([
+      { groupId: 4, groupName: '都市', orderNo: 2, bookSort: 4 },
+      { groupId: -1, groupName: '全部', orderNo: -1 },
+      { groupId: 1, groupName: '玄幻', orderNo: 0 },
+      { groupId: 2, groupName: '仙侠', orderNo: 1 },
+    ])
+    const store = useBookshelfStore()
+    await store.fetchGroups()
+
+    await store.reorderGroups(1, 2)
+
+    expect(store.visibleGroups.map((g) => g.groupName)).toEqual(['仙侠', '玄幻', '都市'])
+    expect(store.groups.find((g) => g.groupId === 4)?.bookSort).toBe(4)
+    expect(store.groups.map((g) => g.groupId).sort()).toEqual([-1, 1, 2, 4].sort())
+  })
+
+  it('保留虚拟分组与不可展示分组, 只改可见分组顺序', async () => {
+    vi.mocked(getBookGroups).mockResolvedValue([
+      { groupId: -2, groupName: '本地', orderNo: 5 },
+      { groupId: 2, groupName: '仙侠', orderNo: 0 },
+      { groupId: 1, groupName: '玄幻', orderNo: 1 },
+      { groupId: 4, groupName: '未分组', orderNo: 3 },
+      { groupId: 8, groupName: '都市', orderNo: 2 },
+    ])
+    const store = useBookshelfStore()
+    await store.fetchGroups()
+
+    await store.reorderGroups(1, 2)
+
+    expect(store.visibleGroups.map((g) => g.groupName)).toEqual(['玄幻', '仙侠', '都市'])
+    expect(saveBookGroupOrder).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ groupId: -2, groupName: '本地' }),
+      expect.objectContaining({ groupId: 4, groupName: '未分组' }),
+    ]))
+    expect(store.groups).toHaveLength(5)
   })
 })
 

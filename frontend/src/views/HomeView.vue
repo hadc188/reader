@@ -126,10 +126,23 @@
 
       <!-- Group Tabs -->
       <div class="group-tabs">
-        <div class="tabs-scroll">
+        <button
+          v-if="groupScrollLeft"
+          class="tabs-scroll-btn is-left"
+          type="button"
+          title="向前查看分组"
+          aria-label="向前查看分组"
+          @click="scrollGroupTabs(-1)"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+            <path d="m15 18-6-6 6-6" />
+          </svg>
+        </button>
+        <div ref="groupTabsRef" class="tabs-scroll" @scroll="updateGroupScrollState" @wheel="handleGroupTabsWheel">
           <button
             v-for="group in shelfStore.displayGroups"
             :key="group.groupId"
+            :data-group-id="group.groupId"
             class="tab-item"
             :class="{ active: shelfStore.activeGroupId === group.groupId }"
             @click="shelfStore.activeGroupId = group.groupId"
@@ -137,6 +150,18 @@
             {{ group.groupName }}
           </button>
         </div>
+        <button
+          v-if="groupScrollRight"
+          class="tabs-scroll-btn is-right"
+          type="button"
+          title="向后查看分组"
+          aria-label="向后查看分组"
+          @click="scrollGroupTabs(1)"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+            <path d="m9 18 6-6-6-6" />
+          </svg>
+        </button>
         <!-- 编辑模式(全选/批量删除)作用于整个分组, 此时隐藏搜索框: 显示筛选
              子集却批量操作看不见的书, 对不可撤销的删除是危险的歧义。 -->
         <div v-if="!shelfStore.editMode" class="shelf-search">
@@ -268,7 +293,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount, onMounted, watch } from 'vue'
+import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
@@ -294,6 +319,9 @@ const appStore = useAppStore()
 const showDetail = ref(false)
 /** 书架搜索关键词: 只在已加载的书里筛, 不发起网络搜索。 */
 const bookSearchText = ref('')
+const groupTabsRef = ref<HTMLElement | null>(null)
+const groupScrollLeft = ref(false)
+const groupScrollRight = ref(false)
 /** 书架网格实际展示的书: 当前分组按排序排好后, 再按关键词过滤。 */
 const visibleShelfBooks = computed(() => (
   filterShelfBooks(shelfStore.sortedBooks, bookSearchText.value)
@@ -304,6 +332,36 @@ const shelfEmptyText = computed(() => (
     ? '没有找到匹配的书籍'
     : '书架空空如也,搜索添加新书吧'
 ))
+
+function updateGroupScrollState() {
+  const tabs = groupTabsRef.value
+  if (!tabs) {
+    groupScrollLeft.value = false
+    groupScrollRight.value = false
+    return
+  }
+  groupScrollLeft.value = tabs.scrollLeft > 1
+  groupScrollRight.value = tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1
+}
+
+function scrollGroupTabs(direction: -1 | 1) {
+  const tabs = groupTabsRef.value
+  if (!tabs) return
+  tabs.scrollBy({
+    left: direction * Math.max(160, tabs.clientWidth * 0.7),
+    behavior: 'smooth',
+  })
+  window.setTimeout(updateGroupScrollState, 300)
+}
+
+function handleGroupTabsWheel(event: WheelEvent) {
+  const tabs = groupTabsRef.value
+  if (!tabs || tabs.scrollWidth <= tabs.clientWidth + 1) return
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+  if (!delta) return
+  event.preventDefault()
+  tabs.scrollLeft += delta
+}
 const showGroupSelect = ref(false)
 /** 右键「调整分组」时记住目标书; 为空表示走批量(编辑模式多选)路径。 */
 const groupTargetBookUrl = ref('')
@@ -469,6 +527,35 @@ function toggleEditMode() {
  *  看不见的书 —— 删除不可撤销, 这种歧义必须避免。 */
 watch(() => shelfStore.editMode, (editing) => {
   if (editing) bookSearchText.value = ''
+})
+
+watch(() => shelfStore.displayGroups, async () => {
+  await nextTick()
+  updateGroupScrollState()
+}, { immediate: true })
+
+const groupTabsResizeObserver = new ResizeObserver(() => updateGroupScrollState())
+
+onMounted(() => {
+  if (groupTabsRef.value) groupTabsResizeObserver.observe(groupTabsRef.value)
+})
+
+onBeforeUnmount(() => {
+  groupTabsResizeObserver.disconnect()
+})
+
+watch(() => shelfStore.activeGroupId, async (groupId) => {
+  await nextTick()
+  const tabs = groupTabsRef.value
+  const active = tabs?.querySelector<HTMLElement>(`[data-group-id="${groupId}"]`)
+  if (!tabs || !active) return
+  const left = active.offsetLeft
+  const right = left + active.offsetWidth
+  if (left < tabs.scrollLeft) tabs.scrollLeft = left
+  else if (right > tabs.scrollLeft + tabs.clientWidth) {
+    tabs.scrollLeft = right - tabs.clientWidth
+  }
+  updateGroupScrollState()
 })
 
 async function handleBulkDelete() {
@@ -711,6 +798,32 @@ onBeforeUnmount(() => {
   overflow-x: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
+}
+
+.tabs-scroll-btn {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: color var(--duration-fast), background var(--duration-fast), border-color var(--duration-fast);
+}
+
+.tabs-scroll-btn:hover {
+  color: var(--color-text);
+  background: var(--color-bg-hover);
+  border-color: var(--color-border);
+}
+
+.tabs-scroll-btn svg {
+  width: 15px;
+  height: 15px;
 }
 
 /* 书架搜索: 与分组标签同一行, 排在排序入口左侧。 */

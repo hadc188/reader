@@ -104,8 +104,7 @@
         @click.stop
       >
         <span class="auto-reading-indicator" aria-hidden="true"></span>
-        <span class="auto-reading-label">自动翻页中</span>
-        <span class="auto-reading-mode">平滑</span>
+        <span class="auto-reading-mode">{{ autoReadingModeLabel }}</span>
         <button type="button" title="停止自动翻页" aria-label="停止自动翻页" @click="stopAutoReadingFromStatus">
           <span aria-hidden="true"></span>
         </button>
@@ -900,6 +899,8 @@ const hideReadChaptersMode = computed(
 const isHorizontalPageMode = computed(
   () => config.value.readMethod === '左右翻页' && !isPdfBookMode.value,
 )
+/** 自动阅读状态条上的方式说明: 左右分页是逐页翻, 其余是连续滚动。 */
+const autoReadingModeLabel = computed(() => (isHorizontalPageMode.value ? '翻页' : '平滑'))
 const isIosWebkit = computed(() => {
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
   return /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/i.test(ua) && typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1)
@@ -2913,6 +2914,26 @@ const {
   prevChapter,
   isHorizontalPageMode,
   horizontalPageIndex,
+  {
+    isReady: () => isHorizontalPageMode.value
+      && !store.loading
+      && !isHorizontalPagesStale()
+      && horizontalPages.value.length > 0,
+    isLastPage: () => horizontalPageIndex.value >= horizontalLastPageStart.value,
+    turnNext: () => {
+      // 防御过期分页: 章节刚切换、新页还没建好时推进旧页数组会污染新章进度。
+      if (!isHorizontalPageMode.value || store.loading || isHorizontalPagesStale()) return
+      beginHorizontalPageTurnGuard()
+      clearSelectionBeforePageTurn()
+      horizontalPageIndex.value = Math.min(
+        horizontalLastPageStart.value,
+        horizontalPageIndex.value + 1,
+      )
+      scrollContainerRef.value?.scrollTo({ left: 0, behavior: 'auto' })
+      syncHorizontalPageState()
+      clearSelectionAfterPageTurn((Number(config.value.animateDuration) || 0) + 80)
+    },
+  },
 )
 
 /** 手动输入(滚轮/触摸/点击/按键)时中断翻页补间并暂停自动滚动。
@@ -4161,7 +4182,10 @@ onUnmounted(() => {
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     window.speechSynthesis.onvoiceschanged = null
   }
-  applySystemTheme(appStore.theme, undefined, { transparentBackground: true })
+  // 离开阅读页必须把 html/body/#app 的不透明底色还原。阅读页期间它们是透明的，
+  // 而原生窗口本身允许透明（.transparent(true)）：只靠外壳背景遮盖时，任何一帧
+  // 的间隙都会直接透出桌面，表现为退回书架时闪一下。
+  applySystemTheme(appStore.theme)
   store.closePanel()
   // 工具栏可见性是持久化的 store 状态: 不清掉的话, 在「工具栏已呼出」的状态下
   // 退出阅读页, 下次进来工具栏会默认展开, 而不是干净的全屏阅读态。
@@ -4453,15 +4477,6 @@ watch(
   background: var(--color-primary);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-primary) 16%, transparent);
   animation: auto-reading-pulse 1.8s ease-in-out infinite;
-}
-
-.auto-reading-label {
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .auto-reading-mode {
@@ -5261,10 +5276,6 @@ watch(
     top: 8px;
     right: 10px;
     max-width: calc(100% - 20px);
-  }
-
-  .auto-reading-mode {
-    display: none;
   }
 
   .reader-scroll-container.horizontal-page-mode {

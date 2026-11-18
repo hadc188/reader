@@ -1,9 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ref } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 import {
   findParagraphPageIndex,
+  getHorizontalAutoPageDelayMs,
   getSpeechProgressItemIndex,
   isSpeechSelfScroll,
   shouldFollowChapterJump,
+  useReaderAutoPlayback,
 } from './useReaderAutoPlayback'
 
 describe('merged speech paragraph progress', () => {
@@ -17,6 +21,90 @@ describe('merged speech paragraph progress', () => {
     expect(getSpeechProgressItemIndex(lengths, 0.8)).toBe(2)
     expect(getSpeechProgressItemIndex(lengths, 1)).toBe(2)
   })
+
+describe('horizontal auto page failure paths', () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+      clear: () => storage.clear(),
+    })
+    vi.stubGlobal('window', globalThis)
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  function setupAutoPage(options: {
+    ready?: () => boolean
+    lastPage?: () => boolean
+    hasNext?: boolean
+    nextChapter?: () => Promise<void>
+  }) {
+    vi.useFakeTimers()
+    const store = {
+      isAutoScrolling: true,
+      currentIndex: 0,
+      hasNext: options.hasNext ?? true,
+      addSpeechStopListener: () => () => undefined,
+    }
+    const playback = useReaderAutoPlayback(
+      store as never,
+      ref({ clickAction: 'auto', autoScrollSpeed: 500 }) as never,
+      ref(false) as never,
+      ref({ clientHeight: 600, querySelectorAll: () => [], scrollTo: () => undefined } as unknown as HTMLElement),
+      ref(undefined) as never,
+      (options.nextChapter ?? (async () => undefined)) as never,
+      vi.fn() as never,
+      ref(true) as never,
+      ref(0) as never,
+      {
+        isReady: options.ready ?? (() => true),
+        isLastPage: options.lastPage ?? (() => true),
+        turnNext: vi.fn(),
+      },
+    )
+    return { playback, store }
+  }
+
+  it('末章(hasNext=false)在末页停止，不再换章', async () => {
+    const { playback, store } = setupAutoPage({ hasNext: false })
+    playback.startAutoScroll()
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(store.isAutoScrolling).toBe(false)
+  })
+
+  it('换章没有推进索引(加载失败/无新章)时停止自动阅读', async () => {
+    const { playback, store } = setupAutoPage({})
+    playback.startAutoScroll()
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(store.isAutoScrolling).toBe(false)
+  })
+
+  it('换章抛错时停止自动阅读', async () => {
+    const { playback, store } = setupAutoPage({
+      nextChapter: async () => { throw new Error('network') },
+    })
+    playback.startAutoScroll()
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(store.isAutoScrolling).toBe(false)
+  })
+
+  it('分页长期不就绪时停止，不留下空转定时器', async () => {
+    const { playback, store } = setupAutoPage({ ready: () => false })
+    playback.startAutoScroll()
+    // 150 次 × 200ms 预算 + 首轮整页停留。
+    await vi.advanceTimersByTimeAsync(1200 + 200 * 160)
+    expect(store.isAutoScrolling).toBe(false)
+  })
+})
 })
 
 describe('horizontal page lookup for speech following', () => {
@@ -109,5 +197,129 @@ describe('区分「TTS 自动滚动」与「用户滚动」', () => {
       lastSpeechScrollAt: now - 10,
       lastUserInputAt: 0,
     })).toBe(false)
+  })
+})
+
+describe('horizontal auto page timing', () => {
+  it('按一屏高度换算每页停留时长', () => {
+    // 600px 一屏、300px/秒 → 2 秒。
+    expect(getHorizontalAutoPageDelayMs(600, 300)).toBe(2000)
+  })
+
+  it('速度再快也保留最短停留', () => {
+    expect(getHorizontalAutoPageDelayMs(100, 500)).toBe(800)
+  })
+
+  it('异常尺寸与速度不产生 0 或负时长', () => {
+    expect(getHorizontalAutoPageDelayMs(0, 30)).toBe(800)
+    expect(getHorizontalAutoPageDelayMs(600, 0)).toBeGreaterThan(0)
+  })
+})
+
+describe('horizontal auto page runs page by page (issue #49)', () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+      clear: () => storage.clear(),
+    })
+    vi.stubGlobal('window', globalThis)
+    // 纵向循环的帧调度: 同步执行第一拍。旧实现会在这一拍里判定「已到章末」并跳章,
+    // 因此这个桩能让回归测试真正覆盖 issue #49 的原始路径。
+    vi.stubGlobal('requestAnimationFrame', vi.fn((cb: FrameRequestCallback) => {
+      cb(0)
+      return 1
+    }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  function setup(options: { pages: number; startPage?: number; hasNext?: boolean; clickAction?: string }) {
+    vi.useFakeTimers()
+    vi.stubGlobal('window', globalThis)
+    let page = options.startPage ?? 0
+    let pageCount = options.pages
+    const turnNext = vi.fn(() => {
+      page += 1
+    })
+    const store = { currentIndex: 0 } as { currentIndex: number } & Record<string, unknown>
+    const nextChapter = vi.fn(async () => {
+      // 真实换章: 索引前进、页索引归 0、新章重新分页成 3 页。
+      store.currentIndex += 1
+      page = 0
+      pageCount = 3
+    })
+    Object.assign(store, {
+      isAutoScrolling: true,
+      book: null,
+      hasNext: options.hasNext ?? true,
+      addSpeechStopListener: () => () => undefined,
+    })
+    const containerScrollBy = vi.fn()
+    const container = ref({
+      clientHeight: 600,
+      clientWidth: 600,
+      // 分页容器的真实特征: 正文高度恒等于一屏, 纵向完全没有可滚动空间。
+      // 旧实现据此第一帧就判定「已到章末」→ 直接 nextChapter。
+      scrollTop: 0,
+      scrollHeight: 600,
+      querySelectorAll: () => [],
+      scrollTo: () => undefined,
+      scrollBy: containerScrollBy,
+    } as unknown as HTMLElement)
+    const playback = useReaderAutoPlayback(
+      store as never,
+      ref({ clickAction: options.clickAction ?? 'auto', autoScrollSpeed: 500 }) as never,
+      ref(false) as never,
+      container,
+      ref(undefined) as never,
+      nextChapter as never,
+      vi.fn() as never,
+      ref(true) as never,
+      ref(0) as never,
+      {
+        isReady: () => true,
+        isLastPage: () => page >= pageCount - 1,
+        turnNext,
+      },
+    )
+    return { playback, turnNext, nextChapter, store, containerScrollBy }
+  }
+
+  it('启动时不立刻跳章，只在停留一页后翻一页', async () => {
+    const { playback, turnNext, nextChapter, containerScrollBy } = setup({ pages: 3 })
+    playback.startAutoScroll()
+
+    // 旧实现启动第一帧就判定「已到章末」→ 直接 nextChapter。
+    expect(nextChapter).not.toHaveBeenCalled()
+    expect(turnNext).not.toHaveBeenCalled()
+
+    expect(containerScrollBy).not.toHaveBeenCalled()
+    // 600px 一屏、500px/秒 → 1200ms 后翻页。
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(turnNext).toHaveBeenCalledTimes(1)
+    expect(nextChapter).not.toHaveBeenCalled()
+  })
+
+  it('停在末页才换章，且换章后继续逐页推进', async () => {
+    const { playback, turnNext, nextChapter, store } = setup({ pages: 1 })
+    playback.startAutoScroll()
+
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(nextChapter).toHaveBeenCalledTimes(1)
+    expect(turnNext).not.toHaveBeenCalled()
+
+    // 新章有 3 页: 换章后先按 200ms 轮询分页就绪, 再完整停留一页(1200ms)。
+    await vi.advanceTimersByTimeAsync(200 + 1200)
+    expect(turnNext).toHaveBeenCalledTimes(1)
+    expect(nextChapter).toHaveBeenCalledTimes(1)
+    expect(store.isAutoScrolling).toBe(true)
   })
 })

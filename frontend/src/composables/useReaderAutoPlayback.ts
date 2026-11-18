@@ -9,6 +9,23 @@ import { SpeechStream, type SpeechChunk, type SpeechChunkType } from '../utils/s
 type ReaderStore = ReturnType<typeof useReaderStore>
 const OPENAI_PRELOAD_CHUNK_LIMIT = 5
 const OPENAI_MERGED_SEGMENT_CHAR_LIMIT = 260
+/** 左右分页自动翻页的最短停留: 速度再快也要留出看清一页的时间。 */
+const HORIZONTAL_AUTO_PAGE_MIN_DELAY_MS = 800
+/** 正文加载/分页重建期间的重试间隔。 */
+const HORIZONTAL_AUTO_PAGE_RETRY_MS = 200
+/** 等分页就绪的上限: 150 × 200ms ≈ 30 秒, 与换章加载的耐心预算一致。
+ *  超过仍无页(加载失败/空章)就停止, 否则会留下一个无声空转的定时器。 */
+const HORIZONTAL_AUTO_PAGE_MAX_WAIT_TICKS = 150
+
+/** 左右分页每页停留时长: 沿用纵向自动滚动的「滚过一屏耗时」。
+ *
+ *  纵向速度是 px/秒, 滚过一屏 `clientHeight` 需要 `clientHeight / speed` 秒;
+ *  分页模式一页正好一屏, 同一换算让两种阅读方式的节奏保持一致。 */
+export function getHorizontalAutoPageDelayMs(clientHeight: number, speed: number): number {
+  const height = Math.max(1, clientHeight)
+  const pixelsPerSecond = Math.max(1, speed)
+  return Math.max(HORIZONTAL_AUTO_PAGE_MIN_DELAY_MS, Math.round((height / pixelsPerSecond) * 1000))
+}
 /** 手动输入暂停自动滚动后, 静止多久恢复滚动。 */
 const AUTO_SCROLL_MANUAL_RESUME_MS = 1200
 /** 用户手动跳章后等多久再跟随：连续拖进度条会连续改索引，只跟随最后一次。 */
@@ -74,6 +91,20 @@ interface AutoPlaybackConfig {
   autoScrollSpeed: number
 }
 
+/** 左右分页模式下自动翻页需要的控制器。
+ *
+ *  分页模式的正文是 `horizontalPages` 快照, 纵向滚动容器没有可滚动高度,
+ *  自动翻页必须推进页索引而不是 `scrollBy` —— 否则启动第一帧就会被
+ *  「已到章末」判断命中, 直接从本章标题跳到下一章标题(issue #49)。 */
+export interface HorizontalAutoPageControl {
+  /** 分页是否已就绪: 正文已加载完且页数组属于当前正文。 */
+  isReady: () => boolean
+  /** 当前是否停在本章末页。 */
+  isLastPage: () => boolean
+  /** 前进一页, 并同步阅读进度与下一章预载。 */
+  turnNext: () => void
+}
+
 interface SpeechSegment {
   text: string
   nextParagraph: HTMLElement | null
@@ -121,9 +152,18 @@ export function useReaderAutoPlayback(
   /** 左右分页模式: 正文按页渲染, 跟随朗读要靠页索引而不是纵向滚动。 */
   isHorizontalPageMode: ComputedRef<boolean>,
   horizontalPageIndex: Ref<number>,
+  /** 左右分页自动翻页控制器; 非分页模式可省略。 */
+  horizontalAutoPage?: HorizontalAutoPageControl,
 ) {
   let autoScrollId: number | null = null
   let autoScrollResumeTimer: number | null = null
+  let autoPageTimer: number | null = null
+  /** 分页自动翻页的代次: 停止/重排后让仍在等换章的旧循环自行退出。 */
+  let autoPageToken = 0
+  /** 等分页就绪的连续重试次数, 就绪后清零。 */
+  let autoPageWaitTicks = 0
+  /** 刚换过章: 下一次就绪后立即按整页时长开始计时, 不叠加旧章等待。 */
+  let autoPageAwaitingFreshChapter = false
   let lastAutoScrollTime = 0
   let autoScrollRemainder = 0
   let speechRestartTimer: number | null = null
@@ -430,8 +470,103 @@ export function useReaderAutoPlayback(
     showParagraph(paragraph)
   }
 
+  function getHorizontalPageDelay(container: HTMLElement) {
+    return getHorizontalAutoPageDelayMs(container.clientHeight, config.value.autoScrollSpeed)
+  }
+
+  /** 作废当前分页自动翻页循环, 并清掉待触发的定时器。 */
+  function invalidateHorizontalAutoPage() {
+    autoPageToken += 1
+    autoPageAwaitingFreshChapter = false
+    if (autoPageTimer !== null) {
+      window.clearTimeout(autoPageTimer)
+      autoPageTimer = null
+    }
+  }
+
+  function scheduleHorizontalAutoPage(delay: number, token: number) {
+    if (autoPageTimer !== null) window.clearTimeout(autoPageTimer)
+    autoPageTimer = window.setTimeout(() => {
+      autoPageTimer = null
+      void runHorizontalAutoPage(token)
+    }, delay)
+  }
+
+  /**
+   * 左右分页下的自动翻页: 每页停留「一屏耗时」后推进页索引。
+   *
+   *  不能走纵向 `scrollBy`: 分页容器 `overflow-y: hidden`, 正文高度恒为一屏,
+   *  `scrollTop + clientHeight >= scrollHeight` 第一帧就成立, 原先会直接
+   *  `nextChapter()` —— 表现就是从本章标题一路跳到后续每章的标题页。
+   */
+  async function runHorizontalAutoPage(token: number) {
+    if (token !== autoPageToken) return
+    if (!store.isAutoScrolling) return
+    if (!horizontalAutoPage) {
+      // 调用方没给分页控制器: 分页模式下无法推进, 明确停下而不是留下空循环。
+      stopAutoScroll()
+      return
+    }
+    const container = scrollContainerRef.value
+    // 正文加载/分页重建期间页数组可能还是上一章的: 等就绪再计时, 否则会把
+    // 旧页数当成新章页数, 在换章瞬间又触发一次跳章。
+    if (!container || !horizontalAutoPage.isReady()) {
+      autoPageWaitTicks += 1
+      if (autoPageWaitTicks > HORIZONTAL_AUTO_PAGE_MAX_WAIT_TICKS) {
+        // 正文一直没就绪(加载失败/空章): 结束自动阅读, 不留下空转定时器。
+        stopAutoScroll()
+        return
+      }
+      scheduleHorizontalAutoPage(HORIZONTAL_AUTO_PAGE_RETRY_MS, token)
+      return
+    }
+    autoPageWaitTicks = 0
+    const delay = getHorizontalPageDelay(container)
+    if (autoPageAwaitingFreshChapter) {
+      // 新章首屏已就绪: 从这里开始算完整的一页停留时间。
+      autoPageAwaitingFreshChapter = false
+      scheduleHorizontalAutoPage(delay, token)
+      return
+    }
+    if (!horizontalAutoPage.isLastPage()) {
+      horizontalAutoPage.turnNext()
+      scheduleHorizontalAutoPage(delay, token)
+      return
+    }
+    if (config.value.clickAction === 'auto' && store.hasNext) {
+      const previousIndex = store.currentIndex
+      autoPageAwaitingFreshChapter = true
+      autoPageWaitTicks = 0
+      try {
+        await nextChapter()
+      } catch {
+        // 取正文失败: 阅读页会自己亮出错误态, 自动翻页不应继续空转重试。
+        autoPageAwaitingFreshChapter = false
+        stopAutoScroll()
+        return
+      }
+      if (token !== autoPageToken || !store.isAutoScrolling) return
+      if (store.currentIndex === previousIndex) {
+        // 换章没有发生(末章检查无更新/加载失败): 结束而不是原地空转。
+        autoPageAwaitingFreshChapter = false
+        stopAutoScroll()
+        return
+      }
+      // 换章后分页由 content/currentIndex watcher 重建。先按短间隔轮询就绪,
+      // 就绪后再按整页时长计时, 避免旧章 delay 与新章首屏等待叠加成两倍停留。
+      scheduleHorizontalAutoPage(HORIZONTAL_AUTO_PAGE_RETRY_MS, token)
+      return
+    }
+    stopAutoScroll()
+  }
+
   function runAutoScroll(timestamp?: number) {
     if (!store.isAutoScrolling || !scrollContainerRef.value) return
+    // 已切到左右分页: 纵向滚动在这里永远「已到章末」, 必须交给分页循环。
+    if (isHorizontalPageMode.value) {
+      autoScrollId = null
+      return
+    }
 
     const container = scrollContainerRef.value
     // 按真实帧间隔折算位移, 高刷新率屏幕下速度不变。
@@ -461,7 +596,30 @@ export function useReaderAutoPlayback(
     }
   }
 
+  /** 阅读方式在滚动/分页之间切换时, 换用对应的一条循环继续自动阅读。
+   *
+   *  不换的话, 留在旧循环里会立刻触发错误分支: 分页容器没有纵向可滚动高度,
+   *  纵向循环一帧就判定章末 → 跳章(issue #49 的同一根因)。 */
+  watch(isHorizontalPageMode, () => {
+    if (!store.isAutoScrolling) return
+    invalidateHorizontalAutoPage()
+    if (autoScrollId) {
+      cancelAnimationFrame(autoScrollId)
+      autoScrollId = null
+    }
+    startAutoScroll()
+  })
+
   function startAutoScroll() {
+    if (isHorizontalPageMode.value) {
+      if (autoPageTimer !== null) return
+      invalidateHorizontalAutoPage()
+      const container = scrollContainerRef.value
+      const delay = container ? getHorizontalPageDelay(container) : HORIZONTAL_AUTO_PAGE_MIN_DELAY_MS
+      // 先等一页时长再翻第一页: 启动瞬间就翻走会让用户看不到当前页。
+      scheduleHorizontalAutoPage(delay, autoPageToken)
+      return
+    }
     if (autoScrollId) return
     lastAutoScrollTime = 0
     autoScrollRemainder = 0
@@ -474,6 +632,7 @@ export function useReaderAutoPlayback(
    */
   function pauseAutoScrollForManualInput() {
     if (!store.isAutoScrolling) return
+    invalidateHorizontalAutoPage()
     if (autoScrollId) {
       cancelAnimationFrame(autoScrollId)
       autoScrollId = null
@@ -487,6 +646,10 @@ export function useReaderAutoPlayback(
 
   function stopAutoScroll() {
     store.isAutoScrolling = false
+    invalidateHorizontalAutoPage()
+    // 新一次自动阅读重新计算「等分页就绪」的预算, 但手动输入的暂停/恢复不清零,
+    // 否则用户在换章加载中随手滚一下就能让 30 秒预算无限续期。
+    autoPageWaitTicks = 0
     if (autoScrollId) {
       cancelAnimationFrame(autoScrollId)
       autoScrollId = null

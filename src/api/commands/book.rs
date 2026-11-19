@@ -1212,20 +1212,8 @@ pub async fn delete_book_cache_core(
         .book_service
         .delete_book_sources_cache(&user_ns, &book_url)
         .await;
-    if let Ok(Some(shelf_book)) = state.book_service.get_shelf_book(&user_ns, &book_url).await {
-        if let Some(cover_url) = shelf_book.cover_url.as_deref() {
-            let _ = state
-                .book_service
-                .delete_cover_cache("public", cover_url)
-                .await;
-        }
-        if let Some(cover_url) = shelf_book.custom_cover_url.as_deref() {
-            let _ = state
-                .book_service
-                .delete_cover_cache("public", cover_url)
-                .await;
-        }
-    }
+    // 封面**不清**: 书架封面没有自动重新拉取的路径, 删掉缓存后 UI 只剩占位色块。
+    // 封面也不属于章节正文缓存, 清本地缓存只应影响正文。
 
     Ok(ApiResponse::ok(serde_json::json!({
         "deleted": true,

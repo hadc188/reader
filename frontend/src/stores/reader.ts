@@ -20,6 +20,7 @@ import {
 } from '../api/bookmark'
 import { applyReplaceRulesInSandbox, getReplaceRules, type SandboxReplaceRuleStep } from '../api/replaceRule'
 import type { Book, BookChapter, Bookmark, ReplaceRule } from '../types'
+import { readHistoryStorageKey } from '../utils/readHistory'
 import { isLocalBook } from '../utils/localBook'
 import { PDF_PAGE_ATTR } from '../utils/pdfPages'
 import { saveRecentReadBook } from '../utils/recentBooks'
@@ -84,7 +85,6 @@ import {
 } from '../utils/readerClickAreas'
 
 const READER_SESSION_KEY = 'reader-last-session'
-const READER_READ_HISTORY_PREFIX = 'reader-read-history:'
 const READER_BACKGROUND_IMAGE_KEY = 'reader-background-image'
 /** 阅读页专属背景图: 与桌面背景图分开, 互不覆盖。 */
 const READER_PAGE_BACKGROUND_IMAGE_KEY = 'reader-page-background-image'
@@ -1698,8 +1698,7 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function getReadHistoryStorageKey(currentBook?: Book | null) {
-    if (!currentBook?.bookUrl) return ''
-    return `${READER_READ_HISTORY_PREFIX}${currentBook.bookUrl}`
+    return readHistoryStorageKey(currentBook?.bookUrl)
   }
 
   function buildReadChapterKey(index: number, chapter?: BookChapter | null, currentBook?: Book | null) {

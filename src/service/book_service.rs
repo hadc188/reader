@@ -3423,6 +3423,43 @@ impl BookService {
         Ok(normalized)
     }
 
+    /// 封面地址带时效签名时会过期，过期后回源 403、且书架只存旧地址。
+    /// 取到新地址的图之后，把书架里的 `cover_url` 换成新地址；只改这一条，
+    /// 避免整份 `Book` 回写覆盖掉别处刚写入的进度或自定义封面。
+    ///
+    /// `old_url` 用于确认用户没有在这期间已经换成别的封面（或手动清空）。
+    pub async fn replace_shelf_cover_url(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        old_url: &str,
+        new_url: &str,
+    ) -> Result<bool, AppError> {
+        let new_url = new_url.trim();
+        if new_url.is_empty() {
+            return Ok(false);
+        }
+        let _write_guard = self.bookshelf_write_lock.lock().await;
+        let mut list = self.read_bookshelf(user_ns).await?;
+        let Some(book) = list.iter_mut().find(|book| book.book_url == book_url) else {
+            return Ok(false);
+        };
+        // 用户已经改过封面（自定义封面/换源/手动编辑）时不要覆盖。
+        let has_custom_cover = book
+            .custom_cover_url
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|url| !url.is_empty());
+        if has_custom_cover {
+            return Ok(false);
+        }
+        if book.cover_url.as_deref() != Some(old_url) {
+            return Ok(false);
+        }
+        book.cover_url = Some(new_url.to_string());
+        self.write_bookshelf(user_ns, &list).await?;
+        Ok(true)
+    }
     pub async fn remove_source_candidates(
         &self,
         user_ns: &str,
@@ -4275,6 +4312,26 @@ impl BookService {
         .await
     }
 
+    /// 把已知的封面字节按指定 URL 写入缓存。
+    ///
+    /// 供「旧签名地址失效、改从别的源取图」的场景使用：书架里那张卡片的
+    /// `<img>` 仍然按旧地址请求，不把字节挂在旧地址下，重启后又要重新回源。
+    pub async fn cache_cover_bytes(
+        &self,
+        user_ns: &str,
+        url: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<(), AppError> {
+        let cover_dir = self
+            .storage_dir
+            .join("cache")
+            .join(user_ns)
+            .join("cover");
+        self.store_cover_mapping(url, bytes, content_type, &cover_dir)
+            .await
+            .map_err(|error| AppError::Internal(error.into()))
+    }
     /// Remove several cover URL mappings in one pass.
     ///
     /// The mappings are removed first, then one scan of the remaining mappings
@@ -5615,6 +5672,104 @@ mod tests {
             .is_chapter_cached("default", book_url, "https://old.example.com/1")
             .await);
         assert!(service.get_bookshelf("default").await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+    /// 过期签名的封面换到新地址时，只改封面字段：进度、自定义封面都不动。
+    #[tokio::test]
+    async fn replace_shelf_cover_url_only_touches_the_cover_field() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-replace-cover-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let book_url = "https://old.example.com/book/1";
+        let old_cover = "https://img.example/c.jpg?x-expires=1&x-signature=a";
+        let book = Book {
+            name: "换封面".to_string(),
+            author: "作者".to_string(),
+            origin: "https://old.example.com".to_string(),
+            book_url: book_url.to_string(),
+            cover_url: Some(old_cover.to_string()),
+            dur_chapter_index: Some(7),
+            dur_chapter_title: Some("第七章".to_string()),
+            ..Default::default()
+        };
+        service.save_book("default", book).await.unwrap();
+
+        let replaced = service
+            .replace_shelf_cover_url(
+                "default",
+                book_url,
+                old_cover,
+                "https://img.example/new.jpg",
+            )
+            .await
+            .unwrap();
+        assert!(replaced);
+        let saved = service.get_shelf_book("default", book_url).await.unwrap().unwrap();
+        assert_eq!(saved.cover_url.as_deref(), Some("https://img.example/new.jpg"));
+        assert_eq!(saved.dur_chapter_index, Some(7));
+        assert_eq!(saved.dur_chapter_title.as_deref(), Some("第七章"));
+
+        // 已换过封面后，旧地址的回写请求不能再覆盖。
+        let replaced_again = service
+            .replace_shelf_cover_url(
+                "default",
+                book_url,
+                old_cover,
+                "https://img.example/stale.jpg",
+            )
+            .await
+            .unwrap();
+        assert!(!replaced_again);
+        let saved = service.get_shelf_book("default", book_url).await.unwrap().unwrap();
+        assert_eq!(saved.cover_url.as_deref(), Some("https://img.example/new.jpg"));
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    /// 用户设置过自定义封面时，不自动替换书源封面。
+    #[tokio::test]
+    async fn replace_shelf_cover_url_keeps_custom_cover() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-replace-cover-custom-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let book_url = "https://old.example.com/book/2";
+        let old_cover = "https://img.example/c.jpg?x-expires=1";
+        let book = Book {
+            name: "自定义封面".to_string(),
+            author: "作者".to_string(),
+            origin: "https://old.example.com".to_string(),
+            book_url: book_url.to_string(),
+            cover_url: Some(old_cover.to_string()),
+            custom_cover_url: Some("http://reader.localhost/files?path=default/covers/a.png".to_string()),
+            ..Default::default()
+        };
+        service.save_book("default", book).await.unwrap();
+
+        let replaced = service
+            .replace_shelf_cover_url(
+                "default",
+                book_url,
+                old_cover,
+                "https://img.example/new.jpg",
+            )
+            .await
+            .unwrap();
+        assert!(!replaced);
+        let saved = service.get_shelf_book("default", book_url).await.unwrap().unwrap();
+        assert_eq!(saved.cover_url.as_deref(), Some(old_cover));
         let _ = std::fs::remove_dir_all(storage_dir);
     }
     /// 删除书源时该源的缓存被清空，其他源与书架记录不受影响。

@@ -25,6 +25,7 @@ import {
 import { clearRecentReadBooks, getRecentReadBookKey, loadRecentReadBooks, removeRecentReadBook } from '../utils/recentBooks'
 import { getSearchSessionCache } from '../utils/searchSessionCache'
 import { getSourceCandidateCache, sourceCandidateBookKey } from '../utils/sourceCandidateCache'
+import { clearReadHistory } from '../utils/readHistory'
 
 /** 书架排序方式的存储键。与 Legado 的 `bookshelfSort` 偏好同名同义。 */
 const BOOK_SORT_KEY = 'bookshelf-sort'
@@ -120,6 +121,10 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   async function removeBook(book: Book) {
     await apiDeleteBook(book)
     books.value = books.value.filter((b) => b.bookUrl !== book.bookUrl)
+    // 「已读」标记只存在本机 localStorage，删书后必须一起清掉：
+    // 否则重新加入同一本书会直接继承上一次的已读状态（目录显示已读、
+    // 「隐藏已读」还会把它跳过），看起来像数据没删干净。
+    clearReadHistory(book.bookUrl)
     // 书都删了，「可读书源」候选缓存没有继续留着的理由：它只服务于详情页/
     // 换源面板，而那两处只会为仍在书架（或刚搜到）的书打开。不清的话它会一直
     // 占着 LRU 名额，直到被别的书挤掉 —— 属于「不及时清理」。
@@ -437,6 +442,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
         bookUrl: book.bookUrl,
         origin: book.origin,
       }))
+      clearReadHistory(book.bookUrl)
     }
     clearSelection()
   }

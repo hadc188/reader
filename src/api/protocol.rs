@@ -744,11 +744,164 @@ pub async fn cover_route(state: &AppState, query: &str) -> tauri::http::Response
             }
             bytes_response(bytes, &content_type, Some("86400"))
         }
-        Err(_) => http::Response::builder()
-            .status(404)
-            .body(Vec::new())
-            .unwrap_or_default(),
+        Err(_) => {
+            // 带时效签名的图床地址（`x-expires`/`x-signature`）过期后回源必然 403。
+            // 书架只存了那条旧地址，清缓存或重试都拿不到图 —— 只能重新拉详情页
+            // 换一条新签名地址。取图成功才回写，失败时保持书架原样。
+            if let Some((book_url, new_url, bytes, content_type)) =
+                refresh_stale_shelf_cover(state, url).await
+            {
+                // 让旧地址立刻能命中缓存：书架上这张卡片仍按旧地址请求，
+                // 不然重启进程后又要重新走一次回源。
+                let _ = state
+                    .book_service
+                    .cache_cover_bytes("public", url, &bytes, &content_type)
+                    .await;
+                let _ = state
+                    .book_service
+                    .replace_shelf_cover_url("default", &book_url, url, &new_url)
+                    .await;
+                if let Ok(mut cache) = cover_cache().lock() {
+                    if cache.len() >= COVER_CACHE_CAP {
+                        cache.clear();
+                    }
+                    cache.insert(cache_key.clone(), (bytes.clone(), content_type.clone()));
+                }
+                return bytes_response(bytes, &content_type, Some("86400"));
+            }
+            http::Response::builder()
+                .status(404)
+                .body(Vec::new())
+                .unwrap_or_default()
+        }
     }
+}
+
+/// 按失效的封面地址反查书架书，重新拉详情页并试取新地址的图。
+///
+/// 只对带时效签名的地址生效：普通封面 403 多半是防盗链或站点临时故障，
+/// 重新拉详情页也换不出新地址，白白多一次网络请求。失败结果做 5 分钟
+/// 冷却，避免书源不可用时每张卡片都触发一次详情请求。
+async fn refresh_stale_shelf_cover(
+    state: &AppState,
+    stale_url: &str,
+) -> Option<(String, String, Vec<u8>, String)> {
+    if !cover_url_expired(stale_url) {
+        return None;
+    }
+    {
+        let Ok(mut cooldown) = cover_refresh_cooldown().lock() else {
+            return None;
+        };
+        if let Some(at) = cooldown.get(stale_url) {
+            if at.elapsed() < COVER_REFRESH_COOLDOWN {
+                return None;
+            }
+        }
+        if cooldown.len() >= COVER_REFRESH_COOLDOWN_CAP {
+            cooldown.clear();
+        }
+        cooldown.insert(stale_url.to_string(), std::time::Instant::now());
+    }
+
+    let books = state.book_service.get_bookshelf("default").await.ok()?;
+    let book = books
+        .into_iter()
+        .find(|book| book.cover_url.as_deref() == Some(stale_url))?;
+    if book.book_url.trim().is_empty() || book.origin.trim().is_empty() {
+        return None;
+    }
+    let source = state
+        .book_source_service
+        .get("default", &book.origin)
+        .await
+        .ok()
+        .flatten()?;
+    // 先试当前源：详情页有时会下发新的签名地址；拿不到或取图失败就换下一个。
+    let mut tried: std::collections::HashSet<String> = std::collections::HashSet::new();
+    tried.insert(stale_url.trim().to_string());
+
+    let mut candidates: Vec<(String, Option<BookSource>)> = Vec::new();
+    if let Ok(info) = state
+        .book_service
+        .get_book_info("default", &source, &book.book_url)
+        .await
+    {
+        if let Some(url) = info.cover_url.filter(|url| !url.trim().is_empty()) {
+            candidates.push((url, Some(source.clone())));
+        }
+    }
+    // 同一本书在别的源里往往有一份不带签名的封面（搜索页用的就是它）。
+    // 候选源的封面也必须能取到才算数，避免把另一个失效地址写进书架。
+    // 解密规则按候选自己的 `origin` 取：封面是用哪个源解析出来的，就只有
+    // 那个源的 `coverDecodeJs` 解得开。
+    for candidate in book.source_candidates.clone().unwrap_or_default() {
+        let Some(url) = candidate.cover_url.filter(|url| !url.trim().is_empty()) else {
+            continue;
+        };
+        let candidate_origin = candidate.origin.trim();
+        if candidate_origin.is_empty() || candidate_origin == book.origin {
+            continue;
+        }
+        let candidate_source = state
+            .book_source_service
+            .get("default", candidate_origin)
+            .await
+            .ok()
+            .flatten();
+        candidates.push((url, candidate_source));
+    }
+
+    for (candidate_url, candidate_source) in candidates {
+        let candidate_url = candidate_url.trim().to_string();
+        if candidate_url.is_empty() || !tried.insert(candidate_url.clone()) {
+            continue;
+        }
+        let source_for_fetch = candidate_source;
+        if let Ok((bytes, content_type)) = state
+            .book_service
+            .get_cover_for_source("public", &candidate_url, source_for_fetch.as_ref())
+            .await
+        {
+            return Some((book.book_url, candidate_url, bytes, content_type));
+        }
+    }
+    None
+}
+
+/// 地址里的 `x-expires` 是否已经过期。
+///
+/// 只认能解析成秒级时间戳的 `x-expires`：没有该参数、值不是数字、或还没到期
+/// 都返回 false。这个判定必须严格 —— 它决定要不要为一张封面额外发起详情页
+/// 请求，误判会把书架首屏的每一张图都拖成一次网络往返。
+fn cover_url_expired(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    query.split('&').any(|pair| {
+        let Some((name, value)) = pair.split_once('=') else {
+            return false;
+        };
+        name.eq_ignore_ascii_case("x-expires")
+            && value
+                .parse::<u64>()
+                .map(|expires| expires <= now)
+                .unwrap_or(false)
+    })
+}
+
+const COVER_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+const COVER_REFRESH_COOLDOWN_CAP: usize = 128;
+
+fn cover_refresh_cooldown() -> &'static std::sync::Mutex<HashMap<String, std::time::Instant>> {
+    static COOLDOWN: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    COOLDOWN.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 /// 为一次封面请求找出它所属的书源。
@@ -2837,5 +2990,36 @@ mod tests {
             params.get("source").map(String::as_str),
             Some("https://18mh.net/novel")
         );
+    }
+
+    /// 只有 `x-expires` 真的过期才触发换地址。
+    ///
+    /// 这条判定必须严格：它决定是否为一张封面额外拉一次详情页，误判会把
+    /// 书架首屏每张图都拖成一次网络往返。
+    #[test]
+    fn detects_only_expired_cover_urls() {
+        assert!(cover_url_expired(
+            "https://img.example/c.webp?lk3s=8d&x-expires=1&x-signature=abc%3D"
+        ));
+        assert!(cover_url_expired("https://img.example/c.jpg?X-Expires=1"));
+        // 还没到期: 缓存未命中时正常走回源，不要走换地址。
+        assert!(!cover_url_expired(
+            "https://img.example/c.jpg?x-expires=99999999999&x-signature=abc"
+        ));
+        // 没有 x-expires: 仅 x-signature 不代表会过期。
+        assert!(!cover_url_expired(
+            "https://img.example/c.jpg?x-signature=abc"
+        ));
+        assert!(!cover_url_expired("https://img.example/c.jpg"));
+        assert!(!cover_url_expired(
+            "https://img.example/c.jpg?auth_key=1-2-3"
+        ));
+        // 值不是时间戳: 不做猜测性触发。
+        assert!(!cover_url_expired(
+            "https://img.example/c.jpg?x-expires=abc"
+        ));
+        assert!(!cover_url_expired(
+            "https://img.example/c.jpg?redirect=https://a/b?x-expires=1"
+        ));
     }
 }

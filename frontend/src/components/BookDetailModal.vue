@@ -176,6 +176,7 @@
                 class="source-item"
                 :class="{ selected: selectedSource?.origin === cand.origin && selectedSource?.bookUrl === cand.bookUrl }"
                 @click="selectSource(cand)"
+                @contextmenu.prevent.stop="handleSourceContextMenu($event, cand)"
               >
                 <span class="source-radio" :class="{ checked: selectedSource?.origin === cand.origin && selectedSource?.bookUrl === cand.bookUrl }" />
                 <span class="source-name">
@@ -346,6 +347,7 @@ import { ref, watch, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { getCoverUrl, getChapterList, saveBook, setBookSource, getBookInfo } from '../api/bookshelf'
 import { getAvailableBookSourceSSE } from '../api/search'
+import { deleteBookSource } from '../api/source'
 import type { SseLike } from '../api/sse'
 import { useSourceStore } from '../stores/source'
 import { useBookshelfStore } from '../stores/bookshelf'
@@ -361,6 +363,7 @@ import {
 } from '../utils/sourceCandidateCache'
 import { matchesSourceSwitchTitle, mergeSourceCandidates, normalizeSourceSwitchAuthor, shelfMatchKey, sourceCandidateKey } from '../utils/searchRank'
 import { deleteBookCover, uploadBookCover } from '../api/bookCover'
+import { showContextMenu } from '../composables/useContextMenu'
 import {
   canRevertToOrigin,
   createBookEditDraft,
@@ -886,6 +889,69 @@ function selectSource(candidate: SearchBook) {
   chapterError.value = ''
   loadedCatalogIdentity.value = ''
   void loadChaptersFor(candidate.bookUrl, candidate.origin, detailLoadId, detailKey.value)
+}
+
+/** 可读书源右键菜单：只提供删除。 */
+function handleSourceContextMenu(event: MouseEvent, candidate: SearchBook) {
+  // 本书自身使用的源不能删：目录与正文都依赖它。置灰而不是不弹菜单，
+  // 免得右键毫无反馈。
+  const isCurrent = sourceKey(candidate.origin) === sourceKey(props.book?.origin || '')
+  const name = sourceNameByOrigin(candidate.origin)
+  showContextMenu(event, [
+    {
+      label: '删除书源',
+      danger: true,
+      disabled: isCurrent,
+      action: () => { void removeSourceCandidate(candidate.origin, name) },
+    },
+  ], candidate)
+}
+
+async function removeSourceCandidate(origin: string, name: string) {
+  const key = sourceKey(origin)
+  const ok = await appStore.confirmDialog(`确定删除书源 "${name}"？`, { title: '删除书源', danger: true })
+  if (!ok) return
+  let target = sourceStore.sources.find((source) => sourceKey(source.bookSourceUrl) === key)
+  try {
+    if (!target) {
+      // 清单可能落后于磁盘：先刷新一次，再按规范化后的地址删除。
+      await sourceStore.fetchSources(true).catch(() => undefined)
+      target = sourceStore.sources.find((source) => sourceKey(source.bookSourceUrl) === key)
+    }
+    await deleteBookSource(target?.bookSourceUrl || origin)
+    const previousSelection = selectedSource.value ? candidateKey(selectedSource.value) : ''
+    sourceCatalog.value.delete(key)
+    dropDeletedSourceFromCache(key)
+    setSourceCandidates(sourceCandidates.value.filter((candidate) => sourceKey(candidate.origin) !== key))
+    const next = selectedSource.value
+    if (!next || (next && candidateKey(next) !== previousSelection)) {
+      // 选中项变了（删掉的正是选中源，或原本没有选中项），目录必须跟着重载。
+      chapters.value = []
+      showAllChapters.value = false
+      chapterError.value = ''
+      loadedCatalogIdentity.value = ''
+      if (next) void loadChaptersFor(next.bookUrl, next.origin, detailLoadId, detailKey.value)
+    }
+    // 同步共享清单，避免同一次会话里其他面板仍从旧列表读到这个源。
+    // 不调用 fetchSources：那会触发 availabilityVersion 并清空当前候选。
+    sourceStore.sources = sourceStore.sources.filter(
+      (source) => sourceKey(source.bookSourceUrl) !== key,
+    )
+    appStore.showToast(`已删除书源「${name}」`, 'success')
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '删除书源失败', 'error')
+  }
+}
+
+/** 从候选缓存中剔除已删除的源，避免冷启动或清单拉取失败时它又出现。 */
+function dropDeletedSourceFromCache(key: string) {
+  const bookKey = detailKey.value
+  if (!bookKey) return
+  const cached = sourceCandidateCache.get(bookKey)
+  if (!cached) return
+  const remaining = cached.books.filter((book) => sourceKey(book.origin) !== key)
+  if (remaining.length) sourceCandidateCache.set(bookKey, cached.catalogSignature, remaining, cached.complete)
+  else sourceCandidateCache.delete(bookKey)
 }
 
 async function loadChaptersFor(

@@ -102,6 +102,7 @@
           class="candidate"
           :class="{ active: selectedCandidate?.book.bookUrl === item.book.bookUrl && selectedCandidate?.book.origin === item.book.origin }"
           @click="selectCandidate(item)"
+          @contextmenu.prevent.stop="handleCandidateContextMenu($event, item)"
         >
           <span class="candidate-rail" aria-hidden="true"></span>
           <span class="candidate-body">
@@ -203,9 +204,11 @@ import { useReaderStore } from '../../stores/reader'
 import { useAppStore } from '../../stores/app'
 import { useSourceStore } from '../../stores/source'
 import { getAvailableBookSourceSSE } from '../../api/search'
+import { deleteBookSource } from '../../api/source'
 import type { SseLike } from '../../api/sse'
 import { getBookInfo, getCoverUrl } from '../../api/bookshelf'
 import { isLocalBook } from '../../utils/localBook'
+import { showContextMenu } from '../../composables/useContextMenu'
 import { matchesSourceSwitchTitle, mergeSourceCandidates, normalizeSourceSwitchAuthor, sourceCandidateKey } from '../../utils/searchRank'
 import {
   getSourceCandidateCache,
@@ -224,6 +227,9 @@ type CandidateItem = {
   score: number
 }
 
+/** 本次会话内已删除的书源：在途 SSE 与书架旧候选都可能再把它们带回来。 */
+const deletedSourceOrigins = new Set<string>()
+
 const store = useReaderStore()
 const appStore = useAppStore()
 const sourceStore = useSourceStore()
@@ -237,6 +243,7 @@ const lastIndex = ref(-1)
 const hasMoreSources = ref(true)
 const selectedCandidate = ref<CandidateItem | null>(null)
 const candidatePreview = ref<Book | null>(null)
+let candidatePreviewRequestId = 0
 const AVAILABLE_CONCURRENT_COUNT = 16
 let availableSourceSSE: SseLike | null = null
 
@@ -412,6 +419,7 @@ function mergeCandidates(candidates: SearchBook[]) {
   results.value = mergeSourceCandidates(results.value, candidates.filter((item) => (
     sourceCandidateKey(item) !== currentKey
     && matchesSourceSwitchTitle(currentBook.name, item.name)
+    && !deletedSourceOrigins.has(sourceKey(item.origin))
     && (!enabled || enabled.has(sourceKey(item.origin)))
   )))
 }
@@ -569,17 +577,79 @@ function finishAvailableSourceSSE(
 }
 
 async function selectCandidate(item: CandidateItem) {
+  const requestId = ++candidatePreviewRequestId
   selectedCandidate.value = item
   candidatePreview.value = null
   try {
-    candidatePreview.value = await getBookInfo(item.book.bookUrl, item.book.origin)
+    const preview = await getBookInfo(item.book.bookUrl, item.book.origin)
+    if (requestId === candidatePreviewRequestId) candidatePreview.value = preview
   } catch {
-    candidatePreview.value = null
+    if (requestId === candidatePreviewRequestId) candidatePreview.value = null
   }
+}
+
+/** 书源右键菜单：只提供删除。 */
+function handleCandidateContextMenu(event: MouseEvent, item: CandidateItem) {
+  const isCurrent = !!store.book && sourceKey(item.book.origin) === sourceKey(store.book.origin)
+  handleSourceContextMenu(event, item.book.origin, sourceNameByOrigin(item.book.origin), isCurrent)
+}
+
+function handleSourceContextMenu(event: MouseEvent, origin: string, name: string, disabled = false) {
+  // 本地书没有书源，右键不弹删除菜单。
+  if (isLocal.value) return
+  showContextMenu(event, [
+    {
+      label: '删除书源',
+      danger: true,
+      disabled,
+      action: () => { void removeSourceCandidate(origin, name) },
+    },
+  ], origin)
+}
+
+async function removeSourceCandidate(origin: string, name: string) {
+  const key = sourceKey(origin)
+  const ok = await appStore.confirmDialog(`确定删除书源 "${name}"？`, { title: '删除书源', danger: true })
+  if (!ok) return
+  let target = sourceStore.sources.find((source) => sourceKey(source.bookSourceUrl) === key)
+  try {
+    if (!target) {
+      // 清单可能落后于磁盘：先刷新一次，再按规范化后的地址删除。
+      await sourceStore.fetchSources(true).catch(() => undefined)
+      target = sourceStore.sources.find((source) => sourceKey(source.bookSourceUrl) === key)
+    }
+    await deleteBookSource(target?.bookSourceUrl || origin)
+    deletedSourceOrigins.add(key)
+    results.value = results.value.filter((book) => sourceKey(book.origin) !== key)
+    dropDeletedSourceFromCache(key)
+    const selected = selectedCandidate.value
+    if (selected && sourceKey(selected.book.origin) === key) {
+      selectedCandidate.value = null
+      candidatePreview.value = null
+      candidatePreviewRequestId += 1
+      if (preparedResults.value.length) void selectCandidate(preparedResults.value[0])
+    }
+    appStore.showToast(`已删除书源「${name}」`, 'success')
+    await sourceStore.fetchSources(true).catch(() => undefined)
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '删除书源失败', 'error')
+  }
+}
+
+/** 从候选缓存中剔除已删除的源，避免冷启动或清单拉取失败时它又出现。 */
+function dropDeletedSourceFromCache(key: string) {
+  const cacheKey = sourceCandidateCacheKey()
+  if (!cacheKey) return
+  const cached = sourceCandidateCache.get(cacheKey)
+  if (!cached) return
+  const remaining = cached.books.filter((book) => sourceKey(book.origin) !== key)
+  if (remaining.length) sourceCandidateCache.set(cacheKey, cached.catalogSignature, remaining, cached.complete)
+  else sourceCandidateCache.delete(cacheKey)
 }
 
 /** 收起底部详情，回到纯列表。选中态一并清掉，避免列表里留着高亮却看不到对应详情。 */
 function clearSelection() {
+  candidatePreviewRequestId += 1
   selectedCandidate.value = null
   candidatePreview.value = null
 }

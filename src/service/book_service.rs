@@ -8,6 +8,7 @@ use crate::model::{
     book::Book,
     book_chapter::BookChapter,
     book_source::{BookSource, ExploreKind},
+    cache_manifest::{CacheChapterEntry, CacheFailedEntry, CacheManifest},
     search::SearchBook,
 };
 use crate::parser::js::{
@@ -622,6 +623,9 @@ pub struct BookService {
     login_sessions: Arc<RwLock<HashMap<String, SourceLoginSession>>>,
     rate_states: Arc<RwLock<HashMap<String, RateState>>>,
     bookshelf_write_lock: Arc<Mutex<()>>,
+    // 缓存清单是单个 JSON 文件，读改写必须按书串行。批量任务与
+    // 概览重建可能并发落到同一本书，没有这把锁时后写者会用旧快照覆盖前者。
+    cache_manifest_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Clone, Default)]
@@ -832,6 +836,13 @@ fn truncate_trace_body(body: &str) -> String {
     }
 }
 
+/// 当前时间的毫秒时间戳。缓存清单只用于展示与排序，取不到系统时间时返回 0。
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis() as i64)
+        .unwrap_or(0)
+}
 impl BookService {
     pub fn new(http: HttpClient, parser: RuleEngine, cache: FileCache, storage_dir: &str) -> Self {
         let storage_dir = PathBuf::from(storage_dir);
@@ -844,6 +855,7 @@ impl BookService {
             login_sessions: Arc::new(RwLock::new(HashMap::new())),
             rate_states: Arc::new(RwLock::new(HashMap::new())),
             bookshelf_write_lock: Arc::new(Mutex::new(())),
+            cache_manifest_locks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -2575,6 +2587,29 @@ impl BookService {
         chapter_title: Option<&str>,
         on_stage: Option<&(dyn Fn(ContentLoadStage) + Send + Sync)>,
     ) -> Result<String, AppError> {
+        self.get_content_inner(
+            user_ns,
+            book_url,
+            source,
+            chapter_url,
+            chapter_title,
+            false,
+            on_stage,
+        )
+        .await
+    }
+
+    /// 统一实现。`ignore_cache` 为真时跳过缓存命中检查，抓取成功后覆盖旧正文。
+    async fn get_content_inner(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        source: &BookSource,
+        chapter_url: &str,
+        chapter_title: Option<&str>,
+        ignore_cache: bool,
+        on_stage: Option<&(dyn Fn(ContentLoadStage) + Send + Sync)>,
+    ) -> Result<String, AppError> {
         let notify = |stage: ContentLoadStage| {
             if let Some(callback) = on_stage {
                 callback(stage);
@@ -2586,16 +2621,19 @@ impl BookService {
             chapter_url,
             book_key
         );
-        // 本地已有正文就直接返回, 与 legado 的 `BookHelp.getContent` 一致: 缓存命中即
-        // 意味着这一章读过了, 不必再发一次请求等网络往返。联网只发生在未缓存、或用户
-        // 显式刷新(`refresh`)时 —— 后者会先删缓存再走到这里。
-        let cached = self
-            .cache
-            .get(user_ns, &book_key, chapter_url)
-            .await
-            .ok()
-            .flatten()
-            .filter(|hit| !hit.trim().is_empty());
+        // 本地已有正文就直接返回, 与 legado 的 `BookHelp.getContent` 一致: 缓存命中
+        // 意味着这一章读过了, 不必再发一次请求等网络往返。联网只发生在未缓存、或用
+        // 户显式刷新(`refresh`)时 —— 后者会先删缓存再走到这里。
+        let cached = if ignore_cache {
+            None
+        } else {
+            self.cache
+                .get(user_ns, &book_key, chapter_url)
+                .await
+                .ok()
+                .flatten()
+                .filter(|hit| !hit.trim().is_empty())
+        };
         if let Some(hit) = cached {
             tracing::debug!("get_content returning cached content, len={}", hit.len());
             return Ok(strip_leading_content_title(&hit, chapter_title));
@@ -2630,7 +2668,14 @@ impl BookService {
             // 正文规则里往往会触发书源脚本与段评请求, 这是最耗时的一步
             notify(ContentLoadStage::Parsing);
             let (content, _logs) = self
-                .parse_content_blocking(user_ns, source, &res, &current_url, book_url, book_ctx.clone())
+                .parse_content_blocking(
+                    user_ns,
+                    source,
+                    &res,
+                    &current_url,
+                    book_url,
+                    book_ctx.clone(),
+                )
                 .await?;
             tracing::debug!("get_content parsed content len={}", content.len());
 
@@ -2642,7 +2687,9 @@ impl BookService {
             }
 
             // Check for next page
-            if let Some(next_url) = self.source_scope(user_ns, source, || self.parser.next_content_url(source, &res.body, &res.url))? {
+            if let Some(next_url) = self.source_scope(user_ns, source, || {
+                self.parser.next_content_url(source, &res.body, &res.url)
+            })? {
                 tracing::debug!("get_content found next_url: {}", next_url);
                 if should_follow_content_page(chapter_url, &current_url, &next_url) {
                     current_url = next_url;
@@ -2662,23 +2709,386 @@ impl BookService {
         all_content = strip_leading_content_title(&all_content, chapter_title);
         if !all_content.is_empty() {
             notify(ContentLoadStage::Caching);
-            let _ = self
+            let put_result = self
                 .cache
                 .put(user_ns, &book_key, chapter_url, &all_content)
                 .await;
+            if ignore_cache {
+                // 覆盖路径必须先抓后写：写失败时旧正文仍在，若继续当成功会
+                // 让上层误以为覆盖完成。这里必须把错误抛出去。
+                put_result.map_err(|e| AppError::Internal(e.into()))?;
+            } else if let Err(err) = put_result {
+                tracing::warn!("写入章节缓存失败(本次仍返回抓取结果): {err}");
+            }
         }
         Ok(all_content)
+    }
+
+    /// 换源迁移：把旧 bookUrl 的章节缓存目录整体移到新 bookUrl 下。
+    /// 与 legado 的 `BookHelp.updateCacheFolder` 一致：缓存跟随这本书走，
+    /// 但不跨书源共享。目标目录已存在时不覆盖，避免两边缓存混在一起。
+    pub async fn move_book_cache(
+        &self,
+        user_ns: &str,
+        old_book_url: &str,
+        new_book_url: &str,
+        new_origin: &str,
+        new_origin_name: Option<&str>,
+    ) -> bool {
+        if old_book_url == new_book_url {
+            return false;
+        }
+        let old_key = md5_hex(old_book_url);
+        let new_key = md5_hex(new_book_url);
+        match self.cache.move_book(user_ns, &old_key, &new_key).await {
+            Ok(true) => {
+                // 清单里的 bookUrl 与 origin 都还是旧值，迁移后一并改成新值。
+                // 否则删旧源时会按清单 origin 把这本书（现在属于新源）的缓存清掉。
+                // 与概览重建共用同一把锁，防止并发写回旧路径的幽灵清单。
+                let manifest_lock = self.cache_manifest_lock(user_ns, new_book_url).await;
+                let _manifest_guard = manifest_lock.lock().await;
+                if let Ok(Some(mut manifest)) = self.load_cache_manifest(user_ns, new_book_url).await {
+                    let mut changed = false;
+                    if manifest.book_url != new_book_url {
+                        manifest.book_url = new_book_url.to_string();
+                        changed = true;
+                    }
+                    if manifest.origin != new_origin {
+                        manifest.origin = new_origin.to_string();
+                        changed = true;
+                    }
+                    if manifest.origin_name.as_deref() != new_origin_name {
+                        manifest.origin_name = new_origin_name.map(str::to_string);
+                        changed = true;
+                    }
+                    if changed {
+                        if let Err(err) = self.save_cache_manifest(user_ns, &manifest).await {
+                            tracing::warn!("修正迁移后缓存清单失败: {err}");
+                        }
+                    }
+                }
+                true
+            }
+            Ok(false) => false,
+            Err(err) => {
+                tracing::warn!("迁移章节缓存目录失败: {err}");
+                false
+            }
+        }
+    }
+
+    /// 换源重映射：旧源目录里已有的正文按「章节地址相同优先、标题唯一时兜底」
+    /// 改名到新源的章节地址下。与 legado 的 `BookHelp.remapContentCache` 一致，
+    /// 缓存不跨源共享，但同一本书换源后已下载的章节仍能继续读。
+    pub async fn remap_chapter_cache(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        old_chapters: &[BookChapter],
+        new_chapters: &[BookChapter],
+    ) -> usize {
+        if old_chapters.is_empty() || new_chapters.is_empty() {
+            return 0;
+        }
+        let book_key = md5_hex(book_url);
+        let old_by_url: HashMap<&str, &BookChapter> = old_chapters
+            .iter()
+            .filter(|chapter| !chapter.is_volume && !chapter.url.is_empty())
+            .map(|chapter| (chapter.url.as_str(), chapter))
+            .collect();
+        // 标题兜底只在两边都唯一时成立：旧目录同名章节不唯一，或新目录
+        // 有多个同名章节，都无法判断正文属于哪一章，宁可留空重新抓取。
+        let mut old_title_counts: HashMap<&str, usize> = HashMap::new();
+        for chapter in old_chapters.iter().filter(|chapter| !chapter.is_volume) {
+            *old_title_counts.entry(chapter.title.trim()).or_default() += 1;
+        }
+        let mut new_title_counts: HashMap<&str, usize> = HashMap::new();
+        for chapter in new_chapters.iter().filter(|chapter| !chapter.is_volume) {
+            *new_title_counts.entry(chapter.title.trim()).or_default() += 1;
+        }
+        let old_by_title: HashMap<&str, &BookChapter> = old_chapters
+            .iter()
+            .filter(|chapter| {
+                !chapter.is_volume && old_title_counts.get(chapter.title.trim()) == Some(&1)
+            })
+            .map(|chapter| (chapter.title.trim(), chapter))
+            .collect();
+        let mut moved = 0usize;
+        for new_chapter in new_chapters.iter().filter(|chapter| !chapter.is_volume) {
+            let old_chapter = old_by_url
+                .get(new_chapter.url.as_str())
+                .copied()
+                .or_else(|| {
+                    // 新目录里同标题也不唯一时，无法判断正文归属，不迁移。
+                    if new_title_counts.get(new_chapter.title.trim()) == Some(&1) {
+                        old_by_title.get(new_chapter.title.trim()).copied()
+                    } else {
+                        None
+                    }
+                });
+            let Some(old_chapter) = old_chapter else { continue; };
+            match self
+                .cache
+                .rename_chapter(user_ns, &book_key, &old_chapter.url, &new_chapter.url)
+                .await
+            {
+                Ok(true) => moved += 1,
+                Ok(false) => {}
+                Err(err) => tracing::warn!("重映射章节缓存失败: {err}"),
+            }
+        }
+        moved
     }
 
     /// Delete all chapter content cache for a book
     pub async fn delete_book_cache(&self, user_ns: &str, book_url: &str) -> Result<bool, AppError> {
         let book_key = md5_hex(book_url);
-        self.cache
+        // 先删目录再删清单：目录删失败时失败记录还在，用户仍能看到并重试。
+        let removed = self
+            .cache
             .remove_book(user_ns, &book_key)
             .await
-            .map_err(|e| AppError::Internal(e.into()))
+            .map_err(|e| AppError::Internal(e.into()))?;
+        let _ = self.delete_cache_manifest(user_ns, book_url).await;
+        Ok(removed)
     }
 
+    // ─── 缓存清单 ───
+
+    fn cache_manifest_path(&self, user_ns: &str, book_url: &str) -> PathBuf {
+        self.cache
+            .book_dir(user_ns, &md5_hex(book_url))
+            .join("cache_manifest.json")
+    }
+
+    /// 同一本书的清单读改写串行锁。缓存任务与概览重建都会改清单，
+    /// 并发时后写者如果拿着旧快照就会覆盖别人刚写入的来源与失败记录。
+    async fn cache_manifest_lock(&self, user_ns: &str, book_url: &str) -> Arc<Mutex<()>> {
+        let key = format!("{user_ns}::{}", normalize_source_url(book_url));
+        if let Some(lock) = self
+            .cache_manifest_locks
+            .read()
+            .await
+            .get(&key)
+            .cloned()
+        {
+            return lock;
+        }
+        let mut locks = self.cache_manifest_locks.write().await;
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    pub async fn load_cache_manifest(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+    ) -> Result<Option<CacheManifest>, AppError> {
+        let path = self.cache_manifest_path(user_ns, book_url);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = fs::read_to_string(&path)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        let manifest: CacheManifest = serde_json::from_str(&data)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        Ok(Some(manifest))
+    }
+
+    pub async fn save_cache_manifest(
+        &self,
+        user_ns: &str,
+        manifest: &CacheManifest,
+    ) -> Result<(), AppError> {
+        let path = self.cache_manifest_path(user_ns, &manifest.book_url);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AppError::Internal(e.into()))?;
+        }
+        let data = serde_json::to_string(manifest)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        // 先写临时文件再原子替换：进程中断或并发写时不会留下半截 JSON，
+        // 否则下次 load 解析失败会把整本书的缓存来源与失败记录一起丢掉。
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, data)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        if let Err(err) = fs::rename(&tmp_path, &path).await {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(AppError::Internal(err.into()));
+        }
+        Ok(())
+    }
+
+    pub async fn delete_cache_manifest(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+    ) -> Result<(), AppError> {
+        let path = self.cache_manifest_path(user_ns, book_url);
+        if path.exists() {
+            fs::remove_file(&path)
+                .await
+                .map_err(|e| AppError::Internal(e.into()))?;
+        }
+        Ok(())
+    }
+
+    /// 用真实缓存文件重建清单。
+    ///
+    /// 目录可能被外部清理、换源迁移或旧版本写入过，清单不能只靠增量维护；
+    /// 每次打开缓存管理页都按当前目录重算一遍 `cached`，避免 UI 显示与磁盘分叉。
+    pub async fn rebuild_cache_manifest(
+        &self,
+        user_ns: &str,
+        book: &Book,
+        chapters: &[BookChapter],
+    ) -> Result<CacheManifest, AppError> {
+        let manifest_lock = self.cache_manifest_lock(user_ns, &book.book_url).await;
+        let _manifest_guard = manifest_lock.lock().await;
+        let book_key = md5_hex(&book.book_url);
+        // 单个缓存目录读失败不能拖垮整个概览：按空缓存继续，用户在页面上仍能
+        // 看到这本书与它的目录，只是已缓存数为 0。
+        let cached_files = self
+            .cache
+            .list_chapter_files(user_ns, &book_key)
+            .await
+            .unwrap_or_default();
+        let cached_set: HashSet<&str> = cached_files.iter().map(String::as_str).collect();
+        // 旧清单损坏时视为没有旧清单，而不是把错误抛给调用方。
+        let previous = self
+            .load_cache_manifest(user_ns, &book.book_url)
+            .await
+            .ok()
+            .flatten();
+        let previous_updated_at = previous.as_ref().map(|manifest| manifest.updated_at).unwrap_or(0);
+        let previous_cached_count = previous.as_ref().map(|manifest| manifest.cached_count()).unwrap_or(0);
+        let previous_failed_count = previous.as_ref().map(|manifest| manifest.failed.len()).unwrap_or(0);
+        let now = now_millis();
+        let entries: Vec<CacheChapterEntry> = chapters
+            .iter()
+            .map(|chapter| CacheChapterEntry {
+                index: chapter.index,
+                title: chapter.title.clone(),
+                url: chapter.url.clone(),
+                is_volume: chapter.is_volume,
+                cached: !chapter.is_volume && cached_set.contains(md5_hex(&chapter.url).as_str()),
+            })
+            .collect();
+        let failed = previous
+            .map(|manifest| {
+                manifest
+                    .failed
+                    .into_iter()
+                    .filter(|entry| {
+                        // 目录里已经找不到这一章时保留失败记录，用户仍能单独重试；
+                        // 章节已缓存说明后来补上了，可以清掉。覆盖失败时旧正文仍在
+                        // （cached=true），但这次抓取确实失败，必须靠 overwrite_failed 保留。
+                        entries.iter().any(|chapter| {
+                            chapter.url == entry.url && (!chapter.cached || entry.overwrite_failed)
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut manifest = CacheManifest {
+            version: 1,
+            book_url: book.book_url.clone(),
+            name: book.name.clone(),
+            author: book.author.clone(),
+            origin: book.origin.clone(),
+            origin_name: book.origin_name.clone(),
+            total_chapter_num: chapters.len() as i32,
+            updated_at: now,
+            chapters: entries,
+            failed,
+        };
+        // 概览与任务开始都会重建清单。缓存状态未变化时沿用旧时间，否则
+        // “最近缓存”会在每次打开缓存管理页时被刷新成刚刚。
+        if manifest.cached_count() == 0 && manifest.failed.is_empty() {
+            // 从未缓存过的书不该显示「刚刚缓存」，也不该被「最近缓存」排到最前。
+            manifest.updated_at = if previous_updated_at > 0 { previous_updated_at } else { 0 };
+        } else if previous_updated_at > 0
+            && previous_cached_count == manifest.cached_count()
+            && previous_failed_count == manifest.failed.len()
+        {
+            manifest.updated_at = previous_updated_at;
+        }
+        self.save_cache_manifest(user_ns, &manifest).await?;
+        Ok(manifest)
+    }
+
+    /// 抓取成功后清掉这些章节的历史失败记录。
+    /// 覆盖失败时旧正文仍在，清单里会留下 overwriteFailed 标记；重试成功后
+    /// 必须主动清除，否则失败列表会一直挂着已经修好的章节。
+    pub async fn clear_chapter_cache_failures(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        chapter_urls: &[String],
+    ) {
+        if chapter_urls.is_empty() {
+            return;
+        }
+        let manifest_lock = self.cache_manifest_lock(user_ns, book_url).await;
+        let _manifest_guard = manifest_lock.lock().await;
+        let Ok(Some(mut manifest)) = self.load_cache_manifest(user_ns, book_url).await else {
+            return;
+        };
+        let before = manifest.failed.len();
+        manifest
+            .failed
+            .retain(|entry| !chapter_urls.iter().any(|url| url == &entry.url));
+        if manifest.failed.len() != before {
+            manifest.updated_at = now_millis();
+            let _ = self.save_cache_manifest(user_ns, &manifest).await;
+        }
+    }
+
+    /// 批量记录失败章节。`overwrite` 表示这一轮是覆盖式抓取：
+    /// 旧正文还在，章节会显示为已缓存，失败记录要单独标记后才能保留。
+    pub async fn record_chapter_cache_failures(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        entries: &[(BookChapter, String)],
+        overwrite: bool,
+    ) {
+        if entries.is_empty() {
+            return;
+        }
+        let manifest_lock = self.cache_manifest_lock(user_ns, book_url).await;
+        let _manifest_guard = manifest_lock.lock().await;
+        let Ok(Some(mut manifest)) = self.load_cache_manifest(user_ns, book_url).await else {
+            return;
+        };
+        let now = now_millis();
+        for (chapter, reason) in entries {
+            match manifest.failed.iter_mut().find(|item| item.url == chapter.url) {
+                Some(entry) => {
+                    entry.attempts += 1;
+                    entry.reason = reason.clone();
+                    entry.last_attempt_at = now;
+                    entry.overwrite_failed = overwrite;
+                }
+                None => manifest.failed.push(CacheFailedEntry {
+                    index: chapter.index,
+                    title: chapter.title.clone(),
+                    url: chapter.url.clone(),
+                    reason: reason.clone(),
+                    attempts: 1,
+                    last_attempt_at: now,
+                    overwrite_failed: overwrite,
+                }),
+            }
+        }
+        manifest.updated_at = now;
+        let _ = self.save_cache_manifest(user_ns, &manifest).await;
+    }
     /// Check if a specific chapter is cached
     pub async fn is_chapter_cached(
         &self,
@@ -3108,6 +3518,192 @@ impl BookService {
         Ok(())
     }
 
+    /// 删除书源时默认清理该源的章节缓存。
+    ///
+    /// 归属只按 `Book.origin` / `CacheManifest.origin` 与书源地址完全一致判定。
+    /// 每条书架记录对应独立缓存目录，不同书源之间互不共享，因此不会误伤别的源。
+    /// 书架记录本身保留，用户换源后仍可继续阅读或重新缓存。
+    pub async fn delete_caches_for_sources(
+        &self,
+        user_ns: &str,
+        source_urls: &HashSet<String>,
+    ) -> usize {
+        if source_urls.is_empty() {
+            return 0;
+        }
+        let removed = source_urls
+            .iter()
+            .map(|url| source_identity(url))
+            .collect::<HashSet<_>>();
+        // 书架读失败时不扫描目录: 无法确认哪些缓存仍被书架引用, 宁可这次不清。
+        let books = match self.read_bookshelf(user_ns).await {
+            Ok(books) => books,
+            Err(err) => {
+                tracing::warn!("读取书架失败, 跳过书源缓存清理: {err}");
+                return 0;
+            }
+        };
+        let shelf_urls = books
+            .iter()
+            .map(|book| book.book_url.clone())
+            .collect::<HashSet<_>>();
+        // 目录缓存按 tocUrl 命名, 不同书源可能共用同一份目录地址。
+        // 只保护仍在其他源书架上的引用, 避免删一个源把另一个源的目录缓存带走。
+        let protected_toc = books
+            .iter()
+            .filter(|book| !removed.contains(&source_identity(&book.origin)))
+            .filter_map(|book| book.toc_url.as_deref())
+            .filter(|url| !url.is_empty())
+            .map(source_identity)
+            .collect::<HashSet<_>>();
+        let mut cleaned = self
+            .delete_book_caches_for_source(user_ns, &books, &removed, &protected_toc)
+            .await;
+
+        // 不在书架上的书同样要清: 从搜索页直接点开读过的书也会留下缓存目录,
+        // 清单里的 origin 是唯一还能反查书源归属的字段。
+        //
+        // 书架上的书一律跳过: 它们已由上面的遍历按**当前** origin 判定过。
+        // 换源后清单的 origin 可能还是旧源, 只凭清单判定会把新源的书误删。
+        let cleaned_count = cleaned.len();
+        let mut offline_cleaned = 0usize;
+        if let Ok(dirs) = self.cache.list_book_dirs(user_ns).await {
+            for (book_key, _) in dirs {
+                let manifest_path = self
+                    .cache
+                    .book_dir(user_ns, &book_key)
+                    .join("cache_manifest.json");
+                let Ok(raw) = fs::read_to_string(&manifest_path).await else {
+                    continue;
+                };
+                let Ok(manifest) = serde_json::from_str::<CacheManifest>(&raw) else {
+                    continue;
+                };
+                if manifest.book_url.is_empty()
+                    || md5_hex(&manifest.book_url) != book_key
+                    || shelf_urls.contains(&manifest.book_url)
+                    || !removed.contains(&source_identity(&manifest.origin))
+                    || cleaned.contains(&manifest.book_url)
+                {
+                    continue;
+                }
+                let content_ok = self
+                    .delete_book_cache(user_ns, &manifest.book_url)
+                    .await
+                    .is_ok();
+                let sources_ok = self
+                    .delete_book_sources_cache(user_ns, &manifest.book_url)
+                    .await
+                    .is_ok();
+                // 清单里没有 tocUrl, 只能按 bookUrl 兜底清一份目录缓存。
+                let _ = self
+                    .delete_chapter_list_cache(user_ns, &manifest.book_url)
+                    .await;
+                if content_ok && sources_ok {
+                    cleaned.insert(manifest.book_url);
+                    offline_cleaned += 1;
+                }
+            }
+        }
+        cleaned_count + offline_cleaned
+    }
+
+    async fn delete_book_caches_for_source(
+        &self,
+        user_ns: &str,
+        books: &[Book],
+        removed: &HashSet<String>,
+        protected_toc: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut cleaned = HashSet::new();
+        for book in books {
+            if !removed.contains(&source_identity(&book.origin)) {
+                continue;
+            }
+            if self
+                .delete_caches_for_book(user_ns, book, protected_toc)
+                .await
+            {
+                cleaned.insert(book.book_url.clone());
+            }
+        }
+        cleaned
+    }
+
+    /// 列出归属这些书源的书籍。删除书源前用它定位在途缓存任务。
+    pub async fn books_for_sources(
+        &self,
+        user_ns: &str,
+        source_urls: &HashSet<String>,
+    ) -> Vec<Book> {
+        if source_urls.is_empty() {
+            return Vec::new();
+        }
+        let removed = source_urls
+            .iter()
+            .map(|url| source_identity(url))
+            .collect::<HashSet<_>>();
+        match self.read_bookshelf(user_ns).await {
+            Ok(books) => books
+                .into_iter()
+                .filter(|book| removed.contains(&source_identity(&book.origin)))
+                .collect(),
+            Err(err) => {
+                tracing::warn!("读取书架失败, 无法定位书源的在途缓存任务: {err}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// 只清缓存文件，不动书架记录、封面与阅读进度。返回是否全部删除成功。
+    async fn delete_caches_for_book(
+        &self,
+        user_ns: &str,
+        book: &Book,
+        protected_toc: &HashSet<String>,
+    ) -> bool {
+        // 与清单重建共用同一把锁：否则重建可能在删除后把目录与清单重新写回来。
+        let manifest_lock = self.cache_manifest_lock(user_ns, &book.book_url).await;
+        let _manifest_guard = manifest_lock.lock().await;
+        let mut ok = true;
+        if !book.book_url.is_empty() {
+            ok &= self.delete_book_cache(user_ns, &book.book_url).await.is_ok();
+            ok &= self
+                .delete_book_sources_cache(user_ns, &book.book_url)
+                .await
+                .is_ok();
+            ok &= self
+                .delete_chapter_list_cache(user_ns, &book.book_url)
+                .await
+                .is_ok();
+        }
+        if let Some(toc_url) = book.toc_url.as_deref().filter(|url| !url.is_empty()) {
+            if !protected_toc.contains(&source_identity(toc_url)) {
+                ok &= self.delete_chapter_list_cache(user_ns, toc_url).await.is_ok();
+            }
+        }
+        ok
+    }
+    /// 只移除书架记录，不碰任何本地缓存。
+    /// 换源时旧记录已被新 bookUrl 取代，旧缓存目录要么已迁移，要么因目标
+    /// 已存在而保留在原处；两种情况都不该在这里删除文件。
+    pub async fn remove_book_record(&self, user_ns: &str, book_url: &str) -> Result<bool, AppError> {
+        let _write_guard = self.bookshelf_write_lock.lock().await;
+        let mut list = self.read_bookshelf(user_ns).await?;
+        let before = list.len();
+        // 请求里的地址可能是编码形式或带尾斜杠，按同一口径比较，避免删不掉旧记录。
+        let target = repair_encoded_url(book_url);
+        list.retain(|book| {
+            let current = repair_encoded_url(&book.book_url);
+            current != target && current.trim_end_matches('/') != target.trim_end_matches('/')
+        });
+        let removed = list.len() != before;
+        if removed {
+            self.write_bookshelf(user_ns, &list).await?;
+        }
+        Ok(removed)
+    }
+
     pub async fn delete_book(&self, user_ns: &str, book: &Book) -> Result<bool, AppError> {
         let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
@@ -3285,6 +3881,35 @@ impl BookService {
             )));
         }
         Ok(())
+    }
+
+    /// 跳过缓存命中检查重新抓取一章，抓取成功后覆盖旧正文。
+    pub async fn cache_chapter_overwrite(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        source: &BookSource,
+        chapter_url: &str,
+    ) -> Result<(), AppError> {
+        let content = self
+            .get_content_inner(user_ns, book_url, source, chapter_url, None, true, None)
+            .await?;
+        if content.trim().is_empty()
+            || !self.is_chapter_cached(user_ns, book_url, chapter_url).await
+        {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "正文解析为空, 未写入缓存"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 一本书的章节缓存正文总字节数。
+    pub async fn book_cache_size(&self, user_ns: &str, book_url: &str) -> u64 {
+        self.cache
+            .book_cache_size(user_ns, &md5_hex(book_url))
+            .await
+            .unwrap_or(0)
     }
 
     pub async fn get_cover(&self, user_ns: &str, url: &str) -> Result<(Vec<u8>, String), AppError> {
@@ -4609,6 +5234,11 @@ fn merge_book_read_config(existing: &Book, incoming: &mut Book) {
     }
 }
 
+/// 书源地址的比较口径：忽略首尾空白与末尾斜杠。
+/// `https://a.com` 与 `https://a.com/` 是同一个源，不能因写法差异漏清缓存。
+fn source_identity(url: &str) -> String {
+    normalize_source_url(url).trim_end_matches('/').to_string()
+}
 fn sanitize_book_urls(book: &mut Book) {
     book.book_url = repair_encoded_url(&book.book_url);
     book.origin = normalize_source_url(&book.origin);
@@ -4946,6 +5576,287 @@ mod tests {
         assert_eq!(to_json(ContentLoadStage::Caching), "\"caching\"");
     }
 
+    /// 换源移除旧记录只动书架，不删旧缓存目录里的任何文件。
+    #[tokio::test]
+    async fn remove_book_record_keeps_cache_files() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-remove-record-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let book_url = "https://old.example.com/book/1";
+        let book = Book {
+            name: "换源".to_string(),
+            author: "作者".to_string(),
+            origin: "https://old.example.com".to_string(),
+            book_url: book_url.to_string(),
+            ..Default::default()
+        };
+        service.save_book("default", book).await.unwrap();
+        service
+            .cache
+            .put("default", &md5_hex(book_url), "https://old.example.com/1", "正文")
+            .await
+            .unwrap();
+
+        // 尾斜杠差异也要能删掉同一条记录。
+        let removed = service
+            .remove_book_record("default", "https://old.example.com/book/1/")
+            .await
+            .unwrap();
+
+        assert!(removed);
+        assert!(service
+            .is_chapter_cached("default", book_url, "https://old.example.com/1")
+            .await);
+        assert!(service.get_bookshelf("default").await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+    /// 删除书源时该源的缓存被清空，其他源与书架记录不受影响。
+    #[tokio::test]
+    async fn delete_caches_for_sources_only_touches_matching_origin() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-delete-source-cache-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let removed_source = "https://gone.example.com";
+        let kept_source = "https://alive.example.com";
+        let gone_book = Book {
+            name: "删源书".to_string(),
+            author: "作者".to_string(),
+            origin: removed_source.to_string(),
+            book_url: "https://gone.example.com/book/1".to_string(),
+            ..Default::default()
+        };
+        let kept_book = Book {
+            name: "保留书".to_string(),
+            author: "作者".to_string(),
+            origin: kept_source.to_string(),
+            book_url: "https://alive.example.com/book/1".to_string(),
+            ..Default::default()
+        };
+        service.save_book("default", gone_book.clone()).await.unwrap();
+        service.save_book("default", kept_book.clone()).await.unwrap();
+        for book in [&gone_book, &kept_book] {
+            service
+                .cache
+                .put("default", &md5_hex(&book.book_url), &format!("{}/1", book.book_url), "正文")
+                .await
+                .unwrap();
+        }
+
+        let removed = service
+            .delete_caches_for_sources("default", &HashSet::from([removed_source.to_string()]))
+            .await;
+
+        assert_eq!(removed, 1);
+        assert!(!service
+            .is_chapter_cached(
+                "default",
+                &gone_book.book_url,
+                &format!("{}/1", gone_book.book_url)
+            )
+            .await);
+
+        assert!(service
+            .is_chapter_cached(
+                "default",
+                &kept_book.book_url,
+                &format!("{}/1", kept_book.book_url)
+            )
+            .await);
+        let shelf = service.get_bookshelf("default").await.unwrap();
+        assert_eq!(shelf.len(), 2, "删源只清缓存，不删书架记录");
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    /// 两个源共用同一份目录缓存时, 删一个源不能带走另一个源仍在用的目录。
+    #[tokio::test]
+    async fn delete_caches_for_sources_keeps_toc_shared_with_other_source() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-delete-source-toc-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let removed_source = "https://gone.example.com";
+        let kept_source = "https://alive.example.com";
+        let shared_toc = "https://shared.example.com/toc";
+        let gone_book = Book {
+            name: "删源书".to_string(),
+            author: "作者".to_string(),
+            origin: removed_source.to_string(),
+            book_url: "https://gone.example.com/book/1".to_string(),
+            toc_url: Some(shared_toc.to_string()),
+            ..Default::default()
+        };
+        let kept_book = Book {
+            name: "保留书".to_string(),
+            author: "作者".to_string(),
+            origin: kept_source.to_string(),
+            book_url: "https://alive.example.com/book/1".to_string(),
+            toc_url: Some(shared_toc.to_string()),
+            ..Default::default()
+        };
+        service.save_book("default", gone_book).await.unwrap();
+        service.save_book("default", kept_book).await.unwrap();
+        service
+            .save_chapter_list_cache("default", shared_toc, &Vec::new())
+            .await
+            .unwrap();
+
+        service
+            .delete_caches_for_sources("default", &HashSet::from([removed_source.to_string()]))
+            .await;
+
+        assert!(
+            service.chapter_list_cache_exists("default", shared_toc).await,
+            "其他源仍在引用的目录缓存必须保留"
+        );
+    }
+    /// 换源后清单 origin 仍可能是旧值。删旧源时不能凭清单误删书架新源的书。
+    #[tokio::test]
+    async fn delete_caches_for_sources_spares_shelf_books_after_source_switch() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-delete-source-switch-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let old_source = "https://old.example.com";
+        let new_source = "https://new.example.com";
+        let book_url = "https://new.example.com/book/1";
+        let book = Book {
+            name: "换源书".to_string(),
+            author: "作者".to_string(),
+            origin: old_source.to_string(),
+            book_url: book_url.to_string(),
+            ..Default::default()
+        };
+        service.save_book("default", book.clone()).await.unwrap();
+        service
+            .cache
+            .put("default", &md5_hex(book_url), &format!("{book_url}/1"), "正文")
+            .await
+            .unwrap();
+        // 清单停留在换源前：origin 还是旧源。
+        let manifest = CacheManifest {
+            version: 1,
+            book_url: book_url.to_string(),
+            origin: old_source.to_string(),
+            ..Default::default()
+        };
+        service
+            .save_cache_manifest("default", &manifest)
+            .await
+            .unwrap();
+        // 书架记录已经切到新源。
+        let mut switched = book.clone();
+        switched.origin = new_source.to_string();
+        service.save_book("default", switched).await.unwrap();
+
+        let removed = service
+            .delete_caches_for_sources("default", &HashSet::from([old_source.to_string()]))
+            .await;
+
+        assert_eq!(removed, 0, "书架上的书只能按当前 origin 判定");
+        assert!(service
+            .is_chapter_cached("default", book_url, &format!("{book_url}/1"))
+            .await);
+    }
+    /// 换源重映射按章节地址与唯一标题匹配，把旧源的正文改名到新源地址下。
+    #[tokio::test]
+    async fn remap_chapter_cache_moves_content_to_new_source_urls() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-remap-cache-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+        let book_url = "https://new.example.com/book/1";
+        let old_chapters = vec![
+            BookChapter {
+                title: "第一章".to_string(),
+                url: "https://old.example.com/1".to_string(),
+                index: 0,
+                ..Default::default()
+            },
+            BookChapter {
+                title: "重名章".to_string(),
+                url: "https://old.example.com/dup-a".to_string(),
+                index: 1,
+                ..Default::default()
+            },
+            BookChapter {
+                title: "重名章".to_string(),
+                url: "https://old.example.com/dup-b".to_string(),
+                index: 2,
+                ..Default::default()
+            },
+        ];
+        // 换源前正文已经在旧 URL 下缓存。
+        for chapter in &old_chapters {
+            service
+                .cache
+                .put("default", &md5_hex(book_url), &chapter.url, "正文")
+                .await
+                .unwrap();
+        }
+        let new_chapters = vec![
+            BookChapter {
+                title: "第一章".to_string(),
+                url: "https://new.example.com/1".to_string(),
+                index: 0,
+                ..Default::default()
+            },
+            // 地址变了但标题唯一，按标题兜底迁移。
+            BookChapter {
+                title: "重名章".to_string(),
+                url: "https://new.example.com/dup-a".to_string(),
+                index: 1,
+                ..Default::default()
+            },
+            // 标题重复且无法确定对应关系时不迁移。
+            BookChapter {
+                title: "重名章".to_string(),
+                url: "https://new.example.com/dup-b".to_string(),
+                index: 2,
+                ..Default::default()
+            },
+        ];
+
+        let moved = service
+            .remap_chapter_cache("default", book_url, &old_chapters, &new_chapters)
+            .await;
+
+        assert_eq!(moved, 1);
+        assert!(service.is_chapter_cached("default", book_url, "https://new.example.com/1").await);
+        assert!(!service.is_chapter_cached("default", book_url, "https://new.example.com/dup-a").await);
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
     /// 书架落盘必须原子替换: 并发读者永远看不到半截 JSON。
     ///
     /// issue #19 的退出路径改成"发起写入即放行导航"之后, `save_book_progress`

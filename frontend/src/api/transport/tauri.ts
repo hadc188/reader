@@ -70,6 +70,8 @@ export const COMMAND_BY_PATH: Record<string, string> = {
   '/reader3/saveBookProgress': 'save_book_progress',
   '/reader3/getBookInfo': 'get_book_info',
   '/reader3/getChapterList': 'get_chapter_list',
+  '/reader3/getCacheOverview': 'get_cache_overview',
+  '/reader3/getCacheManifest': 'get_cache_manifest',
   '/reader3/deleteBookCache': 'delete_book_cache',
   '/reader3/clearSearchCoverCache': 'clear_search_cover_cache',
   '/reader3/getCachedChapterUrls': 'get_cached_chapter_urls',

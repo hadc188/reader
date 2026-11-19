@@ -2,7 +2,9 @@ use crate::api::commands::{decode_header_file_name, decode_upload_body};
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
 use crate::model::book_source::{book_source_from_value, BookSource};
-use crate::service::book_source_service::{
+use crate::service::local_epub_book::is_local_epub_origin;
+use crate::service::local_pdf_book::is_local_pdf_origin;
+use crate::service::local_txt_book::is_local_txt_origin;use crate::service::book_source_service::{
     book_source_has_group, set_invalid_book_source_group, INVALID_BOOK_SOURCE_GROUP,
 };
 use crate::util::text::normalize_source_url;
@@ -1412,10 +1414,26 @@ pub async fn delete_invalid_book_sources(
         .book_source_service
         .delete_many(&user_ns, &invalid_urls)
         .await?;
+    let invalid_url_set = invalid_urls.iter().cloned().collect::<HashSet<_>>();
+    if let Err(err) = state
+        .book_service
+        .remove_source_candidates(&user_ns, &invalid_url_set)
+        .await
+    {
+        tracing::warn!("清理书源候选失败(继续删除缓存): {err}");
+    }
+    let cache_task_books = state
+        .book_service
+        .books_for_sources(&user_ns, &invalid_url_set)
+        .await
+        .into_iter()
+        .map(|book| book.book_url)
+        .collect::<Vec<_>>();
+    crate::api::commands::book::cancel_cache_tasks_for_books(&cache_task_books);
     state
         .book_service
-        .remove_source_candidates(&user_ns, &invalid_urls.iter().cloned().collect())
-        .await?;
+        .delete_caches_for_sources(&user_ns, &invalid_url_set)
+        .await;
     // 失效源删除时一并清理登录 Cookie, 避免坏 Cookie 留在内存里继续毒化。
     // 批量版只各取一次写锁(逐条调用是 3N 次锁竞争)。
     state
@@ -1438,10 +1456,26 @@ pub async fn delete_book_source_core(
         .book_source_url
         .ok_or_else(|| AppError::BadRequest("bookSourceUrl required".to_string()))?;
     state.book_source_service.delete(&user_ns, &url).await?;
+    let removed_sources = HashSet::from([url.clone()]);
+    if let Err(err) = state
+        .book_service
+        .remove_source_candidates(&user_ns, &removed_sources)
+        .await
+    {
+        tracing::warn!("清理书源候选失败(继续删除缓存): {err}");
+    }
+    let cache_task_books = state
+        .book_service
+        .books_for_sources(&user_ns, &removed_sources)
+        .await
+        .into_iter()
+        .map(|book| book.book_url)
+        .collect::<Vec<_>>();
+    crate::api::commands::book::cancel_cache_tasks_for_books(&cache_task_books);
     state
         .book_service
-        .remove_source_candidates(&user_ns, &HashSet::from([url.clone()]))
-        .await?;
+        .delete_caches_for_sources(&user_ns, &removed_sources)
+        .await;
     state.book_service.clear_source_cookie(&user_ns, &url).await;
     // 书源已从库里删掉，它的会话目录之后再没有任何读取路径 —— 连目录一起回收，
     // 否则 `source-state/<md5>` 会一直攒下去。
@@ -1476,10 +1510,25 @@ pub async fn delete_book_sources_core(
         .book_source_service
         .delete_many(&user_ns, &deleted_list)
         .await?;
-    state
+    if let Err(err) = state
         .book_service
         .remove_source_candidates(&user_ns, &deleted_urls)
-        .await?;
+        .await
+    {
+        tracing::warn!("清理书源候选失败(继续删除缓存): {err}");
+    }
+    let cache_task_books = state
+        .book_service
+        .books_for_sources(&user_ns, &deleted_urls)
+        .await
+        .into_iter()
+        .map(|book| book.book_url)
+        .collect::<Vec<_>>();
+    crate::api::commands::book::cancel_cache_tasks_for_books(&cache_task_books);
+    state
+        .book_service
+        .delete_caches_for_sources(&user_ns, &deleted_urls)
+        .await;
     state
         .book_service
         .clear_source_cookies(&user_ns, &deleted_list)
@@ -1505,18 +1554,45 @@ pub async fn delete_all_book_sources(
     state: tauri::State<'_, AppState>,
 ) -> Result<ApiResponse<serde_json::Value>, AppError> {
     let user_ns = "default";
-    let deleted_urls = state
+    // 清空全部时书架里可能仍留着已不在书源表里的历史 origin。
+    // 从书架一并收集, 否则这些源的缓存会永远清不掉。
+    let mut deleted_urls = state
         .book_source_service
         .list(&user_ns)
         .await?
         .into_iter()
         .map(|source| source.book_source_url)
         .collect::<HashSet<_>>();
+    if let Ok(books) = state.book_service.get_bookshelf(&user_ns).await {
+        deleted_urls.extend(books.into_iter().map(|book| book.origin).filter(|origin| {
+            let origin = origin.trim();
+            !origin.is_empty()
+                && !is_local_txt_origin(origin)
+                && !is_local_epub_origin(origin)
+                && !is_local_pdf_origin(origin)
+        }));
+    }
     state.book_source_service.delete_all(&user_ns).await?;
-    state
+    if let Err(err) = state
         .book_service
         .remove_source_candidates(&user_ns, &deleted_urls)
-        .await?;
+        .await
+    {
+        tracing::warn!("清理书源候选失败(继续删除缓存): {err}");
+    }
+    // 清空书源时一并清空这些源留下的全部章节缓存。
+    let cache_task_books = state
+        .book_service
+        .books_for_sources(&user_ns, &deleted_urls)
+        .await
+        .into_iter()
+        .map(|book| book.book_url)
+        .collect::<Vec<_>>();
+    crate::api::commands::book::cancel_cache_tasks_for_books(&cache_task_books);
+    state
+        .book_service
+        .delete_caches_for_sources(&user_ns, &deleted_urls)
+        .await;
     // 清空书源时一并清空全部登录 Cookie(批量, 避免 N 次写锁竞争)。
     let deleted_list = deleted_urls.iter().cloned().collect::<Vec<_>>();
     state

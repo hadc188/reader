@@ -157,10 +157,11 @@ function startServerCaching(count: number) {
 
   sse.onmessage = (event) => {
     try {
-      const data = event.data as { successCount?: number; cachedCount?: number; failedCount?: number }
-      const completed = (data.successCount || 0) + (data.cachedCount || 0) - (data.failedCount || 0)
-      if (total > 0) {
-        progress.value = Math.min(100, Math.round((Math.max(0, completed) / total) * 100))
+      const data = event.data as { totalChapters?: number; successCount?: number; cachedCount?: number; failedCount?: number }
+      const totalLocal = data.totalChapters || total
+      const completed = (data.cachedCount || 0) + (data.failedCount || 0)
+      if (totalLocal > 0) {
+        progress.value = Math.min(100, Math.round((Math.max(0, completed) / totalLocal) * 100))
       }
       currentStatus.value = `本地缓存中 (${data.cachedCount || 0} 已缓存 / ${data.successCount || 0} 新增)`
     } catch {

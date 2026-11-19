@@ -1,3 +1,4 @@
+pub mod cache_manifest;
 pub mod book;
 pub mod book_chapter;
 pub mod book_group;

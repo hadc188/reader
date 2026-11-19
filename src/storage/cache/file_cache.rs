@@ -136,6 +136,74 @@ impl FileCache {
         Ok(names)
     }
 
+    /// 一本书的章节缓存正文总字节数（只统计 .txt，不含字数 sidecar 与清单）。
+    pub async fn book_cache_size(&self, user_ns: &str, book_key: &str) -> anyhow::Result<u64> {
+        let dir = self.book_path(user_ns, book_key);
+        let mut total = 0u64;
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata().await {
+                total += meta.len();
+            }
+        }
+        Ok(total)
+    }
+
+    /// 换源迁移：把一本书的缓存目录整体改名到新的 bookKey 下。
+    /// 目标目录已存在时不做覆盖（两边都保留原样），返回 false。
+    pub async fn move_book(
+        &self,
+        user_ns: &str,
+        old_book_key: &str,
+        new_book_key: &str,
+    ) -> anyhow::Result<bool> {
+        if old_book_key == new_book_key {
+            return Ok(false);
+        }
+        let old_path = self.book_path(user_ns, old_book_key);
+        let new_path = self.book_path(user_ns, new_book_key);
+        if !old_path.exists() || new_path.exists() {
+            return Ok(false);
+        }
+        if let Some(parent) = new_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::rename(&old_path, &new_path).await?;
+        Ok(true)
+    }
+    /// 换源重映射：把一章的正文与字数 sidecar 改名到新章节地址对应的文件名。
+    /// 旧正文不存在或目标已存在时不做任何事，返回 false。
+    pub async fn rename_chapter(
+        &self,
+        user_ns: &str,
+        book_key: &str,
+        old_chapter_key: &str,
+        new_chapter_key: &str,
+    ) -> anyhow::Result<bool> {
+        if old_chapter_key == new_chapter_key {
+            return Ok(false);
+        }
+        let old_path = self.chapter_path(user_ns, book_key, old_chapter_key);
+        let new_path = self.chapter_path(user_ns, book_key, new_chapter_key);
+        if !old_path.exists() || new_path.exists() {
+            return Ok(false);
+        }
+        fs::rename(&old_path, &new_path).await?;
+        let old_count = self.count_path(user_ns, book_key, old_chapter_key);
+        let new_count = self.count_path(user_ns, book_key, new_chapter_key);
+        if old_count.exists() && !new_count.exists() {
+            let _ = fs::rename(&old_count, &new_count).await;
+        }
+        Ok(true)
+    }
     /// Remove all cache for a book (delete the book's cache directory)
     pub async fn remove_book(&self, user_ns: &str, book_key: &str) -> anyhow::Result<bool> {
         let path = self.book_path(user_ns, book_key);
@@ -184,6 +252,10 @@ impl FileCache {
     }
 
     /// Get the directory path for a book's cache
+    /// 书的缓存目录。清单文件与正文文件放在同一目录。
+    pub fn book_dir(&self, user_ns: &str, book_key: &str) -> PathBuf {
+        self.book_path(user_ns, book_key)
+    }
     fn book_path(&self, user_ns: &str, book_key: &str) -> PathBuf {
         self.root.join(user_ns).join(book_key)
     }
@@ -260,6 +332,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn move_book_renames_directory_and_keeps_content() {
+        let (cache, root) = temp_cache();
+        cache.put("default", "old", "c1", "正文").await.unwrap();
+
+        let moved = cache.move_book("default", "old", "new").await.unwrap();
+
+        assert!(moved);
+        // 旧目录不能再被读到，新目录承接全部正文与字数 sidecar。
+        assert!(!cache.exists("default", "old", "c1").await);
+        assert_eq!(
+            cache.get("default", "new", "c1").await.unwrap().as_deref(),
+            Some("正文")
+        );
+        assert!(cache
+            .get_word_count("default", "new", "c1")
+            .await
+            .unwrap()
+            .is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn move_book_keeps_both_when_target_exists() {
+        let (cache, root) = temp_cache();
+        cache.put("default", "old", "c1", "旧正文").await.unwrap();
+        cache.put("default", "new", "c2", "新正文").await.unwrap();
+
+        // 目标目录已有缓存时不做覆盖，避免两个书源的缓存被混在一起。
+        let moved = cache.move_book("default", "old", "new").await.unwrap();
+
+        assert!(!moved);
+        assert_eq!(
+            cache.get("default", "old", "c1").await.unwrap().as_deref(),
+            Some("旧正文")
+        );
+        assert_eq!(
+            cache.get("default", "new", "c2").await.unwrap().as_deref(),
+            Some("新正文")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
     #[tokio::test]
     async fn sidecar_is_not_listed_as_a_chapter() {
         let (cache, root) = temp_cache();

@@ -105,6 +105,8 @@ pub fn build(state: AppState, _options: WebOptions, static_source: Option<Static
         .route("/reader3/saveBooks", post(save_books))
         .route("/reader3/saveBookProgress", post(save_book_progress))
         .route("/reader3/deleteBookCache", post(delete_book_cache))
+        .route("/reader3/getCacheOverview", get(get_cache_overview))
+        .route("/reader3/getCacheManifest", post(get_cache_manifest))
         .route("/reader3/getCachedChapterUrls", post(get_cached_chapter_urls))
         .route(
             "/reader3/getChapterWordCounts",
@@ -224,6 +226,17 @@ async fn get_shelf_book_with_cache_info(State(state): State<AppState>, uri: Uri)
 }
 
 // ───────────────────────── 书籍 ─────────────────────────
+
+async fn get_cache_overview(State(state): State<AppState>) -> Response {
+    envelope(book_cmd::get_cache_overview_core(&state).await)
+}
+
+async fn get_cache_manifest(
+    State(state): State<AppState>,
+    Json(req): Json<book_cmd::CacheOverviewRequest>,
+) -> Response {
+    envelope(book_cmd::get_cache_manifest_core(&state, req).await)
+}
 
 async fn get_book_info(
     State(state): State<AppState>,

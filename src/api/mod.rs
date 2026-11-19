@@ -65,6 +65,8 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::book::get_shelf_book_with_cache_info,
         commands::book::get_invalid_book_sources,
         commands::book::cache_book_sse,
+        commands::book::get_cache_overview,
+        commands::book::get_cache_manifest,
         commands::book::cancel_cache_book,
         commands::book::cancel_book_search,
         commands::book::search_book_multi_sse,

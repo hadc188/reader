@@ -1432,7 +1432,7 @@
         <div class="group-card">
 
       <!-- 更多操作 -->
-      <div class="setting-row">
+      <div v-if="!appStore.isWebMode" class="setting-row">
         <label>离线缓存</label>
         <button class="opt-btn wide" @click="store.openPanel('cache', 'settings')">批量缓存章节</button>
       </div>

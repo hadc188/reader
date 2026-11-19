@@ -1,7 +1,7 @@
 use crate::api::commands::{decode_header_file_name, decode_upload_body};
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
-use crate::model::{book::Book, book_chapter::BookChapter, book_source::BookSource, search::SearchBook};
+use crate::model::{book::Book, book_chapter::BookChapter, book_source::BookSource, cache_manifest::{CacheFailedEntry, CacheManifest}, search::SearchBook};
 use crate::service::local_epub_book::{
     is_local_epub_origin, is_local_epub_url, LOCAL_EPUB_ORIGIN, MAX_EPUB_UPLOAD_BYTES,
 };
@@ -158,11 +158,68 @@ pub struct CacheBookRequest {
     refresh: Option<i32>,
     #[serde(rename = "concurrentCount")]
     concurrent_count: Option<i32>,
+    /// range 从阅读进度起补 count 章；missing 补全书缺失章节；failed 只重试失败章节；selected 缓存指定章节。
+    mode: Option<String>,
+    /// selected 模式要缓存的章节地址。
+    #[serde(rename = "chapterUrls")]
+    chapter_urls: Option<Vec<String>>,
+    /// 已缓存章节也重新抓取。
+    overwrite: Option<bool>,
 }
 
 /// 运行中的整书缓存任务，按 bookUrl 登记，供 cancel_cache_book 中断。
 static CACHE_BOOK_CANCELLATIONS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// 删除书源前中断这些书正在运行的整书缓存任务。
+/// 否则任务会在缓存目录被删掉后继续写回正文，删源看起来没有清干净。
+pub(crate) fn cancel_cache_tasks_for_books(book_urls: &[String]) -> usize {
+    let mut cancelled = 0usize;
+    if let Ok(tasks) = CACHE_BOOK_CANCELLATIONS.lock() {
+        for book_url in book_urls {
+            if let Some(flag) = tasks.get(book_url) {
+                flag.store(true, Ordering::Relaxed);
+                cancelled += 1;
+            }
+        }
+    }
+    cancelled
+}
+/// 缓存任务的取消登记守卫。任务结束或提前返回时自动注销自己。
+///
+/// 登记必须发生在抓目录之前：目录请求可能要几十秒，用户在这段时间点中断，
+/// 若还没登记就会查不到任务，界面以为已中断而后台照常开始缓存。
+struct CacheCancellationGuard {
+    book_url: String,
+    flag: Arc<AtomicBool>,
+}
+
+impl CacheCancellationGuard {
+    fn register(book_url: &str) -> Self {
+        let flag = Arc::new(AtomicBool::new(false));
+        if let Ok(mut tasks) = CACHE_BOOK_CANCELLATIONS.lock() {
+            if let Some(previous) = tasks.insert(book_url.to_string(), flag.clone()) {
+                previous.store(true, Ordering::Relaxed);
+            }
+        }
+        Self {
+            book_url: book_url.to_string(),
+            flag,
+        }
+    }
+}
+
+impl Drop for CacheCancellationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut tasks) = CACHE_BOOK_CANCELLATIONS.lock() {
+            if let Some(current) = tasks.get(&self.book_url) {
+                if Arc::ptr_eq(current, &self.flag) {
+                    tasks.remove(&self.book_url);
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1548,6 +1605,44 @@ pub async fn set_book_source(
         .await?
         .ok_or_else(|| AppError::BadRequest("书源不存在".to_string()))?;
 
+    // 旧目录地址要在清空 toc_url 之前记下：换源后用它读取旧章节列表，
+    // 把已经下载的正文按新源章节地址重映射。
+    let old_toc_url = updated
+        .toc_url
+        .clone()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| old_book_url.clone());
+    let mut old_chapters = state
+        .book_service
+        .load_chapter_list_cache(&user_ns, &old_toc_url)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if old_chapters.is_empty() {
+        // 目录缓存可能已被清理，但缓存清单里仍保留章节地址与标题；
+        // 用清单兜底，换源后才知道该把哪些正文改名。
+        if let Ok(Some(manifest)) = state
+            .book_service
+            .load_cache_manifest(&user_ns, &old_book_url)
+            .await
+        {
+            old_chapters = manifest
+                .chapters
+                .into_iter()
+                // 只把确实缓存过的章节作为迁移候选，避免历史残留条目乱搬正文。
+                .filter(|chapter| chapter.cached)
+                .map(|chapter| BookChapter {
+                    title: chapter.title,
+                    url: chapter.url,
+                    index: chapter.index,
+                    is_volume: chapter.is_volume,
+                    ..BookChapter::default()
+                })
+                .collect();
+        }
+    }
+
     updated.book_url = new_book_url.clone();
     updated.origin = new_source.book_source_url.clone();
     updated.origin_name = Some(new_source.book_source_name.clone());
@@ -1596,15 +1691,59 @@ pub async fn set_book_source(
     }
 
     let saved = state.book_service.save_book(&user_ns, updated).await?;
-    if old_book_url != saved.book_url {
-        let delete_old = Book {
-            book_url: old_book_url,
-            ..Book::default()
-        };
-        let _ = state.book_service.delete_book(&user_ns, &delete_old).await;
+    // 与手机端一致：换源后旧缓存目录整体移到新 bookUrl 下，缓存跟随书走。
+    // bookUrl 未变时无需搬目录，正文仍在这本书自己的缓存目录里。
+    // 旧目录缓存缺失时无法知道旧章节地址，搬过去只会变成不可命中的垃圾文件，
+    // 因此保持原目录不动，交给孤儿缓存回收。
+    let cache_ready = if old_book_url == saved.book_url {
+        true
+    } else if old_chapters.is_empty() {
+        false
+    } else {
+        state
+            .book_service
+            .move_book_cache(
+                &user_ns,
+                &old_book_url,
+                &saved.book_url,
+                &saved.origin,
+                saved.origin_name.as_deref(),
+            )
+            .await
+    };
+    // 正文按章节地址落盘；换源后章节地址通常全变，必须像手机端的
+    // remapContentCache 那样改名，否则缓存虽在却一章都命中不了。
+    if cache_ready && !old_chapters.is_empty() {
+        let new_toc_url = saved
+            .toc_url
+            .clone()
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or_else(|| saved.book_url.clone());
+        if let Ok(new_chapters) = state
+            .book_service
+            .get_chapter_list(&user_ns, &new_source, &new_toc_url)
+            .await
+        {
+            let moved = state
+                .book_service
+                .remap_chapter_cache(&user_ns, &saved.book_url, &old_chapters, &new_chapters)
+                .await;
+            if moved > 0 {
+                tracing::info!("换源重映射章节缓存 {moved} 章: {}", saved.book_url);
+            }
+        }
     }
-
-    // 换源后为「新书 URL」预置一份可读书源缓存, 包含换源前已知的全部候选。
+    if old_book_url != saved.book_url {
+        // 只移除旧书架记录。旧缓存目录要么已经改名到新 bookUrl，要么因目标
+        // 已存在而原样保留；这里绝不能走 delete_book 的连带清理去删文件。
+        if let Err(err) = state
+            .book_service
+            .remove_book_record(&user_ns, &old_book_url)
+            .await
+        {
+            tracing::warn!("换源后移除旧书架记录失败: {err}");
+        }
+    }    // 换源后为「新书 URL」预置一份可读书源缓存, 包含换源前已知的全部候选。
     // 否则新书第一次打开换源面板只会触发全新扫描: 热门书可能因部分源搜到
     // 但漏掉发起方源自身被前端过滤, 导致「从 A 换到 B 后 B 看到的不含 A」。
     // 用同一作品的候选集(去重、剔除当前源)预填, 让换源可立即双向看到。
@@ -1933,6 +2072,195 @@ pub async fn get_invalid_book_sources(
     }
 }
 
+/// 缓存管理页需要的完整数据：书目 + 清单 + 失败章节。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheBookOverview {
+    book_url: String,
+    name: String,
+    author: String,
+    origin: String,
+    origin_name: Option<String>,
+    cover_url: Option<String>,
+    total_chapter_count: usize,
+    cached_chapter_count: usize,
+    failed_count: usize,
+    updated_at: i64,
+    failed_chapters: Vec<CacheFailedEntry>,
+    cache_size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CacheOverviewRequest {
+    #[serde(rename = "bookUrl", alias = "url")]
+    pub book_url: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_cache_manifest(
+    state: tauri::State<'_, AppState>,
+    req: CacheOverviewRequest,
+) -> Result<ApiResponse<Value>, AppError> {
+    get_cache_manifest_core(&state, req).await
+}
+
+pub async fn get_cache_manifest_core(
+    state: &AppState,
+    req: CacheOverviewRequest,
+) -> Result<ApiResponse<Value>, AppError> {
+    let user_ns = "default";
+    let book_url = req
+        .book_url
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("bookUrl required".to_string()))?;
+    let Some(book) = state
+        .book_service
+        .get_shelf_book(user_ns, &book_url)
+        .await?
+    else {
+        return Ok(ApiResponse::ok(Value::Null));
+    };
+    let toc_url = book
+        .toc_url
+        .clone()
+        .unwrap_or_else(|| book.book_url.clone());
+    // 打开某本书的缓存详情时才补目录：概览页不能逐本联网，但这里用户已经
+    // 明确选中这本书，没有目录就无法展示具体章节与自定义缓存。
+    let mut chapters = state
+        .book_service
+        .load_chapter_list_cache(user_ns, &toc_url)
+        .await
+        .ok()
+        .flatten()
+        .filter(|chapters| !chapters.is_empty());
+    if chapters.is_none() {
+        if let Ok(Some(source)) = state
+            .book_source_service
+            .get(user_ns, &book.origin)
+            .await
+        {
+            if let Ok(list) = state
+                .book_service
+                .get_chapter_list(user_ns, &source, &toc_url)
+                .await
+            {
+                if !list.is_empty() {
+                    chapters = Some(list);
+                }
+            }
+        }
+    }
+    if let Some(chapters) = chapters {
+        let manifest = state
+            .book_service
+            .rebuild_cache_manifest(user_ns, &book, &chapters)
+            .await?;
+        return Ok(ApiResponse::ok(
+            serde_json::to_value(manifest).unwrap_or_default(),
+        ));
+    }
+    // 清单损坏时按空清单返回，不要让缓存详情整页打不开。
+    let manifest = state
+        .book_service
+        .load_cache_manifest(user_ns, &book_url)
+        .await
+        .ok()
+        .flatten();
+    Ok(ApiResponse::ok(
+        serde_json::to_value(manifest).unwrap_or_default(),
+    ))
+}
+
+/// 缓存管理列表：每本书的真实缓存状态。
+#[tauri::command]
+pub async fn get_cache_overview(
+    state: tauri::State<'_, AppState>,
+) -> Result<ApiResponse<Value>, AppError> {
+    get_cache_overview_core(&state).await
+}
+
+pub async fn get_cache_overview_core(state: &AppState) -> Result<ApiResponse<Value>, AppError> {
+    let user_ns = "default";
+    let books = state.book_service.get_bookshelf(user_ns).await?;
+    let mut result = Vec::new();
+    for book in books {
+        if is_local_book(&book) {
+            continue;
+        }
+        let toc_url = book
+            .toc_url
+            .clone()
+            .unwrap_or_else(|| book.book_url.clone());
+        // 缓存管理页不能为了补目录逐本联网：离线或书源失效时，每本书都要等
+        // HTTP 超时，整页会长时间不可用；目录抓取失败还会让书直接消失。
+        // 有目录缓存才重建清单，没有就沿用旧清单或总章数占位，书籍行始终保留。
+        let chapters = state
+            .book_service
+            .load_chapter_list_cache(user_ns, &toc_url)
+            .await
+            .unwrap_or_default()
+            .filter(|chapters| !chapters.is_empty());
+        let manifest = match chapters {
+            Some(chapters) => state
+                .book_service
+                .rebuild_cache_manifest(user_ns, &book, &chapters)
+                .await
+                .unwrap_or_else(|_| CacheManifest {
+                    book_url: book.book_url.clone(),
+                    name: book.name.clone(),
+                    author: book.author.clone(),
+                    origin: book.origin.clone(),
+                    origin_name: book.origin_name.clone(),
+                    total_chapter_num: book.total_chapter_num.unwrap_or(0),
+                    ..CacheManifest::default()
+                }),
+            None => state
+                .book_service
+                .load_cache_manifest(user_ns, &book.book_url)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| CacheManifest {
+                    book_url: book.book_url.clone(),
+                    name: book.name.clone(),
+                    author: book.author.clone(),
+                    origin: book.origin.clone(),
+                    origin_name: book.origin_name.clone(),
+                    total_chapter_num: book.total_chapter_num.unwrap_or(0),
+                    ..CacheManifest::default()
+                }),
+        };
+        let cache_size_bytes = state
+            .book_service
+            .book_cache_size(user_ns, &book.book_url)
+            .await;
+        // 目录还没落到本机时 chapters 为空，但书架记录里可能已有总章数。
+        // 用它占位，避免概览把这本书显示成「已完成」。
+        let total_chapter_count = if manifest.chapters.is_empty() {
+            manifest.total_chapter_num.max(0) as usize
+        } else {
+            manifest.real_chapter_count()
+        };
+        result.push(CacheBookOverview {
+            book_url: book.book_url.clone(),
+            name: book.name.clone(),
+            author: book.author.clone(),
+            origin: book.origin.clone(),
+            origin_name: book.origin_name.clone(),
+            cover_url: book.cover_url.clone(),
+            total_chapter_count,
+            cached_chapter_count: manifest.cached_count(),
+            failed_count: manifest.failed.len(),
+            updated_at: manifest.updated_at,
+            failed_chapters: manifest.failed,
+            cache_size_bytes,
+        });
+    }
+    Ok(ApiResponse::ok(
+        serde_json::to_value(result).unwrap_or_default(),
+    ))
+}
+
 #[tauri::command]
 pub async fn cache_book_sse(
     state: tauri::State<'_, AppState>,
@@ -1944,8 +2272,12 @@ pub async fn cache_book_sse(
         .url
         .or(req.book_url)
         .ok_or_else(|| AppError::BadRequest("url required".to_string()))?;
-    let refresh = req.refresh.unwrap_or(0) > 0;
     let concurrent = req.concurrent_count.unwrap_or(24).max(1) as usize;
+    // range 保持旧行为：从阅读进度起补 count 章。missing 只补全书缺失章节，failed 只重试失败章节，selected 缓存指定章节。
+    let cache_mode = req.mode.as_deref().unwrap_or("range").to_ascii_lowercase();
+    // selected 勾选已缓存章节时按覆盖处理，否则这些章节会在下面被过滤掉。
+    // selected 先抓后写，不能删旧缓存，所以不把 overwrite 合进 refresh。
+    let refresh = req.refresh.unwrap_or(0) > 0 && cache_mode != "selected";
 
     let book = state
         .book_service
@@ -1969,36 +2301,107 @@ pub async fn cache_book_sse(
         .unwrap_or_else(|| book.book_url.clone());
 
     // 阅读页可传入明确的章节地址；首页未传时从书架保存的阅读进度开始。
-    let start_ch_url = req.toc_url.as_deref();
-    let saved_start_index = book.dur_chapter_index;
     let cache_count = req.count.unwrap_or(0); // 0 means all
+
+    // 登记放在抓目录之前：目录请求可能耗时很久，用户此时点中断必须能命中。
+    let cancel_guard = CacheCancellationGuard::register(&book_url);
+    let cancel_flag = cancel_guard.flag.clone();
+    let cancelled = {
+        let flag = cancel_flag.clone();
+        move || flag.load(Ordering::Relaxed)
+    };
 
     let mut chapters = state
         .book_service
         .get_chapter_list(&user_ns, &source, &root_toc_url)
         .await?;
 
-    let chapter_urls = chapters
-        .iter()
-        .map(|chapter| chapter.url.clone())
-        .collect::<Vec<_>>();
-    let start_index = resolve_cache_start_index(
-        &chapter_urls,
-        start_ch_url,
-        saved_start_index,
-    );
-    if start_index > 0 {
-        chapters = chapters.split_off(start_index);
+    if cancelled() {
+        emit_cache_end(&on_event, 0, 0, 0, 0, true, &[]);
+        return Ok(());
     }
 
-    // Limit count if requested
-    if cache_count > 0 && cache_count < chapters.len() as i32 {
-        chapters.truncate(cache_count as usize);
+    // 先用完整目录建立清单：只有这样才能区分「全书共 N 章」与「本次缓存 M 章」，
+    // 否则进度条会把一次局部任务误显示成整本书的完成度。
+    let book_for_manifest = book.clone();
+    let chapter_list_for_manifest = chapters.clone();
+    let _ = state
+        .book_service
+        .rebuild_cache_manifest(user_ns, &book_for_manifest, &chapter_list_for_manifest)
+        .await;
+
+    if cache_mode == "selected" {
+        let selected_urls: std::collections::HashSet<String> = req
+            .chapter_urls
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|url| !url.trim().is_empty())
+            .collect();
+        if selected_urls.is_empty() {
+            return Err(AppError::BadRequest("请选择章节".to_string()));
+        }
+        chapters.retain(|chapter| !chapter.is_volume && selected_urls.contains(&chapter.url));
+    } else if cache_mode == "missing" || cache_mode == "failed" {
+        // 手机端缓存页的语义：按整本目录选出真正缺的章节，不再从阅读进度/固定
+        // 章数切片。failed 额外要求该章在最近清单里出现过失败记录。
+        let manifest = state
+            .book_service
+            .load_cache_manifest(user_ns, &book_url)
+            .await?
+            .unwrap_or_default();
+        let cached_urls: std::collections::HashSet<String> = state
+            .book_service
+            .cached_chapter_urls(
+                user_ns,
+                &book_url,
+                &chapters.iter().map(|chapter| chapter.url.clone()).collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let failed_urls: std::collections::HashSet<String> = manifest
+            .failed
+            .iter()
+            .map(|entry| entry.url.clone())
+            .collect();
+        chapters.retain(|chapter| {
+            !chapter.is_volume
+                && !cached_urls.contains(&chapter.url)
+                && (cache_mode != "failed" || failed_urls.contains(&chapter.url))
+        });
+        if cache_mode == "missing" && cache_count > 0 && cache_count < chapters.len() as i32 {
+            chapters.truncate(cache_count as usize);
+        }
+        if cache_mode == "failed" && cache_count > 0 && cache_count < chapters.len() as i32 {
+            chapters.truncate(cache_count as usize);
+        }
+    } else {
+        let chapter_urls = chapters
+            .iter()
+            .map(|chapter| chapter.url.clone())
+            .collect::<Vec<_>>();
+        let start_index = resolve_cache_start_index(
+            &chapter_urls,
+            req.toc_url.as_deref(),
+            book.dur_chapter_index,
+        );
+        if start_index > 0 {
+            chapters = chapters.split_off(start_index);
+        }
+        // Limit count if requested
+        if cache_count > 0 && cache_count < chapters.len() as i32 {
+            chapters.truncate(cache_count as usize);
+        }
     }
 
     if chapters.is_empty() {
         return Err(AppError::BadRequest("没有找到需要缓存的章节".to_string()));
     }
+
+    // selected 覆盖先抓后写，抓取失败时保留旧正文。
+    let selected_overwrite = cache_mode == "selected" && req.overwrite.unwrap_or(false);
 
     let state_clone = state.inner().clone();
     // 包成 Arc: 书源里可能带几百 KB 的 jsLib, 逐章 clone 一次在千章书上就是
@@ -2007,29 +2410,20 @@ pub async fn cache_book_sse(
     let book_url_clone = book.book_url.clone();
     let user_ns_clone = user_ns;
 
-    // 登记取消标志；同一本书重复发起时取消旧任务。
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    if let Ok(mut tasks) = CACHE_BOOK_CANCELLATIONS.lock() {
-        if let Some(previous) = tasks.insert(book_url_clone.clone(), cancel_flag.clone()) {
-            previous.store(true, Ordering::Relaxed);
-        }
-    }
-
-    let registry_key = book_url_clone.clone();
-    let cleanup_flag = cancel_flag.clone();
     tokio::spawn(async move {
+        // 守卫随任务结束一起注销登记；被同书新任务覆盖时它不会误删新登记。
+        let _cancel_guard = cancel_guard;
         // 目录里可能有重复的章节地址（同一章被列多次）：去重后再算总数，
         // 否则同一章被缓存两次会被计两次，进度会出现 X > Y 或比例虚高。
         let chapters = dedup_chapters(chapters);
         let total = chapters.len();
         let all_urls: Vec<String> = chapters.iter().map(|ch| ch.url.clone()).collect();
-        let cancelled = || cancel_flag.load(Ordering::Relaxed);
-
         async {
             // 批量取回「已缓存章节」地址集合：原先逐章 is_chapter_cached().await，
             // 几千章就要几千次顺序 await，这段时间界面停在 0/… 看起来像卡死。
             // 同一份集合随后用于过滤待缓存章节，省掉第二次逐章查询。
-            let cached_urls: std::collections::HashSet<String> = if refresh {
+            // selected 覆盖时已缓存章节也要重新抓取，不能按缓存集合过滤。
+            let cached_urls: std::collections::HashSet<String> = if refresh || selected_overwrite {
                 std::collections::HashSet::new()
             } else {
                 state_clone
@@ -2041,7 +2435,7 @@ pub async fn cache_book_sse(
                     .collect()
             };
             if cancelled() {
-                emit_cache_end(&on_event, total, 0, 0, 0, true);
+                emit_cache_end(&on_event, total, 0, 0, 0, true, &[]);
                 return;
             }
             let mut cached_count = cached_urls.len();
@@ -2065,6 +2459,17 @@ pub async fn cache_book_sse(
             let svc = state_clone.book_service.clone();
             let src = source_clone.clone();
             let b_url = book_url_clone.clone();
+            let chapter_meta: HashMap<String, BookChapter> = chapter_list_for_manifest
+                .iter()
+                .map(|chapter| (chapter.url.clone(), chapter.clone()))
+                .collect();
+            let meta = Arc::new(chapter_meta);
+            // 清单是读改写文件：并发章节逐条落账会互相覆盖，失败列表会丢。
+            // 先收集本次结果，任务结束后串行写入。
+            let failures = Arc::new(Mutex::new(Vec::<(BookChapter, String)>::new()));
+            let failures_task = failures.clone();
+            let successes = Arc::new(Mutex::new(Vec::<String>::new()));
+            let successes_task = successes.clone();
             let (run_success, run_failed, run_aborted) = run_cache_tasks(
                 tasks_pending,
                 concurrent,
@@ -2073,8 +2478,36 @@ pub async fn cache_book_sse(
                     let svc = svc.clone();
                     let src = src.clone();
                     let b_url = b_url.clone();
-                    async move { svc.cache_chapter(&user_ns_clone, &b_url, &src, &url, refresh).await }
-                },                |success, failed| {
+                    let meta = meta.clone();
+                    let failures = failures_task.clone();
+                    let successes = successes_task.clone();
+                    async move {
+                        let result = if selected_overwrite {
+                            // 覆盖时跳过旧缓存读取。抓取成功直接覆盖，失败则保留旧正文。
+                            svc.cache_chapter_overwrite(&user_ns_clone, &b_url, &src, &url)
+                                .await
+                        } else {
+                            svc.cache_chapter(&user_ns_clone, &b_url, &src, &url, refresh)
+                                .await
+                        };
+                        match &result {
+                            Ok(()) => {
+                                if let Ok(mut list) = successes.lock() {
+                                    list.push(url.clone());
+                                }
+                            }
+                            Err(err) => {
+                                if let Some(chapter) = meta.get(&url) {
+                                    if let Ok(mut list) = failures.lock() {
+                                        list.push((chapter.clone(), err.to_string()));
+                                    }
+                                }
+                            }
+                        }
+                        result
+                    }
+                },
+                |success, failed| {
                     // success/failed 为该调度器内的累计值，映射到全局计数
                     let _ = on_event.send(serde_json::json!({
                         "event": "data",
@@ -2091,6 +2524,32 @@ pub async fn cache_book_sse(
             cached_count += run_success;
             aborted = aborted || run_aborted;
 
+            let success_urls = successes
+                .lock()
+                .map(|list| list.clone())
+                .unwrap_or_default();
+            state_clone
+                .book_service
+                .clear_chapter_cache_failures(&user_ns_clone, &book_url_clone, &success_urls)
+                .await;
+            let failed_entries = failures
+                .lock()
+                .map(|list| list.clone())
+                .unwrap_or_default();
+            state_clone
+                .book_service
+                .record_chapter_cache_failures(
+                    &user_ns_clone,
+                    &book_url_clone,
+                    &failed_entries,
+                    selected_overwrite,
+                )
+                .await;
+            let failed_urls: Vec<String> = failed_entries
+                .iter()
+                .map(|(chapter, _)| chapter.url.clone())
+                .collect();
+
             emit_cache_end(
                 &on_event,
                 total,
@@ -2098,18 +2557,11 @@ pub async fn cache_book_sse(
                 success,
                 failed,
                 aborted || cancelled(),
+                &failed_urls,
             );
         }
         .await;
 
-        // 移除登记；若已被同书新任务覆盖则保留新任务的标志。
-        if let Ok(mut tasks) = CACHE_BOOK_CANCELLATIONS.lock() {
-            if let Some(current) = tasks.get(&registry_key) {
-                if Arc::ptr_eq(current, &cleanup_flag) {
-                    tasks.remove(&registry_key);
-                }
-            }
-        }
     });
 
     Ok(())
@@ -2183,6 +2635,7 @@ fn emit_cache_end(
     success: usize,
     failed: usize,
     aborted: bool,
+    failed_urls: &[String],
 ) {
     let _ = on_event.send(serde_json::json!({
         "event": "end",
@@ -2190,6 +2643,7 @@ fn emit_cache_end(
         "cachedCount": cached_count,
         "successCount": success,
         "failedCount": failed,
+        "failedUrls": failed_urls,
         "aborted": aborted
     }));
 }

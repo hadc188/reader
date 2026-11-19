@@ -85,6 +85,54 @@ export interface BookChapter {
   isVolume?: boolean
 }
 
+// ─── 缓存清单 ───
+export interface CacheChapterEntry {
+  index: number
+  title: string
+  url: string
+  isVolume?: boolean
+  cached?: boolean
+}
+
+export interface CacheFailedEntry {
+  index: number
+  title: string
+  url: string
+  reason: string
+  attempts: number
+  lastAttemptAt: number
+  /** 覆盖已缓存章节时失败。旧正文仍在，但这次抓取没有成功。 */
+  overwriteFailed?: boolean
+}
+
+export interface CacheManifest {
+  version: number
+  bookUrl: string
+  name: string
+  author: string
+  origin: string
+  originName?: string
+  totalChapterNum: number
+  updatedAt: number
+  chapters: CacheChapterEntry[]
+  failed: CacheFailedEntry[]
+}
+
+export interface CacheBookOverview {
+  bookUrl: string
+  name: string
+  author: string
+  origin: string
+  originName?: string
+  coverUrl?: string
+  totalChapterCount: number
+  cachedChapterCount: number
+  failedCount: number
+  updatedAt: number
+  failedChapters: CacheFailedEntry[]
+  cacheSizeBytes: number
+}
+
 // ─── 书源 ───
 export interface BookSource {
   bookSourceName: string

@@ -8,20 +8,6 @@ type ReaderStore = ReturnType<typeof useReaderStore>
  *  微任务路径在提示渲染出来之前就结束。 */
 const CONTINUOUS_LOADING_INDICATOR_DELAY_MS = 150
 
-/**
- * 连续阅读常驻的章节窗口：当前章之前 / 之后各保留的章节数。
- *
- * 连续阅读会把章节一节节追加进 DOM，默认模式又没有「隐藏已读」那样的裁剪，
- * 读几百章后节点数、正文 HTML 与渲染层样式都会一直累积。这里只保留当前章
- * 附近一段窗口，向下滚动时旧章节被裁掉；向上回看时由 `loadContinuousPrev`
- * 重新取回（正文有缓存，代价很小）。
- *
- * 前后各 2 章足够覆盖：一次翻页/惯性滚动跨过的章节、以及返回上一章时的衔接。
- * 窗口太小会导致来回滚动时反复重建 DOM；太大则失去裁剪意义。
- */
-const CONTINUOUS_KEEP_BEHIND = 2
-const CONTINUOUS_KEEP_AHEAD = 2
-
 export interface ContinuousChapterItem {
   index: number
   title: string
@@ -88,10 +74,18 @@ export function useContinuousReading(
       ? (container?.querySelector(anchorSelector) as HTMLElement | null)
       : null
     const previousAnchorOffset = anchorBefore?.offsetTop ?? null
+    // 删除上方章节后, 浏览器会先把 scrollTop 限制到新的最大滚动范围。必须
+    // 使用裁剪前的值做补偿, 否则被截断后的值与负位移叠加, 会把视口拉回列表开头。
+    const previousScrollTop = container?.scrollTop ?? null
 
     continuousChapters.value = kept
     await nextTick()
-    if (previousAnchorOffset == null || !container || !anchorSelector) return
+    if (
+      previousAnchorOffset == null
+      || previousScrollTop == null
+      || !container
+      || !anchorSelector
+    ) return
     // overflow-anchor: none disabled native anchoring, so pin the first kept
     // chapter when the read sections above it are pruned. Without this the
     // viewport drops toward the chapter tail and the position restore then
@@ -101,59 +95,7 @@ export function useContinuousReading(
     const anchorDelta = anchor.offsetTop - previousAnchorOffset
     if (anchorDelta === 0) return
     container.scrollTo({
-      top: Math.max(0, container.scrollTop + anchorDelta),
-      behavior: 'instant',
-    })
-  }
-
-  /**
-   * 把连续阅读的章节列表裁成「当前章前后各 N 章」的窗口。
-   *
-   * 与 `pruneReadChapters` 的区别：那个只在「隐藏已读」模式删除当前章之前的
-   * 全部章节；这个在普通连续阅读里前后都裁，只保留窗口，避免长读后 DOM 无上限
-   * 增长。裁剪前记录锚点章节的 offsetTop，裁剪后按位移补偿 scrollTop，避免
-   * 用户正在读的段落因为上方章节被移除而整体上跳。
-   *
-   * 只在当前章附近确实超出窗口时动手；否则每个滚动事件都重排一次列表。
-   */
-  async function trimContinuousWindow(targetIndex = store.currentIndex) {
-    if (!isContinuousMode.value || !continuousChapters.value.length) return
-    // 滚动是高频路径: 列表还没超出窗口时直接返回，避免每个 scroll 事件都
-    // 创建一次 async 调用与 nextTick。
-    if (continuousChapters.value.length <= CONTINUOUS_KEEP_BEHIND + CONTINUOUS_KEEP_AHEAD + 1) return
-    const first = continuousChapters.value[0]
-    const last = continuousChapters.value[continuousChapters.value.length - 1]
-    if (!first || !last) return
-
-    const keepFrom = Math.max(0, targetIndex - CONTINUOUS_KEEP_BEHIND)
-    const keepTo = targetIndex + CONTINUOUS_KEEP_AHEAD
-    const kept = continuousChapters.value.filter(
-      (chapter) => chapter.index >= keepFrom && chapter.index <= keepTo,
-    )
-    // 当前章必须始终留在列表里；否则说明索引异常，宁可放弃本次裁剪也
-    // 不能把视口内容清空。
-    if (!kept.some((chapter) => chapter.index === targetIndex)) return
-    if (kept.length === continuousChapters.value.length) return
-
-    const container = scrollContainerRef.value
-    // 锚点取裁剪后仍在列表里的第一段：裁剪对它的 offsetTop 影响可由
-    // 前后差值精确抵消。
-    const anchorIndex = kept[0].index
-    const anchorSelector = `.continuous-chapter[data-chapter-index="${anchorIndex}"]`
-    const anchorBefore = container?.querySelector(anchorSelector) as HTMLElement | null
-    const previousAnchorOffset = anchorBefore?.offsetTop ?? null
-
-    continuousChapters.value = kept
-    await nextTick()
-    if (!container || previousAnchorOffset == null) return
-
-    const anchor = container.querySelector(anchorSelector) as HTMLElement | null
-    if (!anchor) return
-    const anchorDelta = anchor.offsetTop - previousAnchorOffset
-    if (anchorDelta === 0) return
-    // 与 pruneReadChapters 同样的补偿：保持锚点章节在屏幕上的位置不变。
-    container.scrollTo({
-      top: Math.max(0, container.scrollTop + anchorDelta),
+      top: Math.max(0, previousScrollTop + anchorDelta),
       behavior: 'instant',
     })
   }
@@ -473,7 +415,6 @@ export function useContinuousReading(
     getContinuousSections,
     scrollToContinuousChapter,
     pruneReadChapters,
-    trimContinuousWindow,
     clearContinuousChapters,
     disposeContinuousReading,
   }

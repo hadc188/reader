@@ -57,7 +57,7 @@ describe('hide-read continuous mode advancement', () => {
     vi.unstubAllGlobals()
   })
 
-  function setupHarness() {
+  function setupHarness(scrollContainer?: HTMLElement) {
     const store = useReaderStore()
     store.book = {
       name: '回看书',
@@ -80,7 +80,7 @@ describe('hide-read continuous mode advancement', () => {
       (text) => text,
       computed(() => true),
       computed(() => true),
-      ref<HTMLElement | undefined>(undefined),
+      ref<HTMLElement | undefined>(scrollContainer),
     )
     return { store, ...harness }
   }
@@ -119,28 +119,49 @@ describe('hide-read continuous mode advancement', () => {
     expect(continuousChapters.value.map((chapter) => chapter.index)).toEqual([12])
   })
 
-  it('trims the rendered list to a window around the current chapter', async () => {
-    const {
-      initializeContinuousChapters,
-      loadContinuousNext,
-      trimContinuousWindow,
-      continuousChapters,
-    } = setupHarness()
-
-    await initializeContinuousChapters(11, false)
-    await vi.waitFor(() => {
-      expect(continuousChapters.value.map((chapter) => chapter.index)).toEqual([11, 12])
+  it('compensates with the scrollTop captured before pruning read chapters', async () => {
+    let anchorOffset = 2000
+    const anchor = {
+      get offsetTop() {
+        return anchorOffset
+      },
+    } as HTMLElement
+    let scrollTop = 5000
+    let queryCount = 0
+    const scrollTo = vi.fn()
+    const container = {
+      get scrollTop() {
+        return scrollTop
+      },
+      querySelector: () => {
+        queryCount += 1
+        if (queryCount > 1) {
+          anchorOffset = 0
+          // 删除上方章节后, 浏览器先把 scrollTop 截到新的最大滚动范围。
+          scrollTop = 2200
+        }
+        return anchor
+      },
+      scrollTo,
+    } as unknown as HTMLElement
+    const { store, pruneReadChapters, continuousChapters } = setupHarness(container)
+    store.currentIndex = 13
+    continuousChapters.value = Array.from({ length: 8 }, (_, offset) => {
+      const index = 10 + offset
+      return {
+        index,
+        title: `第${index + 1}章`,
+        content: `第${index + 1}章正文`,
+        html: `第${index + 1}章正文`,
+        isVolume: false,
+      }
     })
 
-    // 模拟长读后列表已经累积到第 11..20 章
-    for (let step = 0; step < 8; step += 1) {
-      await loadContinuousNext()
-    }
-    expect(continuousChapters.value.length).toBeGreaterThan(6)
+    await pruneReadChapters(13)
 
-    // 当前章推进到 16 时只应保留 14..18
-    await trimContinuousWindow(16)
-    expect(continuousChapters.value.map((chapter) => chapter.index)).toEqual([14, 15, 16, 17, 18])
+    expect(continuousChapters.value.map((chapter) => chapter.index))
+      .toEqual([13, 14, 15, 16, 17])
+    expect(scrollTo).toHaveBeenCalledWith({ top: 3000, behavior: 'instant' })
   })
 
   it('keeps the saved chapter progress when initializing at the open position', async () => {

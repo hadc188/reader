@@ -31,7 +31,19 @@ function stringBytes(text) {
 }
 function array(value) {
   if (typeof value === 'string') return stringBytes(value);
-  return Array.prototype.slice.call(value || []).map(function (v) { return (Number(v) << 24) >> 24; });
+  if (Array.isArray(value)) return value.map(function (v) { return (Number(v) << 24) >> 24; });
+  if (ArrayBuffer.isView(value)) {
+    return Array.prototype.slice.call(value).map(function (v) { return (Number(v) << 24) >> 24; });
+  }
+  if (value && typeof value.read === 'function') {
+    var out = [], one;
+    while ((one = value.read()) !== -1) {
+      if (typeof one !== 'number') break;
+      out.push(one & 255);
+    }
+    return out;
+  }
+  return [];
 }
   function size(n) {
     n = Number(n);
@@ -152,7 +164,10 @@ function array(value) {
     }
     function latin1Encode(text) {
       var bytes = [];
-      for (var i = 0; i < text.length; i++) bytes.push(text.charCodeAt(i) & 255);
+      for (var i = 0; i < text.length; i++) {
+        var code = text.charCodeAt(i);
+        bytes.push(code <= 255 ? code : 63);
+      }
       return bytes;
     }
     // Rhino 里 `new java.lang.String(x)` 是 Java 对象: `length()` / `getBytes()`
@@ -185,6 +200,22 @@ function array(value) {
     JavaString.prototype.__javaStringText = function () { return String(this.__text); };
     JavaString.prototype.valueOf = function () { return String(this.__text); };
     JavaString.prototype.toJSON = function () { return String(this.__text); };
+    // `StringBuilder.toString()` 在 legado/Rhino 里仍是 Java String，源会继续
+    // 调用 `getBytes(StandardCharsets.ISO_8859_1)`。该返回值在本兼容层由
+    // prelude 的原生字符串承载，因此也必须具备 Java String 的方法面。
+    // 原生字符串是 StringBuilder.toString() 的返回载体。方法不可枚举，避免
+    // 书源对字符串做 for...in 时看见这个兼容属性。
+    try {
+      Object.defineProperty(String.prototype, 'getBytes', {
+        value: function (charset) {
+          var label = charsetLabel(charset);
+          return isLatin1(label) ? latin1Encode(String(this)) : native('encode', {text: String(this), charset: label});
+        },
+        enumerable: false,
+        writable: true,
+        configurable: true
+      });
+    } catch (_e) {}
     JavaString.prototype.getBytes = function (charset) {
       var label = charsetLabel(charset);
       return isLatin1(label) ? latin1Encode(String(this)) : native('encode', {text: String(this), charset: label});
@@ -323,6 +354,17 @@ function array(value) {
     };
     Charset.isSupported = function () { return true; };
     Charset.defaultCharset = function () { return Charset.forName('UTF-8'); };
+    // `Packages.java.nio.charset.StandardCharsets.ISO_8859_1` 是部分 APP 源
+    // 生成 MD5 密钥时的实际写法。`Charset.forName` 单独存在不等于该常量存在，
+    // 缺了它会在正文脚本里直接报 `cannot read property 'ISO_8859_1' of undefined`。
+    var StandardCharsets = {
+      ISO_8859_1: Charset.forName('ISO-8859-1'),
+      US_ASCII: Charset.forName('US-ASCII'),
+      UTF_8: Charset.forName('UTF-8'),
+      UTF_16: Charset.forName('UTF-16'),
+      UTF_16BE: Charset.forName('UTF-16BE'),
+      UTF_16LE: Charset.forName('UTF-16LE')
+    };
     // `Packages.java.util.Collections`: 源脚本(如聚合类源的 header 脚本)用
     // `Collections.reverse(list)` 就地反转载荷列表, 缺了它会抛
     // "cannot read property 'reverse' of undefined" 并中断整段脚本。
@@ -517,6 +559,35 @@ function array(value) {
     };
     ByteArrayOutputStream.prototype.toByteArray = function () { return this.bytes.slice(); };
     ByteArrayOutputStream.prototype.close = function () {};
+    // `new Packages.java.util.zip.InflaterInputStream(stream)`: 书源把已经有完整
+    // zlib 头尾的数据逐块解压。源脚本会自己做 XOR, 这里不能再次异或。
+    function InflaterInputStream(input, inflater) {
+      var bytes = input && input.bytes ? input.bytes.slice(input.position) : array(input);
+      this.bytes = array(native('inflate', {
+        data: bytes,
+        nowrap: !!(inflater && inflater.nowrap)
+      }));
+      this.position = 0;
+      var stream = this;
+      this.read = function (target, offset, length) {
+        if (stream.position >= stream.bytes.length) return -1;
+        if (target === undefined) return stream.bytes[stream.position++] & 255;
+        offset = offset === undefined ? 0 : size(offset);
+        length = length === undefined ? target.length - offset : size(length);
+        if (offset + length > target.length) throw new RangeError('Invalid read range');
+        var count = Math.min(length, stream.bytes.length - stream.position);
+        arraycopy(stream.bytes, stream.position, target, offset, count);
+        stream.position += count;
+        return count;
+      };
+      this.close = function () {};
+      this.available = function () { return stream.bytes.length - stream.position; };
+      this.skip = function (count) {
+        var consumed = Math.min(size(count), stream.available());
+        stream.position += consumed;
+        return consumed;
+      };
+    }
     // `Packages.java.util.zip.Inflater(nowrap)`：书源把压缩段（raw deflate）逐块
     // 解压成 JSON。Java 的用法是一组固定调用序列：
     //
@@ -699,6 +770,103 @@ function array(value) {
     };
     UrlConnection.prototype.disconnect = function () {};
 
+    // `Packages.okhttp3.OkHttpClient`: 部分 APP 源用 okhttp 的同步调用拿原始
+    // 响应字节，再自行 XOR/Inflate。桌面端没有 JVM, 这里复用上面的
+    // `UrlConnection` 字节路径; 网络请求仍经过书源 header、cookie、代理与限速器。
+    function OkHttpClient() {}
+    OkHttpClient.prototype.newCall = function (request) { return new OkHttpCall(request); };
+    function OkHttpRequest(url, method, headers, body) {
+      this.__url = String(url);
+      this.__method = String(method || 'GET').toUpperCase();
+      this.headers = headers || {};
+      this.body = body === undefined || body === null ? '' : String(body);
+    }
+    function OkHttpRequestBuilder() {
+      this.__url = '';
+      this.__method = 'GET';
+      this.headers = {};
+      this.body = '';
+    }
+    // OkHttp 源只构造 `Request.Builder`, 不需要可调用的 `Request` 类本身。
+    // 普通对象能确保嵌套的静态成员在 rquickjs 中按函数保存, 而不是被桥接成
+    // 某个实例属性。
+    function OkHttpRequestBuilderClass() {
+      return new OkHttpRequestBuilder();
+    }
+    var OkHttpRequestType = {Builder: OkHttpRequestBuilderClass};
+    OkHttpRequestBuilder.prototype.url = function (value) { this.__url = String(value); return this; };
+    OkHttpRequestBuilder.prototype.addHeader = function (key, value) {
+      this.headers[String(key)] = value == null ? '' : String(value);
+      return this;
+    };
+    OkHttpRequestBuilder.prototype.header = function (key, value) {
+      return this.addHeader(key, value);
+    };
+    OkHttpRequestBuilder.prototype.method = function (method, body) {
+      this.__method = String(method).toUpperCase();
+      this.body = body == null ? '' : String(body);
+      return this;
+    };
+    OkHttpRequestBuilder.prototype.get = function () { return this.method('GET'); };
+    OkHttpRequestBuilder.prototype.post = function (body) { return this.method('POST', body); };
+    OkHttpRequestBuilder.prototype.build = function () {
+      return new OkHttpRequest(this.__url, this.__method, this.headers, this.body);
+    };
+    function OkHttpResponseBody(bytes) {
+      this.bytesData = bytes;
+      this.consumed = false;
+    }
+    OkHttpResponseBody.prototype.bytes = function () { return this.bytesData.slice(); };
+    OkHttpResponseBody.prototype.string = function () {
+      try { return String(g.__bytes_to_str(JSON.stringify(this.bytesData), 'UTF-8')); } catch (_e) { return ''; }
+    };
+    OkHttpResponseBody.prototype.byteStream = function () { return new ByteArrayInputStream(this.bytes()); };
+    OkHttpResponseBody.prototype.contentLength = function () { return this.bytesData.length; };
+    OkHttpResponseBody.prototype.close = function () {};
+    OkHttpResponseBody.prototype.source = function () {
+      var body = this;
+      return {readByteArray: function () { return body.bytes(); }};
+    };
+    function OkHttpResponse(url, code, headers, bytes) {
+      this.__url = String(url);
+      this.__code = Number(code) || 0;
+      this.__headers = headers || {};
+      this.__body = new OkHttpResponseBody(bytes);
+    }
+    OkHttpResponse.prototype.body = function () { return this.__body; };
+    OkHttpResponse.prototype.code = function () { return this.__code; };
+    OkHttpResponse.prototype.isSuccessful = function () { return this.__code >= 200 && this.__code < 300; };
+    OkHttpResponse.prototype.url = function () { return new URLImpl(this.__url); };
+    OkHttpResponse.prototype.header = function (key) {
+      var name = String(key).toLowerCase();
+      for (var k in this.__headers) {
+        if (Object.prototype.hasOwnProperty.call(this.__headers, k) && k.toLowerCase() === name) return this.__headers[k];
+      }
+      return null;
+    };
+    OkHttpResponse.prototype.close = function () {};
+    function OkHttpCall(request) { this.request = request; this.executed = false; }
+    OkHttpCall.prototype.execute = function () {
+      if (this.executed) throw new Error('Already Executed');
+      this.executed = true;
+      var request = this.request;
+      if (!request || !request.__url) throw new Error('OkHttp Request.url 不能为空');
+      if (request.__method === 'GET' || request.__method === 'HEAD') {
+        request.body = '';
+      }
+      if (typeof g.__http_bytes !== 'function') throw new Error('OkHttp: HTTP 字节原语不可用');
+      var response = JSON.parse(g.__http_bytes(
+        request.__method, request.__url, request.body, JSON.stringify(request.headers)
+      ));
+      var bytes = String(response.body == null ? '' : response.body).split('').map(function (c) {
+        return c.charCodeAt(0) & 255;
+      });
+      return new OkHttpResponse(response.url || request.__url, response.code, response.headers, bytes);
+    };
+    OkHttpCall.prototype.cancel = function () {};
+    OkHttpCall.prototype.isCanceled = function () { return false; };
+    OkHttpCall.prototype.isExecuted = function () { return this.executed; };
+
     // 每次求值都要重新跑一遍这个脚本(prelude 的 `java` 对象是本次新建的), 但
     // Rhino 风格的类型表要跨次复用: jsLib 可能持有 `Packages.java.math.BigInteger`
     // 这类别名, 重建构造器会让 `instanceof` 失效。因此只补新字段, 不整体替换。
@@ -772,15 +940,19 @@ function array(value) {
         // `cannot read property 'TYPE' of undefined`，解压整段失败。
         Byte:{TYPE:'byte'}
       },
-      util:{Arrays:Arrays, Base64:Base64, Collections:Collections, UUID:UUID, zip:{GZIPInputStream:GZIPInputStream, GZIPOutputStream:GZIPOutputStream, Inflater:Inflater}},
+      util:{Arrays:Arrays, Base64:Base64, Collections:Collections, UUID:UUID, zip:{GZIPInputStream:GZIPInputStream, GZIPOutputStream:GZIPOutputStream, Inflater:Inflater, InflaterInputStream:InflaterInputStream}},
       security:{MessageDigest:MessageDigest, SecureRandom:SecureRandom},
       io:{ByteArrayInputStream:ByteArrayInputStream, ByteArrayOutputStream:ByteArrayOutputStream, InputStreamReader:InputStreamReader, BufferedReader:BufferedReader},
       net:{URL:URLImpl, HttpURLConnection:UrlConnection, URLEncoder:URLEncoderImpl, URLDecoder:URLDecoderImpl},
-      nio:{charset:{Charset:Charset}, ByteBuffer:ByteBuffer},
+      nio:{charset:{Charset:Charset, StandardCharsets:StandardCharsets}, ByteBuffer:ByteBuffer},
       crypto:{Cipher:Cipher, Mac:Mac, spec:{SecretKeySpec:SecretKeySpec, IvParameterSpec:IvParameterSpec, GCMParameterSpec:GCMParameterSpec}},
       // `Packages.android.util.Base64` 等 Android 专有类。手机端天然存在，桌面端
       // 必须补；缺了就是 `cannot read property 'util' of undefined`。
-      android:{util:{Base64:AndroidBase64}}
+      android:{util:{Base64:AndroidBase64}},
+      okhttp3:{
+        OkHttpClient:OkHttpClient,
+        Request:OkHttpRequestType
+      }
     };
     // 已有类型保持原引用(jsLib 里的 `instanceof` 依赖它), 新类型按首次注册。
     Object.keys(nextTypes).forEach(function (namespace) {
@@ -810,6 +982,7 @@ function array(value) {
   g.java.nio = types.nio;
   g.javax = {crypto:types.crypto};
   g.Packages.javax = g.javax;
+  g.Packages.okhttp3 = types.okhttp3;
   // `Packages.android.util.Base64`：Android 专有命名空间，不属于 `Packages.java`，
   // 因此不能挂在 g.java 上 —— 书源写的就是 `Packages.android.util.Base64.decode(...)`。
   g.Packages.android = types.android;

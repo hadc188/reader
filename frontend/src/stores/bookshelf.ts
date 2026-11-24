@@ -118,6 +118,16 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     await refreshRecentBooks()
   }
 
+  /** 缓存管理刷新概览后，同步书架卡片上的本地章节数。 */
+  function setCachedChapterCounts(counts: ReadonlyMap<string, number>) {
+    books.value = books.value.map((book) => {
+      const count = counts.get(book.bookUrl)
+      return count === undefined || book.cachedChapterCount === count
+        ? book
+        : { ...book, cachedChapterCount: count }
+    })
+  }
+
   async function removeBook(book: Book) {
     await apiDeleteBook(book)
     books.value = books.value.filter((b) => b.bookUrl !== book.bookUrl)
@@ -574,7 +584,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
 
   return {
     books, recentBooks, loading, loaded, sorting,
-    fetchBooks, addBook, removeBook,
+    fetchBooks, addBook, removeBook, setCachedChapterCounts,
     refreshRecentBooks, removeRecentBook, clearAllRecentBooks,
     groups, activeGroupId, displayGroups, visibleGroups, filteredBooks,
     sortMode, activeGroupSort, effectiveSortMode, sortedBooks,

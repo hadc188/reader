@@ -294,6 +294,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
+import { useBookshelfStore } from '../stores/bookshelf'
 import { deleteBookCache, getCoverUrl } from '../api/bookshelf'
 import { cacheBookSSE, cancelCacheBook, getCacheManifest, getCacheOverview } from '../api/cache'
 import type { CacheBookOverview, CacheChapterEntry, CacheFailedEntry, CacheManifest } from '../types'
@@ -303,6 +304,7 @@ const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
 
 const appStore = useAppStore()
+const shelfStore = useBookshelfStore()
 
 type FilterKey = 'all' | 'active' | 'working' | 'done'
 type SortKey = 'smart' | 'recent' | 'missing' | 'name' | 'shelf'
@@ -350,6 +352,7 @@ const overwriteCached = ref(false)
 const manifest = ref<CacheManifest | null>(null)
 const manifestLoading = ref(false)
 let manifestToken = 0
+let cacheOverviewToken = 0
 
 const chapterTab = ref<ChapterTab>('missing')
 const chapterQuery = ref('')
@@ -580,14 +583,19 @@ function close() {
 }
 
 async function refreshData(showSpinner = false) {
+  const token = ++cacheOverviewToken
   if (showSpinner) loading.value = true
   try {
     const list = await getCacheOverview()
+    if (token !== cacheOverviewToken) return
     mergeOverview(list)
+    shelfStore.setCachedChapterCounts(new Map(
+      list.map((book) => [book.bookUrl, Math.min(book.cachedChapterCount, book.totalChapterCount)]),
+    ))
   } catch {
     appStore.showToast('缓存信息读取失败', 'error')
   } finally {
-    loading.value = false
+    if (token === cacheOverviewToken) loading.value = false
   }
 }
 

@@ -314,6 +314,41 @@ describe('reorderGroups (调整分组顺序)', () => {
   })
 })
 
+describe('setCachedChapterCounts', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(getBookshelfWithCacheInfo).mockResolvedValue([
+      {
+        name: '书A',
+        author: '作者',
+        origin: 'https://source.example',
+        bookUrl: 'book:a',
+        cachedChapterCount: 2,
+      },
+      {
+        name: '书B',
+        author: '作者',
+        origin: 'https://source.example',
+        bookUrl: 'book:b',
+        cachedChapterCount: 5,
+      },
+    ] as never)
+  })
+
+  it('更新缓存概览中的章数，并保留未出现的书', async () => {
+    const store = useBookshelfStore()
+    await store.fetchBooks()
+
+    store.setCachedChapterCounts(new Map([
+      ['book:a', 0],
+      ['book:c', 7],
+    ]))
+
+    expect(store.books.find((book) => book.bookUrl === 'book:a')?.cachedChapterCount).toBe(0)
+    expect(store.books.find((book) => book.bookUrl === 'book:b')?.cachedChapterCount).toBe(5)
+  })
+})
+
 describe('书架排序', () => {
   beforeEach(() => {
     setActivePinia(createPinia())

@@ -164,6 +164,34 @@ fn repeated_title_links_and_empty_authors_preserve_all_matching_book_addresses()
     assert_eq!(books.iter().map(|book| &book.book_url).collect::<std::collections::HashSet<_>>().len(), 5);
 }
 
+/// 与 Legado `AnalyzeByJSoup.getElements` 相同的 CSS 列表选择语义。
+/// 同一分类页的推荐卡片规则只命中 6 项，完整列表规则命中 44 项。
+#[test]
+fn explore_css_list_selection_matches_legado_jsoup() {
+    let body = r#"
+<div id="hotcontent"><div class="l rank">
+<div class="item">推荐一</div><div class="item">推荐二</div><div class="item">推荐三</div>
+<div class="item">推荐四</div><div class="item">推荐五</div><div class="item">推荐六</div>
+</div></div>
+<div id="newscontent"><ul>
+<li>列表一</li><li>列表二</li><li>列表三</li><li>列表四</li><li>列表五</li><li>列表六</li>
+<li>列表七</li><li>列表八</li><li>列表九</li><li>列表十</li><li>列表十一</li><li>列表十二</li>
+<li>列表十三</li><li>列表十四</li><li>列表十五</li><li>列表十六</li><li>列表十七</li><li>列表十八</li>
+<li>列表十九</li><li>列表二十</li><li>列表二十一</li><li>列表二十二</li><li>列表二十三</li><li>列表二十四</li>
+<li>列表二十五</li><li>列表二十六</li><li>列表二十七</li><li>列表二十八</li><li>列表二十九</li><li>列表三十</li>
+<li>列表三十一</li><li>列表三十二</li><li>列表三十三</li><li>列表三十四</li><li>列表三十五</li><li>列表三十六</li>
+<li>列表三十七</li><li>列表三十八</li><li>列表三十九</li><li>列表四十</li><li>列表四十一</li><li>列表四十二</li>
+<li>列表四十三</li><li>列表四十四</li>
+</ul></div>
+"#;
+    let doc = reader_rust::parser::html::parse_document(&body);
+    let recommended =
+        reader_rust::parser::html::select_list(&doc, "#hotcontent .l.rank .item");
+    let complete = reader_rust::parser::html::select_list(&doc, "#newscontent ul li");
+    assert_eq!(recommended.len(), 6);
+    assert_eq!(complete.len(), 44);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "reads the user-supplied source export and contacts its upstream search endpoints"]
 async fn exported_sources_live_search() {

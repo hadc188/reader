@@ -591,7 +591,8 @@ export const useExploreStore = defineStore('explore', () => {
     } catch (err: any) {
       if (token !== booksToken) return
       error.value = err.message || '加载失败'
-      hasMore.value = false
+      // 一次网络/解析失败不代表已经到末页。保留 hasMore 让用户继续滚动时
+      // 能重新请求；否则偶然失败一次后，本分类会永久停在已经加载的书数上。
     } finally {
       // 同理：过期请求不能把 loading 关掉，那会让新源的加载状态错乱。
       if (token === booksToken) loading.value = false
@@ -602,6 +603,20 @@ export const useExploreStore = defineStore('explore', () => {
     if (sourceStore.sources.length === 0) {
       await sourceStore.fetchSources()
     }
+    // 路由页面销毁时可能留下一个已中断的在途请求。重新建立视图时清理
+    // loading，否则 fetchMore 会在第一行直接返回，滚动也无法恢复。
+    loading.value = false
+    // 视图是路由级组件，离开后会被销毁。若上次在末页留下 hasMore=false，
+    // 再次进入时不能沿用这个旧状态，否则用户会看到固定首屏且无法继续下滑。
+    if (books.value.length > 0) {
+      page.value = 1
+      hasMore.value = true
+      await resetAndFetch()
+      return
+    }
+    // 视图重新挂载时最后一次请求可能已被中断。残留的 error 不应继续挡住
+    // 后续滚动；真实到末页的状态仍由 hasMore 保持。
+    error.value = null
     await ensureActiveSource()
   }
 

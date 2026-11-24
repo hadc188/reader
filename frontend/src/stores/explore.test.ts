@@ -844,6 +844,145 @@ describe('explore pagination', () => {
     expect(store.books.map((book) => book.name)).toEqual(['第一本', '第二本'])
     expect(store.hasMore).toBe(true)
   })
+
+  it('requests the next page with the category page template intact', async () => {
+    const sourceStore = useSourceStore()
+    sourceStore.sources = [{
+      bookSourceName: '分页测试源',
+      bookSourceUrl: 'https://paged.example.test',
+      enabledExplore: true,
+      exploreUrl: JSON.stringify([{ title: '分类', url: '/category/{{page}}/' }]),
+    }]
+    const first = { name: '第一本', author: '作者', bookUrl: '/book/1.html', origin: 'https://paged.example.test' }
+    const second = { name: '第二本', author: '作者', bookUrl: '/book/2.html', origin: 'https://paged.example.test' }
+    exploreBookMock
+      .mockResolvedValueOnce([first])
+      .mockResolvedValueOnce([second])
+
+    const store = useExploreStore()
+    await store.init()
+    await store.fetchMore()
+
+    expect(exploreBookMock).toHaveBeenNthCalledWith(1, {
+      bookSourceUrl: 'https://paged.example.test',
+      ruleFindUrl: '/category/{{page}}/',
+      page: 1,
+    })
+    expect(exploreBookMock).toHaveBeenNthCalledWith(2, {
+      bookSourceUrl: 'https://paged.example.test',
+      ruleFindUrl: '/category/{{page}}/',
+      page: 2,
+    })
+  })
+
+  it('reloads the first page and can still load the next page after re-entry', async () => {
+    const sourceStore = useSourceStore()
+    sourceStore.sources = [{
+      bookSourceName: '分页测试源',
+      bookSourceUrl: 'https://paged.example.test',
+      enabledExplore: true,
+      exploreUrl: JSON.stringify([{ title: '分类', url: '/category/{{page}}/' }]),
+    }]
+    const first = { name: '第一本', author: '作者', bookUrl: '/book/1.html', origin: 'https://paged.example.test' }
+    const second = { name: '第二本', author: '作者', bookUrl: '/book/2.html', origin: 'https://paged.example.test' }
+    exploreBookMock
+      .mockResolvedValueOnce([first])
+      .mockResolvedValueOnce([second])
+      .mockResolvedValueOnce([first])
+      .mockResolvedValueOnce([second])
+
+    const store = useExploreStore()
+    await store.init()
+    await store.fetchMore()
+    expect(store.books.map((book) => book.name)).toEqual(['第一本', '第二本'])
+
+    // ExploreView 重新挂载时会再次执行 init；此时不能再初始化成空列表，
+    // 也不能继承上次的末页状态。
+    await store.init()
+    await store.fetchMore()
+    expect(store.loading).toBe(false)
+    expect(store.hasMore).toBe(true)
+    expect(store.books.map((book) => book.name)).toEqual(['第一本', '第二本'])
+  })
+
+  it('keeps retrying after a transient page failure', async () => {
+    const sourceStore = useSourceStore()
+    sourceStore.sources = [{
+      bookSourceName: '分页测试源',
+      bookSourceUrl: 'https://paged.example.test',
+      enabledExplore: true,
+      exploreUrl: JSON.stringify([{ title: '分类', url: '/category/{{page}}/' }]),
+    }]
+    const first = { name: '第一本', author: '作者', bookUrl: '/book/1.html', origin: 'https://paged.example.test' }
+    const second = { name: '第二本', author: '作者', bookUrl: '/book/2.html', origin: 'https://paged.example.test' }
+    exploreBookMock
+      .mockResolvedValueOnce([first])
+      .mockRejectedValueOnce(new Error('temporary network error'))
+      .mockResolvedValueOnce([second])
+
+    const store = useExploreStore()
+    await store.init()
+    await store.fetchMore()
+    expect(store.error).toContain('temporary network error')
+
+    await store.fetchMore()
+    expect(store.books.map((book) => book.name)).toEqual(['第一本', '第二本'])
+  })
+
+  it('does not keep loading blocked after an invalidated first-page request', async () => {
+    const sourceStore = useSourceStore()
+    sourceStore.sources = [{
+      bookSourceName: '分页测试源',
+      bookSourceUrl: 'https://paged.example.test',
+      enabledExplore: true,
+      exploreUrl: JSON.stringify([{ title: '分类', url: '/category/{{page}}/' }]),
+    }]
+    sourceStore.sources.push({
+      bookSourceName: '另一个源',
+      bookSourceUrl: 'https://other.example',
+      enabledExplore: true,
+      exploreUrl: JSON.stringify([{ title: '列表', url: '/other/{{page}}/' }]),
+    })
+    let resolveFirst!: (books: unknown[]) => void
+    exploreBookMock
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve as (books: unknown[]) => void }))
+      .mockResolvedValueOnce([
+        { name: '第二本', author: '作者', bookUrl: '/book/2.html', origin: 'https://paged.example.test' },
+      ])
+
+    const store = useExploreStore()
+    const pending = store.init()
+    await Promise.resolve()
+    await store.setSource('https://other.example')
+    resolveFirst([])
+    await pending
+
+    expect(store.loading).toBe(false)
+    expect(store.hasMore).toBe(true)
+    expect(exploreBookMock.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('clears a stale loading flag when the view is initialized again', async () => {
+    const sourceStore = useSourceStore()
+    sourceStore.sources = [{
+      bookSourceName: '分页测试源',
+      bookSourceUrl: 'https://paged.example.test',
+      enabledExplore: true,
+      exploreUrl: JSON.stringify([{ title: '分类', url: '/category/{{page}}/' }]),
+    }]
+    exploreBookMock.mockResolvedValue([
+      { name: '第一本', author: '作者', bookUrl: '/book/1.html', origin: 'https://paged.example.test' },
+    ])
+
+    const store = useExploreStore()
+    await store.init()
+    store.loading = true
+
+    await store.init()
+
+    expect(store.loading).toBe(false)
+    expect(exploreBookMock.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
 })
 
 function sourceWithExplore(): BookSource {

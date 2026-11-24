@@ -155,7 +155,7 @@
       </aside>
 
       <!-- 书籍列表区 -->
-      <main class="content-panel" ref="scrollContainer" @scroll="handleScroll">
+      <main class="content-panel" ref="scrollContainer" @scroll="handleUserScroll">
         <div class="books-grid-wrapper" v-if="store.books.length > 0">
           <BookGrid
             :books="store.books"
@@ -209,7 +209,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useExploreStore } from '../stores/explore'
 import { useReaderStore } from '../stores/reader'
@@ -257,6 +257,8 @@ const textTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const controlsCollapsed = ref(
   typeof window !== 'undefined' && window.innerWidth <= 900,
 )
+const MAX_AUTO_FILL_PAGES = 3
+let autoFillPages = 0
 
 const emptyCategoryHint = computed(() => {
   if (store.categoriesLoading) return '分类加载中…'
@@ -282,10 +284,21 @@ onMounted(async () => {
 // 离开发现页时清掉未触发的输入防抖，避免计时器在别的路由里补齐执行。
 onBeforeUnmount(clearTextTimers)
 onBeforeUnmount(() => coverCacheSession.release(shelfStore.books))
+onBeforeUnmount(() => { autoFillPages = 0 })
 
 watch(
   () => store.books.length,
-  () => coverCacheSession.collect(store.books),
+  async () => {
+    coverCacheSession.collect(store.books)
+    // 首屏若只有少量卡片，可能尚未出现可滚动距离，scroll 事件不会触发。
+    // 每次列表增长后复核一次触底状态；fetchMore 自带 loading/hasMore 锁，
+    // 不会并发拉取。若内容确实不足一屏，需要继续补页直到出现滚动空间。
+    await nextTick()
+    if (autoFillPages < MAX_AUTO_FILL_PAGES) {
+      autoFillPages += 1
+      handleScroll()
+    }
+  },
   { deep: false },
 )
 
@@ -311,6 +324,12 @@ function handleScroll() {
   if (scrollTop + clientHeight >= scrollHeight - 100) {
     void store.fetchMore()
   }
+}
+
+/** 用户主动滚动后重新计算自动补页额度，避免长列表只能补固定页数。 */
+function handleUserScroll() {
+  autoFillPages = 0
+  handleScroll()
 }
 
 function handleCategoryClick(category: ExploreKind) {

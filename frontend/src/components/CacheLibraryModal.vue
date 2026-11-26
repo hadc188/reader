@@ -862,6 +862,22 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.cl-layer {
+  --cl-surface: var(--color-bg-elevated);
+  --cl-panel: color-mix(in srgb, var(--color-bg) 62%, var(--color-bg-elevated));
+  --cl-control: color-mix(in srgb, var(--color-bg) 42%, var(--color-bg-elevated));
+  --cl-control-subtle: color-mix(in srgb, var(--color-bg) 22%, var(--color-bg-elevated));
+  --cl-divider: color-mix(in srgb, var(--color-border-light) 76%, transparent);
+}
+
+[data-theme='dark'] .cl-layer {
+  --cl-surface: var(--color-bg-elevated);
+  --cl-panel: var(--color-bg-sunken);
+  --cl-control: var(--color-bg-elevated);
+  --cl-control-subtle: var(--color-bg-elevated);
+  --cl-divider: var(--color-border-light);
+}
+
 .cl-overlay {
   position: fixed;
   inset: 0;
@@ -886,9 +902,9 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--cl-divider);
   border-radius: 18px;
-  background: var(--color-bg-elevated);
+  background: var(--cl-surface);
   box-shadow: var(--shadow-xl);
 }
 
@@ -898,7 +914,7 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 16px;
   padding: 20px 22px 16px;
-  border-bottom: 1px solid var(--color-border-light);
+  border-bottom: 1px solid var(--cl-divider);
 }
 
 .cl-head h2 {
@@ -958,14 +974,15 @@ onUnmounted(() => {
   min-height: 0;
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);
+  background: var(--cl-surface);
 }
 
 .cl-side {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-right: 1px solid var(--color-border-light);
-  background: var(--color-bg-sunken);
+  border-right: 1px solid var(--cl-divider);
+  background: var(--cl-panel);
 }
 
 .cl-search {
@@ -987,9 +1004,9 @@ onUnmounted(() => {
   width: 100%;
   height: 34px;
   padding: 0 12px 0 34px;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--cl-divider);
   border-radius: 9px;
-  background: var(--color-bg-elevated);
+  background: var(--cl-control);
   color: var(--color-text);
   font-size: 13px;
   outline: none;
@@ -1024,9 +1041,9 @@ onUnmounted(() => {
   gap: 5px;
   height: 27px;
   padding: 0 10px;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--cl-divider);
   border-radius: 999px;
-  background: transparent;
+  background: var(--cl-control-subtle);
   color: var(--color-text-secondary);
   font-size: 12px;
   cursor: pointer;
@@ -1071,9 +1088,9 @@ onUnmounted(() => {
   flex: 1;
   height: 28px;
   padding: 0 8px;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--cl-divider);
   border-radius: 7px;
-  background: var(--color-bg-elevated);
+  background: var(--cl-control);
   color: var(--color-text-secondary);
   font-size: 12px;
   outline: none;
@@ -1212,7 +1229,7 @@ onUnmounted(() => {
   height: 3px;
   margin-top: 2px;
   border-radius: 999px;
-  background: var(--color-border-light);
+  background: var(--cl-divider);
   overflow: hidden;
 }
 
@@ -1350,9 +1367,9 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 10px;
   padding: 16px 18px;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--cl-divider);
   border-radius: 13px;
-  background: var(--color-bg-sunken);
+  background: var(--cl-control);
 }
 
 .cl-hero {
@@ -1401,7 +1418,7 @@ onUnmounted(() => {
   display: flex;
   height: 7px;
   border-radius: 999px;
-  background: var(--color-border-light);
+  background: var(--cl-divider);
   overflow: hidden;
 }
 
@@ -1521,7 +1538,7 @@ onUnmounted(() => {
   gap: 2px;
   padding: 3px;
   border-radius: 9px;
-  background: var(--color-bg-sunken);
+  background: var(--cl-control-subtle);
 }
 
 .cl-chapter-tabs button {
@@ -1541,7 +1558,7 @@ onUnmounted(() => {
 }
 
 .cl-chapter-tabs button.active {
-  background: var(--color-bg-elevated);
+  background: var(--cl-control);
   color: var(--color-text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
@@ -1568,9 +1585,9 @@ onUnmounted(() => {
   width: 100%;
   height: 30px;
   padding: 0 10px 0 30px;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--cl-divider);
   border-radius: 8px;
-  background: var(--color-bg-sunken);
+  background: var(--cl-control);
   color: var(--color-text);
   font-size: 12px;
 }
@@ -1581,9 +1598,9 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px 8px;
   padding: 8px 10px;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--cl-divider);
   border-radius: 9px;
-  background: var(--color-bg-sunken);
+  background: var(--cl-control);
 }
 
 .cl-chapter-links {
@@ -1613,8 +1630,9 @@ onUnmounted(() => {
   flex-direction: column;
   max-height: 320px;
   overflow-y: auto;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--cl-divider);
   border-radius: 10px;
+  background: var(--cl-control);
 }
 
 .cl-chapter-row {
@@ -1627,7 +1645,7 @@ onUnmounted(() => {
 }
 
 .cl-chapter-row + .cl-chapter-row {
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--cl-divider);
 }
 
 .cl-chapter-row:hover {
@@ -1699,7 +1717,7 @@ onUnmounted(() => {
 }
 
 .cl-fail-row + .cl-fail-row {
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--cl-divider);
 }
 
 .cl-fail-main {
@@ -1736,7 +1754,7 @@ onUnmounted(() => {
   flex: 0 0 auto;
   height: 24px;
   padding: 0 8px;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--cl-divider);
   border-radius: 6px;
   background: transparent;
   color: var(--color-text-secondary);
@@ -1763,8 +1781,8 @@ onUnmounted(() => {
   gap: 8px;
   margin: auto -22px -20px;
   padding: 12px 22px 16px;
-  border-top: 1px solid var(--color-border-light);
-  background: var(--color-bg-elevated);
+  border-top: 1px solid var(--cl-divider);
+  background: var(--cl-surface);
 }
 
 .cl-split {
@@ -1896,7 +1914,7 @@ onUnmounted(() => {
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  background: var(--color-bg-sunken);
+  background: var(--cl-control-subtle);
   color: var(--color-text-tertiary);
 }
 

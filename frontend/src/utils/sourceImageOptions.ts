@@ -91,31 +91,66 @@ export function parseSourceImageOptions(rawSrc: string): SourceImageOption | nul
   return null
 }
 
-/** 给正文插图补上占位尺寸, 避免加载完成前后高度变化导致的正文跳动。
+/** 给正文插图预留宽度, 只处理没有可信尺寸的普通插图。
  *
- *  只处理「正文插图」: 段评气泡(`source-inline-bubble`)与设了 `style.width`
- *  的图标有自己明确的尺寸, 不参与占位。
- *
- *  `width: 100%` 和 `aspect-ratio` **必须成对出现**才有效:
- *  未加载的图片固有尺寸是 0, 没有确定宽度时宽高比无从换算, 高度照样是 0。
- *  只有先靠 `width: 100%` 把宽度钉到列宽, `aspect-ratio` 才能算出占位高度。
- *  实测(700px 列宽): 只写 aspect-ratio 时加载前高度 0; 加上 width:100% 后
- *  加载前后都是 393.75px, 位移 0。
- *
- *  比例取常见横图 16:9。真实图片比例不同, 加载后由 `height: auto` 与图片
- *  自身比例接管 —— 这一层只负责「先把位置占住」。 */
-const FALLBACK_IMAGE_ASPECT = '16 / 9'
+ *  不能给未知图片套固定宽高比: 在线漫画常见 720x9000 的整页长图, 16:9 会把它
+ *  永久压成一条横带, `height:auto` 也覆盖不了显式的 aspect-ratio。这里只负责铺满
+ *  正文列和显示骨架, 加载完成后由 settleReaderImageLayout 按自然尺寸结算。
+ *  与文字同段的插图、来源已给明确尺寸的图片、以及带 `,{json}` 选项的图标
+ *  都不参与, 保留它们的原始排版。 */
+const FALLBACK_IMAGE_CLASS = 'reader-image-pending'
+const READER_BLOCK_IMAGE_CLASS = 'reader-image-block'
+const TEXT_CONTAINER_SELECTOR = 'p, div, td, th, li, dd, blockquote'
 
 export function reserveImageSpace(root: HTMLElement) {
   const images = Array.from(root.querySelectorAll('img')) as HTMLImageElement[]
   images.forEach((image) => {
     if (image.classList.contains('source-inline-bubble')) return
+    // `,{json}` 图片是插件图标或带自定义尺寸的展示图, 不参与正文占位。
+    if (parseSourceImageOptions(image.getAttribute('src') || '')) return
     if (image.hasAttribute('width') && image.hasAttribute('height')) return
     if (image.style.width || image.style.height || image.style.aspectRatio) return
+    // 与文字同容器的图片通常是正文插图, 不铺满整列。
+    const container = image.closest(TEXT_CONTAINER_SELECTOR)
+    if (container && (container.textContent || '').trim()) return
     image.style.width = '100%'
-    image.style.aspectRatio = FALLBACK_IMAGE_ASPECT
     image.style.height = 'auto'
+    image.classList.add(READER_BLOCK_IMAGE_CLASS)
+    image.classList.add(FALLBACK_IMAGE_CLASS)
   })
+}
+
+/** 图片加载完成后按自然尺寸结算, 清除来源和占位留下的固定比例。
+ *
+ *  返回 true 表示布局确实发生了变化, 调用方可以据此决定是否重建横向分页。
+ *  缓存命中时 `load` 可能早于阅读页挂载, 此时 natural 尺寸仍可直接读取。 */
+export function settleReaderImageLayout(image: HTMLImageElement): boolean {
+  if (!(image?.naturalWidth > 0) || !(image.naturalHeight > 0)) {
+    return false
+  }
+  // 段评气泡是行内小图标, 不能按正文插图清掉它自己的尺寸。
+  if (image.classList.contains('source-inline-bubble')) {
+    return false
+  }
+  // 只结算本次占位逻辑标记的图片。横向分页写下的 max-height 属于它自己的约束,
+  // 这里不能动, 否则重建后同一尺寸命中缓存、不会再触发下一次重建。
+  const isBlockImage = image.classList.contains(READER_BLOCK_IMAGE_CLASS)
+  if (!isBlockImage) {
+    return false
+  }
+  const hadPendingState = image.classList.contains(FALLBACK_IMAGE_CLASS)
+  const hadLayoutOverride = Boolean(
+    image.style.aspectRatio
+    || image.style.minHeight
+    || image.style.height,
+  )
+  image.classList.remove(FALLBACK_IMAGE_CLASS)
+  image.classList.remove(READER_BLOCK_IMAGE_CLASS)
+  image.style.removeProperty('aspect-ratio')
+  image.style.removeProperty('min-height')
+  image.style.width = '100%'
+  image.style.height = 'auto'
+  return hadPendingState || hadLayoutOverride
 }
 
 /**

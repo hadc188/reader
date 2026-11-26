@@ -104,6 +104,18 @@ pub fn parse_txt_chapter_ranges(book_url: &str, text: &str) -> Vec<TxtChapterRan
     let Some(heading_re) = chapter_heading_regex() else {
         return fallback_range(book_url, text);
     };
+    let numbered_headings = text
+        .lines()
+        .filter_map(|line| parse_numbered_heading(line.trim()))
+        .filter(|(_, title)| is_distinct_numbered_chapter_title(title))
+        .map(|(number, title)| (number, title))
+        .collect::<Vec<_>>();
+    let numbered_sequence = numbered_headings
+        .windows(2)
+        .any(|pair| {
+            pair[0].0 < pair[1].0
+                && !pair[0].1.contains(['。', '！', '？', '!', '?'])
+        });
 
     let mut headings: Vec<(usize, usize, String)> = Vec::new();
     let mut offset = 0usize;
@@ -111,20 +123,14 @@ pub fn parse_txt_chapter_ranges(book_url: &str, text: &str) -> Vec<TxtChapterRan
         let raw_line = line.trim_end_matches(['\r', '\n']);
         let title = raw_line.trim();
         let content_len = raw_line.len();
-        if is_chapter_heading(title, &heading_re) || is_bracketed_heading(title, &heading_re) {
+        if is_chapter_heading(title, &heading_re)
+            || is_bracketed_heading(title, &heading_re)
+            || (numbered_sequence && is_numbered_heading(title))
+        {
             let leading_ws = raw_line.len().saturating_sub(raw_line.trim_start().len());
             headings.push((offset + leading_ws, offset + content_len, title.to_string()));
         }
         offset += line.len();
-    }
-
-    if offset < text.len() {
-        let raw_line = &text[offset..];
-        let title = raw_line.trim();
-        if is_chapter_heading(title, &heading_re) || is_bracketed_heading(title, &heading_re) {
-            let leading_ws = raw_line.len().saturating_sub(raw_line.trim_start().len());
-            headings.push((offset + leading_ws, text.len(), title.to_string()));
-        }
     }
 
     if headings.is_empty() {
@@ -257,6 +263,19 @@ impl LocalTxtBookService {
         file_name: &str,
         bytes: &[u8],
     ) -> Result<Book, AppError> {
+        self.import_txt_book_with_identity(user_ns, file_name, None, bytes)
+            .await
+    }
+
+    /// 从文件夹批量导入时，用文件相对路径参与标识，避免不同子目录下的
+    /// 同名同内容文件合并成同一本书。
+    pub async fn import_txt_book_with_identity(
+        &self,
+        user_ns: &str,
+        file_name: &str,
+        identity: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<Book, AppError> {
         validate_txt_upload(file_name, bytes.len())?;
         let safe_file_name = sanitize_txt_file_name(file_name);
         let text = decode_txt_bytes(bytes);
@@ -264,12 +283,14 @@ impl LocalTxtBookService {
             return Err(AppError::BadRequest("TXT 文件内容不能为空".to_string()));
         }
 
-        let hash = md5_hex(&format!(
-            "{}:{}:{}",
-            user_ns,
-            safe_file_name,
-            md5_hex(&text)
-        ));
+        let content_hash = md5_hex(&text);
+        let hash = match identity {
+            Some(identity) => md5_hex(&format!(
+                "{}:{}:{}:{}",
+                user_ns, identity, safe_file_name, content_hash
+            )),
+            None => md5_hex(&format!("{}:{}:{}", user_ns, safe_file_name, content_hash)),
+        };
         let book_url = format!("{}:{}", LOCAL_TXT_ORIGIN, hash);
         // 同一本书重新导入会复用同一个 book_url，旧目录缓存必须先作废，否则会按
         // 上一次分章的区间去读新文件（章号可能对不上）。
@@ -556,6 +577,42 @@ fn is_chapter_heading(line: &str, re: &Regex) -> bool {
         return false;
     }
     re.is_match(line)
+}
+
+fn is_numbered_heading(line: &str) -> bool {
+    parse_numbered_heading(line)
+        .is_some_and(|(_, title)| is_distinct_numbered_chapter_title(title))
+}
+
+fn is_distinct_numbered_chapter_title(title: &str) -> bool {
+    !title.contains(['。', '！', '？', '!', '?'])
+        && !title.chars().any(|ch| ch.is_whitespace())
+}
+
+fn parse_numbered_heading(line: &str) -> Option<(u64, &str)> {
+    let line = line.trim();
+    let number_len = line
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || ch.is_numeric())
+        .count();
+    if number_len == 0 || number_len > 5 {
+        return None;
+    }
+    let number_end = line
+        .char_indices()
+        .nth(number_len)
+        .map(|(index, _)| index)
+        .unwrap_or(line.len());
+    let number = line[..number_end].parse::<u64>().ok()?;
+    let rest = line[number_end..].trim_start();
+    let rest = ['、', '.', '．', ',', '，', ':', '：', '_', '-', '—']
+        .into_iter()
+        .find_map(|separator| rest.strip_prefix(separator))?;
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    if rest.is_empty() || rest.chars().count() > 30 {
+        return None;
+    }
+    Some((number, rest))
 }
 
 fn skip_line_break(text: &str, offset: usize) -> usize {

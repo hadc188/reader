@@ -95,6 +95,7 @@
       <div
         v-if="store.isAutoScrolling"
         class="auto-reading-status"
+        :class="{ 'controls-open': showControls || !!store.activePanel }"
         role="status"
         aria-live="polite"
         :style="{
@@ -476,7 +477,11 @@ import { isLocalBook, isLocalEpubBook } from '../utils/localBook'
 import { PDF_PAGE_ATTR, isPdfBook, releasePdfBook, renderPdfChapterPages } from '../utils/pdfPages'
 import { rewriteCssAssetUrls, toReaderAssetUrl } from '../utils/localEpubAsset'
 import { readerWindowBackground as composeReaderWindowBackground } from '../utils/readerBackground'
-import { processSourceImageOptions, reserveImageSpace } from '../utils/sourceImageOptions'
+import {
+  processSourceImageOptions,
+  reserveImageSpace,
+  settleReaderImageLayout,
+} from '../utils/sourceImageOptions'
 import { repairSourceImageHtml } from '../utils/sourceImageHtml'
 import { handleReaderFontSizeWheel } from '../utils/readerFontSize'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
@@ -1266,7 +1271,12 @@ function queueLoadedImagePagination(image: unknown) {
 }
 
 function handleReaderImageLoad(event: Event) {
-  queueLoadedImagePagination(event.target)
+  const image = event.target
+  if (!(image instanceof HTMLImageElement)) return
+  if (!isHorizontalPageMode.value) {
+    settleReaderImageLayout(image)
+  }
+  queueLoadedImagePagination(image)
 }
 
 function handleViewportChange() {
@@ -4084,7 +4094,12 @@ onMounted(async () => {
   await rebuildHorizontalPages()
   // 挂载期结束: 此后 resize 才允许触发重新分页。
   mounted = true
-  scrollContainerRef.value?.querySelectorAll('img').forEach(queueLoadedImagePagination)
+  scrollContainerRef.value?.querySelectorAll('img').forEach((image) => {
+    if (!isHorizontalPageMode.value) {
+      settleReaderImageLayout(image)
+    }
+    queueLoadedImagePagination(image)
+  })
   // 章节列表 watcher(2114)可能已完成初始化并应用了位置恢复; 这里只在列表
   // 尚未初始化时补一次, 否则重复初始化会把已恢复的视口拽回章节开头。
   if (isContinuousMode.value && !continuousChapters.value.length) {
@@ -4273,6 +4288,12 @@ watch(() => store.content, () => {
     if (current) {
       current.content = store.content
       current.html = renderChapterHtml(store.content)
+      void nextTick(() => {
+        scrollContainerRef.value?.querySelectorAll('img').forEach((image) => {
+          settleReaderImageLayout(image)
+          queueLoadedImagePagination(image)
+        })
+      })
     } else if (store.content) {
       void initializeContinuousChapters(store.currentIndex, false)
     }
@@ -4414,9 +4435,9 @@ watch(
 
 .auto-reading-status {
   position: absolute;
-  top: 12px;
-  right: 48px;
-  z-index: 18;
+  right: calc(24px + var(--safe-area-right));
+  bottom: calc(16px + var(--safe-area-bottom));
+  z-index: 31;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4430,6 +4451,11 @@ watch(
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
   backdrop-filter: blur(18px) saturate(120%);
   -webkit-backdrop-filter: blur(18px) saturate(120%);
+  transition: bottom 0.2s ease;
+}
+
+.auto-reading-status.controls-open {
+  bottom: calc(78px + var(--safe-area-bottom));
 }
 
 .auto-reading-indicator {
@@ -4890,14 +4916,21 @@ watch(
  *     只限宽不限高时, 浏览器会把**属性里的绝对高度**当最终高度: 一张
  *     1024x576 的图在 380px 宽的列里会被拉成 380x576, 严重变形。
  *
- * 加上 `height: auto` 后宽高比才交给浏览器按属性推导, 于是:
- *  - 图片加载**前**就能按真实比例占住位置(不再从 0 高度开始);
- *  - 加载**后**高度不变, 下方正文不会突然上移/下移。
- * 这正是 issue #21「带图章节排版有延迟/跳动」的成因 —— 用户的 GIF 里
- * 图片区域从空白变成图片的同时, 其下内容整体位移三百多像素。 */
+ * 加上 `height: auto` 后宽高比才交给浏览器按属性推导; 两个属性都可信时,
+ * 图片加载前后可以按真实比例占位, 这正是 issue #21 所依赖的路径。 */
 :deep(.chapter-text img) {
   max-width: 100%;
   height: auto;
+}
+
+/* 未知尺寸的正文图片在解码前没有可靠高度。不要用固定宽高比硬撑, 否则在线漫画的
+   整页长图会被压成 16:9 横带; 留一块浅色底板表示正在加载即可。 */
+:deep(.chapter-text img.reader-image-pending) {
+  display: block;
+  min-height: clamp(80px, 18vh, 160px);
+  height: auto !important;
+  aspect-ratio: auto !important;
+  background: color-mix(in srgb, currentColor 8%, transparent);
 }
 
 /* 本地 EPUB: 正文排版以原书 CSS 为准(原书规则随章节内联, 在 DOM 中位于本组件
@@ -5236,9 +5269,13 @@ watch(
 
 @media (max-width: 768px) {
   .auto-reading-status {
-    top: 8px;
-    right: 10px;
+    right: calc(10px + var(--safe-area-right));
+    bottom: calc(8px + var(--safe-area-bottom));
     max-width: calc(100% - 20px);
+  }
+
+  .auto-reading-status.controls-open {
+    bottom: calc(68px + var(--safe-area-bottom));
   }
 
   .reader-scroll-container.horizontal-page-mode {

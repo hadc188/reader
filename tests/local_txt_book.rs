@@ -30,6 +30,63 @@ fn txt_parser_splits_no_space_chapter_headings() {
 }
 
 #[test]
+fn txt_parser_splits_numbered_chapter_headings() {
+    let text = "01、初见\n第一章正文。\n02、重逢\n第二章正文。\n";
+
+    let chapters = parse_txt_chapters("local-txt:numbered", text);
+
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0].title, "01、初见");
+    assert_eq!(chapters[0].content.trim(), "第一章正文。");
+    assert_eq!(chapters[1].title, "02、重逢");
+    assert_eq!(chapters[1].content.trim(), "第二章正文。");
+}
+
+#[test]
+fn txt_parser_ignores_numbered_prose_with_sentence_punctuation() {
+    let text = "第一章 开始\n1. 他抵达车站。\n他继续向前。\n第二章 结束\n正文二。\n";
+
+    let chapters = parse_txt_chapters("local-txt:numbered-prose", text);
+
+    assert_eq!(chapters.len(), 2);
+    assert!(chapters[0].content.contains("1. 他抵达车站。"));
+}
+
+#[test]
+fn txt_parser_supports_numbered_heading_separators() {
+    let text = "01:初见\n第一章正文。\n02. 重逢\n第二章正文。\n";
+
+    let chapters = parse_txt_chapters("local-txt:numbered-separators", text);
+
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0].title, "01:初见");
+    assert_eq!(chapters[1].title, "02. 重逢");
+}
+
+#[test]
+fn txt_parser_does_not_split_single_numbered_list_line() {
+    let text = "第一卷\n\n1. 他抵达车站。\n他继续向前。\n第二章 结束\n正文二。\n";
+
+    let chapters = parse_txt_chapters("local-txt:single-numbered-list", text);
+
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0].title, "第一卷");
+    assert!(chapters[0].content.contains("1. 他抵达车站。"));
+    assert_eq!(chapters[1].title, "第二章 结束");
+}
+
+#[test]
+fn txt_parser_splits_numbered_heading_at_end_without_newline() {
+    let text = "01、初见\n正文。\n02、无换行末章";
+
+    let chapters = parse_txt_chapters("local-txt:numbered-eof", text);
+
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[1].title, "02、无换行末章");
+    assert_eq!(chapters[1].content, "");
+}
+
+#[test]
 fn txt_parser_falls_back_to_single_body_chapter() {
     let text = "没有章节标题\n只有正文\n";
 

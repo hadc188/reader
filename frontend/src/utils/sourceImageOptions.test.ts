@@ -4,6 +4,7 @@ import {
   parseSourceImageOptions,
   processSourceImageOptions,
   reserveImageSpace,
+  settleReaderImageLayout,
 } from './sourceImageOptions'
 
 // 取自真实插件(addComment)产生的 src: 段评图标 + 配置面板 click
@@ -137,59 +138,187 @@ describe('reserveImageSpace（用最小 DOM 桩，不依赖 jsdom）', () => {
     attrs?: Record<string, string>
     classes?: string[]
     style?: Record<string, string>
+    paragraphText?: string
+    containerSelector?: string
   }) {
     const attrs = new Map<string, string>(Object.entries(opts.attrs ?? {}))
     const classes = new Set(opts.classes ?? [])
     const style: Record<string, string> = { ...(opts.style ?? {}) }
+    const paragraph = opts.paragraphText === undefined
+      ? null
+      : { textContent: opts.paragraphText }
     const image = {
       style,
-      classList: { contains: (name: string) => classes.has(name) },
+      closest: (selector: string) => {
+        if (!paragraph) return null
+        return opts.containerSelector && selector.includes(opts.containerSelector)
+          ? paragraph
+          : null
+      },
+      classList: {
+        add: (name: string) => classes.add(name),
+        contains: (name: string) => classes.has(name),
+        remove: (name: string) => classes.delete(name),
+      },
       hasAttribute: (name: string) => attrs.has(name),
+      getAttribute: (name: string) => attrs.get(name) ?? null,
     }
-    return image
+    return { image, classes }
   }
 
   function runOn(images: ReturnType<typeof makeImage>[]) {
-    const root = { querySelectorAll: () => images } as unknown as HTMLElement
+    const root = { querySelectorAll: () => images.map(({ image }) => image) } as unknown as HTMLElement
     reserveImageSpace(root)
     return images
   }
 
   it('leaves an image that already declares width and height alone', () => {
     // 书源插图常带这两个属性, 浏览器据此即可在加载前按比例占位。
-    const [image] = runOn([makeImage({ attrs: { width: '1024', height: '576' } })])
+    const [{ image }] = runOn([makeImage({ attrs: { width: '1024', height: '576' } })])
 
     expect(image.style.aspectRatio).toBeUndefined()
+    expect(image.classList.contains('reader-image-pending')).toBe(false)
+    expect(image.classList.contains('reader-image-block')).toBe(false)
   })
 
-  it('reserves space when the image has no intrinsic size', () => {
-    const [image] = runOn([makeImage({ attrs: { src: 'a.jpg' } })])
+  it('reserves width and pending state without a misleading aspect ratio', () => {
+    const [{ image }] = runOn([makeImage({ attrs: { src: 'a.jpg' } })])
 
-    // width 与 aspect-ratio 必须成对: 未加载的图片固有宽度是 0,
-    // 没有确定宽度就换算不出占位高度。
     expect(image.style.width).toBe('100%')
-    expect(image.style.aspectRatio).toBe('16 / 9')
+    expect(image.style.aspectRatio).toBeUndefined()
     expect(image.style.height).toBe('auto')
+    expect(image.classList.contains('reader-image-pending')).toBe(true)
+    expect(image.classList.contains('reader-image-block')).toBe(true)
   })
 
-  it('reserves space when only one dimension is given', () => {
-    const [image] = runOn([makeImage({ attrs: { width: '1024' } })])
+  it('does not trust a single declared dimension', () => {
+    const [{ image }] = runOn([makeImage({ attrs: { width: '1024' } })])
 
     expect(image.style.width).toBe('100%')
-    expect(image.style.aspectRatio).toBe('16 / 9')
+    expect(image.style.aspectRatio).toBeUndefined()
+    expect(image.classList.contains('reader-image-pending')).toBe(true)
+    expect(image.classList.contains('reader-image-block')).toBe(true)
   })
 
   it('leaves commentary bubbles alone', () => {
     // 气泡有自己固定的行内尺寸, 再套宽高比会把它撑成整段高图。
-    const [image] = runOn([makeImage({ classes: ['source-inline-bubble'] })])
+    const [{ image }] = runOn([makeImage({ classes: ['source-inline-bubble'] })])
 
     expect(image.style.aspectRatio).toBeUndefined()
+    expect(image.classList.contains('reader-image-pending')).toBe(false)
+    expect(image.classList.contains('reader-image-block')).toBe(false)
+  })
+
+  it('leaves source images with ,{json} options alone', () => {
+    const [{ image }] = runOn([makeImage({ attrs: { src: REAL_SRC } })])
+
+    expect(image.style.width).toBeUndefined()
+    expect(image.style.aspectRatio).toBeUndefined()
+    expect(image.classList.contains('reader-image-pending')).toBe(false)
+    expect(image.classList.contains('reader-image-block')).toBe(false)
   })
 
   it('does not override a size the source already set', () => {
-    const [image] = runOn([makeImage({ style: { width: '110px' } })])
+    const [{ image }] = runOn([makeImage({ style: { width: '110px' } })])
 
     expect(image.style.aspectRatio).toBeUndefined()
+    expect(image.classList.contains('reader-image-pending')).toBe(false)
+    expect(image.classList.contains('reader-image-block')).toBe(false)
+  })
+
+  it('keeps body text illustrations inline', () => {
+    const [{ image }] = runOn([makeImage({
+      attrs: { src: 'inline.jpg' },
+      paragraphText: '正文和插图',
+      containerSelector: 'p',
+    })])
+
+    expect(image.style.width).toBeUndefined()
+    expect(image.style.aspectRatio).toBeUndefined()
+    expect(image.classList.contains('reader-image-pending')).toBe(false)
+    expect(image.classList.contains('reader-image-block')).toBe(false)
+  })
+
+  it('keeps mixed div illustrations inline', () => {
+    const [{ image }] = runOn([makeImage({
+      attrs: { src: 'inline-div.jpg' },
+      paragraphText: '正文和插图',
+      containerSelector: 'div',
+    })])
+
+    expect(image.style.width).toBeUndefined()
+    expect(image.classList.contains('reader-image-pending')).toBe(false)
+    expect(image.classList.contains('reader-image-block')).toBe(false)
+  })
+})
+
+describe('settleReaderImageLayout', () => {
+  function loadedImage(classes: string[] = ['reader-image-pending', 'reader-image-block']) {
+    const style: Record<string, string> = {
+      width: '100%',
+      height: 'auto',
+      aspectRatio: '16 / 9',
+      minHeight: '200px',
+      maxHeight: '720px',
+    }
+    const imageClasses = new Set(classes)
+    const image = {
+      naturalWidth: 720,
+      naturalHeight: 9000,
+      style: {
+        get aspectRatio() { return style.aspectRatio },
+        get minHeight() { return style.minHeight },
+        get maxHeight() { return style.maxHeight },
+        get height() { return style.height },
+        set height(value: string) { style.height = value },
+        removeProperty: (name: string) => {
+          const key = name === 'aspect-ratio'
+            ? 'aspectRatio'
+            : name === 'min-height'
+              ? 'minHeight'
+              : name === 'max-height'
+                ? 'maxHeight'
+                : name
+          delete style[key]
+        },
+      },
+      classList: {
+        contains: (name: string) => imageClasses.has(name),
+        remove: (name: string) => imageClasses.delete(name),
+      },
+    }
+    return { image, imageClasses, style }
+  }
+
+  it('uses natural dimensions and clears the fixed ratio after load', () => {
+    const { image, imageClasses, style } = loadedImage()
+
+    expect(settleReaderImageLayout(image as unknown as HTMLImageElement)).toBe(true)
+    expect(imageClasses.has('reader-image-pending')).toBe(false)
+    expect(imageClasses.has('reader-image-block')).toBe(false)
+    expect(style.aspectRatio).toBeUndefined()
+    expect(style.height).toBe('auto')
+    expect(style.minHeight).toBeUndefined()
+    // 横向分页器会写 max-height 限制长图高度, 加载结算不能把它删掉。
+    expect(style.maxHeight).toBe('720px')
+  })
+
+  it('does not settle an image before natural dimensions are available', () => {
+    const { image, imageClasses, style } = loadedImage()
+    image.naturalWidth = 0
+    image.naturalHeight = 0
+
+    expect(settleReaderImageLayout(image as unknown as HTMLImageElement)).toBe(false)
+    expect(imageClasses.has('reader-image-pending')).toBe(true)
+    expect(style.aspectRatio).toBe('16 / 9')
+  })
+
+  it('does not touch a source-sized image that was never marked as a block illustration', () => {
+    const { image, imageClasses, style } = loadedImage([])
+
+    expect(settleReaderImageLayout(image as unknown as HTMLImageElement)).toBe(false)
+    expect(imageClasses.size).toBe(0)
+    expect(style.aspectRatio).toBe('16 / 9')
   })
 })
 

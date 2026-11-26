@@ -769,6 +769,18 @@ impl LocalPdfBookService {
         file_name: &str,
         bytes: &[u8],
     ) -> Result<Book, AppError> {
+        self.import_pdf_book_with_identity(user_ns, file_name, None, bytes)
+            .await
+    }
+
+    /// 文件夹导入时用相对路径参与标识，避免不同子目录的同名文件互相覆盖。
+    pub async fn import_pdf_book_with_identity(
+        &self,
+        user_ns: &str,
+        file_name: &str,
+        identity: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<Book, AppError> {
         validate_pdf_upload(file_name, bytes.len())?;
         let safe_file_name = sanitize_pdf_file_name(file_name);
 
@@ -798,12 +810,14 @@ impl LocalPdfBookService {
         }
 
         // hash 基于文件字节: 同一文件重复导入幂等覆盖
-        let hash = md5_hex(&format!(
-            "{}:{}:{}",
-            user_ns,
-            safe_file_name,
-            md5_hex_bytes(bytes)
-        ));
+        let content_hash = md5_hex_bytes(bytes);
+        let hash = match identity {
+            Some(identity) => md5_hex(&format!(
+                "{}:{}:{}:{}",
+                user_ns, identity, safe_file_name, content_hash
+            )),
+            None => md5_hex(&format!("{}:{}:{}", user_ns, safe_file_name, content_hash)),
+        };
         let book_url = format!("{}:{}", LOCAL_PDF_ORIGIN, hash);
         let chapters = renumber_chapters(
             &book_url,

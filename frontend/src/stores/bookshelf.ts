@@ -11,6 +11,7 @@ import {
   saveBookGroupOrder as apiSaveBookGroupOrder,
   deleteBookGroups as apiDeleteBookGroups,
   saveBooks as apiSaveBooks,
+  setBooksGroupMask as apiSetBooksGroupMask,
 } from '../api/bookshelf'
 import type { Book, BookGroup, SearchBook } from '../types'
 import { clearGroupsFromBook } from '../utils/bookGroupBits'
@@ -254,10 +255,11 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     await fetchGroups()
   }
 
-  async function fetchGroups() {
+  async function fetchGroups(options: { preserveOnError?: boolean } = {}) {
     try {
       groups.value = await getBookGroups()
-    } catch {
+    } catch (error) {
+      if (options.preserveOnError) throw error
       groups.value = []
     }
     // 当前选中的分组若已不在标签栏(被删掉, 或本身就是不展示的 Legado 虚拟分组
@@ -275,14 +277,19 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     // 记住刷新前的 id 集 —— 新建后列表里**多出来的**那个才是本次分配的 id。
     // 不能按名字找: 后端不查重名, 同名时 find 命中的是旧分组, 勾选会挂错。
     const knownIds = new Set(groups.value.map((group) => group.groupId))
-    await apiSaveBookGroup({
-      groupId,
-      groupName,
-      orderNo: groupId === 0
-        ? Math.max(-1, ...groups.value.map((group) => group.orderNo ?? 0)) + 1
-        : groups.value.find((group) => group.groupId === groupId)?.orderNo ?? 0,
-    })
-    await fetchGroups()
+    try {
+      await apiSaveBookGroup({
+        groupId,
+        groupName,
+        orderNo: groupId === 0
+          ? Math.max(-1, ...groups.value.map((group) => group.orderNo ?? 0)) + 1
+          : groups.value.find((group) => group.groupId === groupId)?.orderNo ?? 0,
+      })
+      await fetchGroups({ preserveOnError: true })
+    } catch (error) {
+      await fetchGroups().catch(() => undefined)
+      throw error
+    }
     if (groupId !== 0) return groupId
     return groups.value.find((group) => !knownIds.has(group.groupId))?.groupId ?? 0
   }
@@ -477,7 +484,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
    *
    *  mask 直接是「这些书最终属于哪些分组」的位域: 老位全部失效, 新位以它
    *  为准 —— 勾选即加入、取消勾选即移出(issue #9: 此前完全没有移出入口)。
-   *  用 saveBooks 整表覆盖一次, 避免逐本 N 个 IPC 往返。
+   *  后端在书架写锁内只改目标书，避免用前端快照整表覆盖。
    *
    *  与 setBookGroup/bulkSetGroup 的「赋值语义」不同, 本方法支持一本书同时
    *  属于多个分组(Legado 位域原生语义), 也就是编辑器里勾选多个分组。 */
@@ -489,7 +496,10 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     ))
     books.value = next
     try {
-      await apiSaveBooks(next)
+      const result = await apiSetBooksGroupMask(bookUrls, mask)
+      if (result.updated !== bookUrls.length) {
+        throw new Error(`有 ${bookUrls.length - result.updated} 本书未写入分组`)
+      }
     } catch (error) {
       // 落盘失败必须回滚内存, 理由同 removeGroups 的注释。
       books.value = snapshot

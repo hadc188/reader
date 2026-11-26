@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { readerOrigin } from './scheme'
 import { get, invokeEnvelope } from './invoke'
-import { getBookshelfWithCacheInfo, getCoverUrl } from './bookshelf'
+import {
+  getBookshelfWithCacheInfo,
+  getCoverUrl,
+  importLocalBookFolder,
+} from './bookshelf'
 
 // bookshelf.ts 依赖 invoke 层, 这里只测纯函数 getCoverUrl, 不需要真的发请求。
 vi.mock('./invoke', () => ({
@@ -98,5 +102,17 @@ describe('getBookshelfWithCacheInfo', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('importLocalBookFolder', () => {
+  it('passes the selected folder path through the Tauri command envelope', async () => {
+    vi.mocked(invokeEnvelope).mockResolvedValueOnce([])
+
+    await importLocalBookFolder('/books/武侠')
+
+    expect(invokeEnvelope).toHaveBeenCalledWith('import_local_book_folder', {
+      path: '/books/武侠',
+    })
   })
 })

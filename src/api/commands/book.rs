@@ -17,12 +17,14 @@ use futures::StreamExt;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use tokio::task::JoinSet;
+use tokio::fs;
 
 const MAX_AVAILABLE_RESULT_LIMIT: usize = 100;
 const DEFAULT_AVAILABLE_CONCURRENT_COUNT: usize = 16;
@@ -1386,6 +1388,234 @@ pub async fn upload_pdf_book(
     Ok(ApiResponse::ok(
         serde_json::to_value(saved).unwrap_or_default(),
     ))
+}
+
+struct LocalBookFolderEntry {
+    path: PathBuf,
+    relative: String,
+}
+
+async fn collect_local_book_folder_entries(
+    root: &Path,
+) -> Result<Vec<LocalBookFolderEntry>, AppError> {
+    let mut dirs = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    let mut visited_dirs = HashSet::new();
+    while let Some(dir) = dirs.pop() {
+        let visit_key = fs::canonicalize(&dir)
+            .await
+            .unwrap_or_else(|_| dir.clone());
+        if !visited_dirs.insert(visit_key) {
+            continue;
+        }
+        let mut entries = match fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(error) if dir == root => return Err(AppError::Internal(error.into())),
+            Err(_) => continue,
+        };
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) | Err(_) => break,
+            };
+            let file_type = match entry.file_type().await {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                dirs.push(entry.path());
+                continue;
+            }
+            if !file_type.is_file() || local_book_extension(&entry.path()).is_none() {
+                continue;
+            }
+            if files.len() >= MAX_LOCAL_BOOK_FOLDER_FILES {
+                return Err(AppError::BadRequest(format!(
+                    "文件夹内可导入文件超过 {MAX_LOCAL_BOOK_FOLDER_FILES} 个"
+                )));
+            }
+            let relative = relative_local_book_path(root, &entry.path())
+                .ok_or_else(|| AppError::BadRequest("文件路径包含非 UTF-8 字符".to_string()))?;
+            files.push(LocalBookFolderEntry {
+                path: entry.path(),
+                relative,
+            });
+        }
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+const MAX_LOCAL_BOOK_FOLDER_FILES: usize = 5_000;
+
+fn relative_local_book_path(root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .map(|parts| parts.join("/"))
+}
+
+#[cfg(test)]
+mod local_book_folder_tests {
+    use super::{local_book_extension, relative_local_book_path};
+    use std::path::Path;
+
+    #[test]
+    fn relative_identity_keeps_subdirectory_in_stable_form() {
+        let root = Path::new("/library");
+        let file = Path::new("/library/作者/小说.txt");
+        assert_eq!(
+            relative_local_book_path(root, file).as_deref(),
+            Some("作者/小说.txt")
+        );
+    }
+
+    #[test]
+    fn folder_listing_accepts_supported_extensions_case_insensitively() {
+        assert_eq!(local_book_extension(Path::new("book.TXT")), Some("txt"));
+        assert_eq!(local_book_extension(Path::new("book.ePub")), Some("epub"));
+        assert_eq!(local_book_extension(Path::new("book.pdf")), Some("pdf"));
+        assert_eq!(local_book_extension(Path::new("book.md")), None);
+    }
+}
+
+fn local_book_extension(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("txt") => Some("txt"),
+        Some("epub") => Some("epub"),
+        Some("pdf") => Some("pdf"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportLocalBookFolderFile {
+    path: String,
+    book: Option<Book>,
+    error: Option<String>,
+}
+
+/// 桌面端一次导入整个文件夹。
+///
+/// 列表与导入在同一命令内完成，前端不能伪造清单里的相对路径，也不会把
+/// 同一目录重复枚举后再导入。单个文件失败不阻断后续文件。
+#[tauri::command]
+pub async fn import_local_book_folder(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<ApiResponse<Vec<ImportLocalBookFolderFile>>, AppError> {
+    let user_ns = "default";
+    let root = PathBuf::from(path);
+    if !root.is_dir() {
+        return Err(AppError::BadRequest("所选路径不是文件夹".to_string()));
+    }
+    let files = collect_local_book_folder_entries(&root).await?;
+    if files.is_empty() {
+        return Err(AppError::BadRequest(
+            "所选文件夹中没有 TXT、EPUB 或 PDF 文件".to_string(),
+        ));
+    }
+
+    let mut results = Vec::with_capacity(files.len());
+    for file in files {
+        let path = file.relative.clone();
+        let result = import_local_book_from_path(
+            &state,
+            &user_ns,
+            &file.path,
+            Some(&file.relative),
+        )
+        .await;
+        match result {
+            Ok(book) => results.push(ImportLocalBookFolderFile {
+                path,
+                book: Some(book),
+                error: None,
+            }),
+            Err(error) => results.push(ImportLocalBookFolderFile {
+                path,
+                book: None,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+    Ok(ApiResponse::ok(results))
+}
+
+async fn import_local_book_from_path(
+    state: &AppState,
+    user_ns: &str,
+    path: &Path,
+    identity: Option<&str>,
+) -> Result<Book, AppError> {
+    let extension = local_book_extension(&path)
+        .ok_or_else(|| AppError::BadRequest("只支持导入 TXT、EPUB 或 PDF 文件".to_string()))?;
+    let limit = match extension {
+        "txt" => MAX_TXT_UPLOAD_BYTES,
+        "epub" => MAX_EPUB_UPLOAD_BYTES,
+        "pdf" => MAX_PDF_UPLOAD_BYTES,
+        _ => unreachable!(),
+    };
+    let size = fs::metadata(&path)
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?
+        .len();
+    if size > limit as u64 {
+        return Err(AppError::BadRequest(format!(
+            "{} 文件不能超过 {}MB",
+            extension.to_ascii_uppercase(),
+            limit / 1024 / 1024
+        )));
+    }
+    let bytes = fs::read(&path)
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    if bytes.len() > limit {
+        return Err(AppError::BadRequest(format!(
+            "{} 文件不能超过 {}MB",
+            extension.to_ascii_uppercase(),
+            limit / 1024 / 1024
+        )));
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::BadRequest("文件名无效".to_string()))?;
+    let parsed = match extension {
+        "txt" => state
+            .local_txt_book_service
+            .import_txt_book_with_identity(user_ns, file_name, identity, &bytes)
+            .await,
+        "epub" => state
+            .local_epub_book_service
+            .import_epub_book_with_identity(user_ns, file_name, identity, &bytes)
+            .await,
+        "pdf" => state
+            .local_pdf_book_service
+            .import_pdf_book_with_identity(user_ns, file_name, identity, &bytes)
+            .await,
+        _ => unreachable!(),
+    };
+    let book = match parsed {
+        Ok(book) => book,
+        Err(error) => return Err(error),
+    };
+    let parsed_book = book.clone();
+    match state.book_service.save_book(user_ns, book).await {
+        Ok(saved) => Ok(saved),
+        Err(error) => {
+            cleanup_local_book_files(state, user_ns, std::slice::from_ref(&parsed_book)).await;
+            Err(error)
+        }
+    }
 }
 
 /// `save_book` 的共享实现 (Tauri command 与 Web HTTP handler 共用)。

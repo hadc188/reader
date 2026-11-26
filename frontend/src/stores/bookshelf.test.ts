@@ -4,8 +4,10 @@ import { useBookshelfStore } from './bookshelf'
 import {
   getBookshelfWithCacheInfo,
   getBookGroups,
+  saveBookGroup,
   saveBookGroupOrder,
   saveBooks,
+  setBooksGroupMask,
 } from '../api/bookshelf'
 
 vi.mock('../api/bookshelf', () => ({
@@ -18,6 +20,7 @@ vi.mock('../api/bookshelf', () => ({
   saveBookGroupOrder: vi.fn(),
   deleteBookGroup: vi.fn(),
   saveBooks: vi.fn(),
+  setBooksGroupMask: vi.fn(),
 }))
 
 vi.mock('../utils/recentBooks', () => ({
@@ -32,6 +35,7 @@ describe('bookshelf search state', () => {
     setActivePinia(createPinia())
     vi.mocked(getBookshelfWithCacheInfo).mockResolvedValue([])
     vi.mocked(saveBooks).mockResolvedValue([] as never)
+    vi.mocked(setBooksGroupMask).mockResolvedValue({ updated: 0, changed: false, groupMask: 0 })
   })
 
   it('starts searches in all-sources scope by default', () => {
@@ -100,7 +104,7 @@ describe('setBooksGroupMask (勾选式分组编辑器落盘)', () => {
         group: 2,
       },
     ] as never)
-    vi.mocked(saveBooks).mockResolvedValue([] as never)
+    vi.mocked(setBooksGroupMask).mockResolvedValue({ updated: 1, changed: true, groupMask: 5 })
   })
 
   it('把目标书的位域整体替换为掩码(勾选=加入, 取消勾选=移出)', async () => {
@@ -110,10 +114,7 @@ describe('setBooksGroupMask (勾选式分组编辑器落盘)', () => {
     // 书A 从分组 1 移到分组 1|4(同时属于两个分组), 书B 不动。
     await store.setBooksGroupMask(['book:a'], 1 | 4)
 
-    expect(saveBooks).toHaveBeenCalled()
-    const saved = lastSavedBooks()
-    expect(saved.find((b) => b.bookUrl === 'book:a')?.group).toBe(5)
-    expect(saved.find((b) => b.bookUrl === 'book:b')?.group).toBe(2)
+    expect(setBooksGroupMask).toHaveBeenCalledWith(['book:a'], 5)
     // 内存同步更新, 不等全量刷新
     expect(store.books.find((b) => b.bookUrl === 'book:a')?.group).toBe(5)
   })
@@ -124,14 +125,14 @@ describe('setBooksGroupMask (勾选式分组编辑器落盘)', () => {
 
     await store.setBooksGroupMask(['book:a'], 0)
 
-    const saved = lastSavedBooks()
-    expect(saved.find((b) => b.bookUrl === 'book:a')?.group).toBe(0)
+    expect(setBooksGroupMask).toHaveBeenCalledWith(['book:a'], 0)
+    expect(store.books.find((b) => b.bookUrl === 'book:a')?.group).toBe(0)
   })
 
   it('落盘失败时回滚内存, 不留脏快照', async () => {
     const store = useBookshelfStore()
     await store.fetchBooks()
-    vi.mocked(saveBooks).mockRejectedValueOnce(new Error('boom'))
+    vi.mocked(setBooksGroupMask).mockRejectedValueOnce(new Error('boom'))
 
     await expect(store.setBooksGroupMask(['book:a'], 8)).rejects.toThrow('boom')
     // 回滚: 内存里书 A 仍在分组 1
@@ -208,6 +209,21 @@ describe('displayGroups (书架分组标签)', () => {
     await store.fetchGroups()
 
     expect(store.displayGroups.map((g) => g.groupName)).toEqual(['全部', '玄幻', '都市', '仙侠', '未分组'])
+  })
+})
+
+describe('saveGroup (创建分组后的刷新失败)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(getBookGroups).mockResolvedValue([])
+    vi.mocked(saveBookGroup).mockResolvedValue('success')
+  })
+
+  it('创建成功后刷新失败不显示成功', async () => {
+    const store = useBookshelfStore()
+    vi.mocked(getBookGroups).mockRejectedValueOnce(new Error('refresh failed'))
+
+    await expect(store.saveGroup('新分组')).rejects.toThrow('refresh failed')
   })
 })
 

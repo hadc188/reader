@@ -3423,6 +3423,26 @@ impl BookService {
         Ok(normalized)
     }
 
+    /// 在书架写锁内做一次读-改-写。
+    ///
+    /// 批量本地书导入只需要给目标书写分组。若仍让前端拿整份书架调用
+    /// `save_books`, 导入期间另一个窗口的进度或排序就可能被旧快照覆盖。
+    pub async fn update_books_in_place<F>(
+        &self,
+        user_ns: &str,
+        update: F,
+    ) -> Result<(), AppError>
+    where
+        F: FnOnce(&mut Vec<Book>) -> Result<bool, AppError>,
+    {
+        let _write_guard = self.bookshelf_write_lock.lock().await;
+        let mut list = self.read_bookshelf(user_ns).await?;
+        if update(&mut list)? {
+            self.write_bookshelf(user_ns, &list).await?;
+        }
+        Ok(())
+    }
+
     /// 封面地址带时效签名时会过期，过期后回源 403、且书架只存旧地址。
     /// 取到新地址的图之后，把书架里的 `cover_url` 换成新地址；只改这一条，
     /// 避免整份 `Book` 回写覆盖掉别处刚写入的进度或自定义封面。

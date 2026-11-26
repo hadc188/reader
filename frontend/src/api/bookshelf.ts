@@ -58,6 +58,17 @@ export async function uploadPdfBook(file: File) {
   return invokeUpload<Book>('upload_pdf_book', { [FILE_NAME_HEADER]: encodeFileName(file.name) }, file)
 }
 
+export interface LocalBookFolderImportFile {
+  path: string
+  book: Book | null
+  error: string | null
+}
+
+/** 桌面端一次导入文件夹。Rust 内部完成枚举、读取与解析，避免大文件经 WebView。 */
+export function importLocalBookFolder(path: string) {
+  return invokeEnvelope<LocalBookFolderImportFile[]>('import_local_book_folder', { path })
+}
+
 export function deleteBook(book: Partial<Book>) {
   return post<string>('/deleteBook', book).then((r) => r.data)
 }
@@ -172,6 +183,14 @@ export function deleteBookGroups(groupIds: number[]) {
 
 export function saveBookGroupId(bookUrl: string, groupId: number) {
   return post<string>('/saveBookGroupId', { bookUrl, groupId }).then((r) => r.data)
+}
+
+/** 只更新目标书的位域，后端在写锁内读改写，不会覆盖整份书架快照。 */
+export function setBooksGroupMask(bookUrls: string[], groupMask: number) {
+  return post<{ updated: number; changed: boolean; groupMask: number }>(
+    '/setBooksGroupMask',
+    { bookUrls, groupMask },
+  ).then((r) => r.data)
 }
 
 export function setBookSource(params: {

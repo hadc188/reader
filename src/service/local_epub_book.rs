@@ -233,9 +233,27 @@ impl LocalEpubBookService {
         file_name: &str,
         bytes: &[u8],
     ) -> Result<Book, AppError> {
+        self.import_epub_book_with_identity(user_ns, file_name, None, bytes)
+            .await
+    }
+
+    /// 文件夹导入时用相对路径参与标识，避免不同子目录的同名文件互相覆盖。
+    pub async fn import_epub_book_with_identity(
+        &self,
+        user_ns: &str,
+        file_name: &str,
+        identity: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<Book, AppError> {
         validate_epub_upload(file_name, bytes.len())?;
         let safe_file_name = sanitize_epub_file_name(file_name);
-        let hash = md5_bytes_hex(format!("{}:{}:", user_ns, safe_file_name).as_bytes(), bytes);
+        let hash = match identity {
+            Some(identity) => md5_bytes_hex(
+                format!("{}:{}:{}:", user_ns, identity, safe_file_name).as_bytes(),
+                bytes,
+            ),
+            None => md5_bytes_hex(format!("{}:{}:", user_ns, safe_file_name).as_bytes(), bytes),
+        };
         let book_url = format!("{}:{}", LOCAL_EPUB_ORIGIN, hash);
         let book_dir = self.book_dir(user_ns, &book_url)?;
 

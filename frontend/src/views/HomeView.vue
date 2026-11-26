@@ -31,7 +31,14 @@
               <span class="shelf-btn-label">取消全选</span>
             </button>
           </template>
-          <button class="shelf-btn" type="button" title="导入本地书" aria-label="导入本地书" @click="triggerLocalBookUpload" :disabled="localBookUploading">
+          <button
+            class="shelf-btn"
+            type="button"
+            title="导入本地"
+            aria-label="导入本地"
+            @click="openLocalBookImport"
+            :disabled="localBookUploading"
+          >
             <svg v-if="!localBookUploading" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M12 3v12" />
               <path d="m7 8 5-5 5 5" />
@@ -41,7 +48,7 @@
               <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
               <path d="M3 3v5h5" />
             </svg>
-            <span class="shelf-btn-label">{{ localBookUploading ? '导入中' : '导入本地书' }}</span>
+            <span class="shelf-btn-label">{{ localBookUploading ? '导入中' : '导入本地' }}</span>
           </button>
           <!-- 导出走桌面文件对话框(save dialog + 本地路径), 浏览器里没有等价能力。 -->
           <button
@@ -120,10 +127,10 @@
         ref="localBookFileInputRef"
         type="file"
         accept=".txt,.epub,.pdf,text/plain,application/epub+zip,application/pdf"
+        multiple
         class="hidden-input"
         @change="handleLocalBookFileChange"
       />
-
       <!-- Group Tabs -->
       <div class="group-tabs">
         <button
@@ -320,6 +327,115 @@
       :submitting="groupSaving"
       @confirm="handleGroupConfirm"
     />
+    <div v-if="showLocalBookImport" class="modal-overlay" @click.self="closeLocalBookImport">
+      <div class="modal-content local-import-modal">
+        <div class="modal-header">
+          <h3>导入本地书</h3>
+          <button
+            class="close-btn"
+            type="button"
+            aria-label="关闭"
+            :disabled="localBookUploading || creatingLocalBookGroup"
+            @click="closeLocalBookImport"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="import-choice">
+            <button
+              class="import-choice-btn"
+              type="button"
+              :disabled="localBookUploading || creatingLocalBookGroup"
+              @click="chooseLocalBookFiles"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+                <path d="M14 2v6h6" />
+              </svg>
+              <span>{{ appStore.isWebMode ? '选择文件' : '多选文件' }}</span>
+            </button>
+            <button
+              v-if="isTauriRuntime()"
+              class="import-choice-btn"
+              type="button"
+              :disabled="localBookUploading || creatingLocalBookGroup"
+              @click="chooseLocalBookFolder"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 7a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+                <path d="M12 11v5M9 14h6" />
+              </svg>
+              <span>选择文件夹</span>
+            </button>
+          </div>
+          <div v-if="!appStore.isWebMode" class="import-group">
+            <span class="import-label">分组</span>
+            <div class="import-group-list">
+              <label
+                v-for="group in shelfStore.visibleGroups"
+                :key="group.groupId"
+                class="import-group-item"
+                :class="{ disabled: localBookUploading || creatingLocalBookGroup }"
+              >
+                <input
+                  v-model="localBookGroupIds"
+                  type="checkbox"
+                  :value="group.groupId"
+                  :disabled="localBookUploading || creatingLocalBookGroup"
+                />
+                <span>{{ group.groupName }}</span>
+              </label>
+              <p v-if="!shelfStore.visibleGroups.length" class="empty-group-hint">暂无分组</p>
+            </div>
+            <button
+              v-if="!showNewLocalBookGroup"
+              class="new-group-trigger"
+              type="button"
+              :disabled="localBookUploading || creatingLocalBookGroup"
+              @click="showNewLocalBookGroup = true"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              新建分组
+            </button>
+            <div v-else class="new-group-row">
+              <input
+                v-model.trim="newLocalBookGroupName"
+                class="new-group-input"
+                placeholder="分组名称"
+                :disabled="localBookUploading || creatingLocalBookGroup"
+                @keyup.enter="createLocalBookGroup"
+              />
+              <button
+                class="new-group-save"
+                type="button"
+                :disabled="!newLocalBookGroupName || creatingLocalBookGroup || localBookUploading"
+                @click="createLocalBookGroup"
+              >
+                {{ creatingLocalBookGroup ? '创建中' : '创建' }}
+              </button>
+            </div>
+          </div>
+          <div v-if="localBookImportProgress" class="import-progress" role="status" aria-live="polite">
+            <div class="progress-track">
+              <div class="progress-fill" :style="{ width: `${localBookImportProgress.percent}%` }"></div>
+            </div>
+            <span>{{ localBookImportProgress.text }}</span>
+          </div>
+          <p v-if="localBookImportSummary" class="import-summary">{{ localBookImportSummary }}</p>
+        </div>
+        <div class="modal-footer">
+          <span class="import-hint">{{ appStore.isWebMode ? '支持 TXT、EPUB 和 PDF' : '支持 TXT、EPUB、PDF 及子文件夹' }}</span>
+          <button class="cancel-btn" type="button" :disabled="localBookUploading || creatingLocalBookGroup" @click="closeLocalBookImport">
+            {{ localBookImportSummary ? '关闭' : '取消' }}
+          </button>
+        </div>
+      </div>
+    </div>
     <GroupManagerModal v-model="showGroupManager" />
 
     <CacheLibraryModal v-model="showCacheManager" />
@@ -330,10 +446,18 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
-import { uploadEpubBook, uploadPdfBook, uploadTxtBook } from '../api/bookshelf'
+import {
+  importLocalBookFolder,
+  uploadEpubBook,
+  uploadPdfBook,
+  uploadTxtBook,
+  type LocalBookFolderImportFile,
+} from '../api/bookshelf'
+import { isTauriRuntime } from '../api/transport'
 import BookGrid from '../components/BookGrid.vue'
 import BookDetailModal from '../components/BookDetailModal.vue'
 import GroupSelectModal from '../components/bookshelf/GroupSelectModal.vue'
@@ -344,6 +468,7 @@ import ExportBookModal from '../components/ExportBookModal.vue'
 import { showContextMenu, type MenuItem } from '../composables/useContextMenu'
 import { BOOK_SORT_KEYS, BOOK_SORT_OPTIONS, bookSortLabel } from '../utils/bookshelfSort'
 import { filterShelfBooks } from '../utils/bookshelfFilter'
+import { groupMask as groupMaskFromIds } from '../utils/bookGroupBits'
 import { useGroupDragSort } from '../composables/useGroupDragSort'
 import type { Book, BookGroup, SearchBook } from '../types'
 
@@ -452,6 +577,18 @@ watch(showDetail, (visible) => {
 const openingBookUrl = ref('')
 const localBookFileInputRef = ref<HTMLInputElement | null>(null)
 const localBookUploading = ref(false)
+const showLocalBookImport = ref(false)
+const localBookGroupIds = ref<number[]>([])
+const showNewLocalBookGroup = ref(false)
+const newLocalBookGroupName = ref('')
+const creatingLocalBookGroup = ref(false)
+const localBookImportProgress = ref<{
+  current: number
+  total: number
+  percent: number
+  text: string
+} | null>(null)
+const localBookImportSummary = ref('')
 
 /** 分组编辑器的目标书: 右键单本时是那一本, 批量时是所有选中书。
  *
@@ -487,38 +624,359 @@ onMounted(async () => {
   }
 })
 
-function triggerLocalBookUpload() {
-  if (localBookUploading.value) return
+function closeLocalBookImport() {
+  if (localBookUploading.value || creatingLocalBookGroup.value) return
+  closeLocalBookImportAfterUpload()
+}
+
+function chooseLocalBookFiles() {
+  if (localBookUploading.value || creatingLocalBookGroup.value) return
   localBookFileInputRef.value?.click()
+}
+
+function chooseLocalBookFolder() {
+  if (localBookUploading.value || creatingLocalBookGroup.value) return
+  if (!isTauriRuntime()) {
+    appStore.showToast('文件夹导入仅支持桌面应用', 'warning')
+    return
+  }
+  void chooseLocalBookFolderDesktop()
+}
+
+async function chooseLocalBookFolderDesktop() {
+  if (localBookUploading.value || creatingLocalBookGroup.value) return
+  let selected: string | string[] | null
+  try {
+    selected = await openDialog({
+      directory: true,
+      multiple: true,
+      title: '选择本地书文件夹',
+    })
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '打开文件夹失败', 'error')
+    return
+  }
+  const folders = Array.isArray(selected) ? selected : selected ? [selected] : []
+  if (!folders.length) return
+  await importLocalBookFolders(folders)
+}
+
+async function createLocalBookGroup() {
+  if (appStore.isWebMode) return
+  const name = newLocalBookGroupName.value.trim()
+  if (!name || creatingLocalBookGroup.value || localBookUploading.value) return
+  creatingLocalBookGroup.value = true
+  try {
+    const groupId = await shelfStore.saveGroup(name)
+    if (!showLocalBookImport.value) {
+      appStore.showToast('分组已在后台创建', 'success')
+      return
+    }
+    if (!groupId) {
+      appStore.showToast('分组已创建，但未能自动勾选', 'warning')
+      return
+    }
+    if (!localBookGroupIds.value.includes(groupId)) {
+      localBookGroupIds.value = [...localBookGroupIds.value, groupId]
+    }
+    newLocalBookGroupName.value = ''
+    showNewLocalBookGroup.value = false
+    appStore.showToast('分组已创建', 'success')
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '创建分组失败', 'error')
+  } finally {
+    creatingLocalBookGroup.value = false
+  }
 }
 
 async function handleLocalBookFileChange(event: Event) {
   const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
+  const selectedFiles = Array.from(input.files ?? [])
   input.value = ''
-  if (!file) return
+  if (!selectedFiles.length) return
+  const supported = selectedFiles.filter((file) => isSupportedLocalBookName(file.name))
+  if (!supported.length) {
+    appStore.showToast('所选内容中没有 TXT、EPUB 或 PDF 文件', 'warning')
+    return
+  }
+  await runLocalBookImport(
+    supported.map((file) => ({
+      name: file.name,
+      load: () => uploadLocalBookFile(file),
+    })),
+    selectedFiles.length - supported.length,
+  )
+}
 
+function isSupportedLocalBookName(name: string) {
+  const lowerName = name.toLowerCase()
+  return lowerName.endsWith('.txt') || lowerName.endsWith('.epub') || lowerName.endsWith('.pdf')
+}
+
+function uploadLocalBookFile(file: File) {
   const lowerName = file.name.toLowerCase()
-  if (!lowerName.endsWith('.txt') && !lowerName.endsWith('.epub') && !lowerName.endsWith('.pdf')) {
-    appStore.showToast('只支持导入 .txt、.epub 或 .pdf 文件', 'warning')
+  return lowerName.endsWith('.epub')
+    ? uploadEpubBook(file)
+    : lowerName.endsWith('.pdf')
+      ? uploadPdfBook(file)
+      : uploadTxtBook(file)
+}
+
+async function importLocalBookFolders(folders: string[]) {
+  localBookImportSummary.value = ''
+  const groupMask = groupMaskFromIds(localBookGroupIds.value)
+  const groupSelectionLocked = !appStore.isWebMode && groupMask > 0
+  const failed: Array<{ name: string; reason: string }> = []
+  const importedUrls: string[] = []
+  let importedCount = 0
+  let groupError = ''
+  let refreshError = false
+  localBookUploading.value = true
+  localBookImportProgress.value = {
+    current: 0,
+    total: folders.length,
+    percent: 0,
+    text: '正在扫描文件夹',
+  }
+  try {
+    const results: LocalBookFolderImportFile[] = []
+    for (const [index, folder] of folders.entries()) {
+      try {
+        results.push(...await importLocalBookFolder(folder))
+      } catch (e: unknown) {
+        failed.push({ name: folder, reason: (e as Error).message || '导入失败' })
+      }
+      localBookImportProgress.value = {
+        current: index + 1,
+        total: folders.length,
+        percent: Math.round(((index + 1) / folders.length) * 100),
+        text: `已处理 ${index + 1}/${folders.length} 个文件夹`,
+      }
+    }
+    let duplicateResults = 0
+    const seen = new Set<string>()
+    for (const result of results) {
+      if (result.book && !seen.has(result.book.bookUrl)) {
+        seen.add(result.book.bookUrl)
+        importedUrls.push(result.book.bookUrl)
+        importedCount += 1
+      } else if (result.book) {
+        duplicateResults += 1
+      }
+      if (result.error) failed.push({ name: result.path, reason: result.error })
+      if (!result.book && !result.error) {
+        failed.push({ name: result.path, reason: '导入结果缺失' })
+      }
+    }
+    if ((failed.length || duplicateResults) && !importedUrls.length) {
+      localBookImportSummary.value = [
+        `导入 0 本`,
+        failed.length ? `失败 ${failed.length} 本` : '',
+        failed.slice(0, 3).map((item) => `${item.name}: ${item.reason}`).join('，'),
+        duplicateResults ? `重复 ${duplicateResults} 本` : '',
+      ].filter(Boolean).join('，')
+      appStore.showToast(localBookImportSummary.value, 'warning')
+      return
+    }
+    if (importedUrls.length) {
+      const finished = await finishLocalBookImport(
+        importedUrls,
+        groupMask,
+        duplicateResults,
+        groupSelectionLocked,
+      )
+      if (finished.outcome === 'refresh-error') refreshError = true
+      else if (finished.outcome === 'missing') groupError = `NEW_BOOKS_MISSING:${importedUrls.length}`
+      else if (finished.outcome === 'duplicate') groupError = `DUPLICATE_RESULTS:${duplicateResults}`
+      else if (finished.outcome === 'group-error') groupError = finished.failure || '未知错误'
+    }
+    completeLocalBookImport(
+      importedCount,
+      failed,
+      0,
+      groupError,
+      refreshError,
+      groupSelectionLocked,
+    )
+  } finally {
+    localBookUploading.value = false
+    localBookImportProgress.value = null
+  }
+}
+
+async function runLocalBookImport(
+  files: Array<{ name: string; load: () => Promise<Book> }>,
+  ignoredFiles: number,
+) {
+  if (!files.length) return
+  localBookImportSummary.value = ''
+  const groupMask = groupMaskFromIds(localBookGroupIds.value)
+  const groupSelectionLocked = !appStore.isWebMode && groupMask > 0
+  const failed: Array<{ name: string; reason: string }> = []
+  let importedCount = 0
+  const importedUrls: string[] = []
+  let groupError = ''
+  let refreshError = false
+  localBookUploading.value = true
+  localBookImportProgress.value = {
+    current: 0,
+    total: files.length,
+    percent: 0,
+    text: `准备导入 ${files.length} 本`,
+  }
+  try {
+    for (const [index, file] of files.entries()) {
+      localBookImportProgress.value = {
+        current: index + 1,
+        total: files.length,
+        percent: Math.round((index / files.length) * 100),
+        text: `正在导入 ${index + 1}/${files.length} ${file.name}`,
+      }
+      try {
+        const book = await file.load()
+        importedCount += 1
+        importedUrls.push(book.bookUrl)
+      } catch (e: unknown) {
+        failed.push({ name: file.name, reason: (e as Error).message || '导入失败' })
+      }
+      localBookImportProgress.value = {
+        current: index + 1,
+        total: files.length,
+        percent: Math.round(((index + 1) / files.length) * 100),
+        text: `已处理 ${index + 1}/${files.length}`,
+      }
+    }
+
+    if (importedUrls.length) {
+      const finished = await finishLocalBookImport(
+        importedUrls,
+        groupMask,
+        0,
+        groupSelectionLocked,
+      )
+      if (finished.outcome === 'refresh-error') refreshError = true
+      else if (finished.outcome === 'missing') groupError = `NEW_BOOKS_MISSING:${importedUrls.length}`
+      else if (finished.outcome === 'group-error') groupError = finished.failure || '未知错误'
+    }
+    completeLocalBookImport(
+      importedCount,
+      failed,
+      ignoredFiles,
+      groupError,
+      refreshError,
+      groupSelectionLocked,
+    )
+  } finally {
+    localBookUploading.value = false
+    localBookImportProgress.value = null
+  }
+}
+
+type LocalBookImportOutcome = 'applied' | 'refresh-error' | 'missing' | 'duplicate' | 'group-error'
+
+async function finishLocalBookImport(
+  importedUrls: string[],
+  groupMask: number,
+  duplicateCount: number,
+  requiresGroup: boolean,
+): Promise<{ outcome: LocalBookImportOutcome; failure?: string }> {
+  let outcome: LocalBookImportOutcome = 'applied'
+  let failure = ''
+  try {
+    await shelfStore.fetchBooks()
+  } catch {
+    return { outcome: 'refresh-error' }
+  }
+  const missing = importedUrls.filter((url) => (
+    !shelfStore.books.some((book) => book.bookUrl === url)
+  )).length
+  if (missing) outcome = 'missing'
+  else if (duplicateCount > 0) outcome = 'duplicate'
+  if (!missing && requiresGroup && !appStore.isWebMode) {
+    try {
+      await shelfStore.setBooksGroupMask(importedUrls, groupMask)
+    } catch (e: unknown) {
+      outcome = 'group-error'
+      failure = (e as Error).message || '未知错误'
+    }
+  }
+  return { outcome, failure }
+}
+
+function completeLocalBookImport(
+  importedCount: number,
+  failed: Array<{ name: string; reason: string }>,
+  ignoredFiles: number,
+  groupError: string,
+  refreshError: boolean,
+  requiresGroups: boolean,
+) {
+  const failedFiles = failed.filter((item) => item.name !== '分组')
+  const allApplied = !failedFiles.length && !refreshError && !groupError
+  if (allApplied) {
+    appStore.showToast(
+      ignoredFiles
+        ? `已导入 ${importedCount} 本，跳过 ${ignoredFiles} 个不支持的文件`
+        : `已导入 ${importedCount} 本`,
+      ignoredFiles ? 'warning' : 'success',
+    )
+    closeLocalBookImportAfterUpload()
     return
   }
 
-  localBookUploading.value = true
-  try {
-    const book = lowerName.endsWith('.epub')
-      ? await uploadEpubBook(file)
-      : lowerName.endsWith('.pdf')
-        ? await uploadPdfBook(file)
-        : await uploadTxtBook(file)
-    await shelfStore.fetchBooks()
-    appStore.showToast(`已导入《${book.name}》`, 'success')
-    await handleBookClick(book)
-  } catch (e: unknown) {
-    appStore.showToast((e as Error).message || '本地书导入失败', 'error')
-  } finally {
-    localBookUploading.value = false
+  const missingMatch = groupError.match(/^NEW_BOOKS_MISSING:(\d+)$/)
+  const duplicateMatch = groupError.match(/^DUPLICATE_RESULTS:(\d+)$/)
+  const extra = missingMatch
+    ? `书架中缺少 ${missingMatch[1]} 本新书，分组未应用`
+    : duplicateMatch
+      ? `跳过 ${duplicateMatch[1]} 本重复结果，分组已应用`
+    : refreshError
+      ? requiresGroups
+        ? '书架刷新失败，所选分组未应用'
+        : '书架刷新失败'
+      : ''
+  const failureDetails = failedFiles
+    .slice(0, 3)
+    .map((item) => `${item.name}: ${item.reason}`)
+    .join('，')
+  const moreFailures = failedFiles.length > 3 ? `另有 ${failedFiles.length - 3} 本失败` : ''
+  localBookImportSummary.value = [
+    `已导入 ${importedCount} 本`,
+    failedFiles.length
+      ? `失败 ${failedFiles.length} 本`
+      : '',
+    failureDetails,
+    moreFailures,
+    groupError && !missingMatch && !duplicateMatch ? `分组失败 ${groupError}` : '',
+    ignoredFiles ? `跳过 ${ignoredFiles} 个不支持的文件` : '',
+    extra,
+  ].filter(Boolean).join('，')
+  appStore.showToast(localBookImportSummary.value, 'warning')
+}
+
+function closeLocalBookImportAfterUpload() {
+  showLocalBookImport.value = false
+  localBookImportSummary.value = ''
+  localBookGroupIds.value = []
+  showNewLocalBookGroup.value = false
+  newLocalBookGroupName.value = ''
+}
+
+async function openLocalBookImport() {
+  if (localBookUploading.value || creatingLocalBookGroup.value) return
+  if (!appStore.isWebMode) {
+    try {
+      await shelfStore.fetchGroups({ preserveOnError: true })
+    } catch {
+      appStore.showToast('分组加载失败，请重试', 'error')
+      return
+    }
   }
+  localBookGroupIds.value = []
+  localBookImportSummary.value = ''
+  showNewLocalBookGroup.value = false
+  newLocalBookGroupName.value = ''
+  showLocalBookImport.value = true
 }
 
 async function handleBookClick(book: Book | SearchBook) {
@@ -791,6 +1249,296 @@ onBeforeUnmount(() => {
 
 .hidden-input {
   display: none;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding:
+    calc(16px + var(--safe-area-top))
+    calc(16px + var(--safe-area-right))
+    calc(16px + var(--safe-area-bottom))
+    calc(16px + var(--safe-area-left));
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(4px);
+}
+
+.modal-content {
+  width: min(460px, 100%);
+  max-height: calc(var(--app-height, 100dvh) - var(--safe-area-top) - var(--safe-area-bottom) - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-xl);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.close-btn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+
+.close-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.close-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.close-btn svg {
+  width: 17px;
+  height: 17px;
+}
+
+.modal-body {
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  overflow-y: auto;
+}
+
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--color-border-light);
+}
+
+.import-choice {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.import-choice-btn {
+  min-height: 82px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-sunken);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.import-choice-btn:hover:not(:disabled) {
+  border-color: var(--color-primary-soft-border);
+  background: var(--color-primary-soft-bg);
+  color: var(--color-primary-soft-text);
+}
+
+.import-choice-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.import-choice-btn svg {
+  width: 22px;
+  height: 22px;
+}
+
+.import-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.import-label {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.import-group-list {
+  max-height: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.import-group-item {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.import-group-item:hover {
+  background: var(--color-bg-hover);
+}
+
+.local-import-modal .import-group-item.disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.import-group-item input {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  accent-color: var(--color-primary);
+}
+
+.empty-group-hint {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.new-group-trigger {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-primary);
+  font-size: var(--text-sm);
+}
+
+.new-group-trigger:hover {
+  background: var(--color-primary-soft-bg);
+}
+
+.new-group-trigger svg {
+  width: 15px;
+  height: 15px;
+}
+
+.new-group-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.new-group-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+  color: var(--color-text);
+}
+
+.new-group-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.new-group-save,
+.cancel-btn {
+  min-height: 34px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.new-group-save {
+  border-color: var(--color-primary-soft-border);
+  background: var(--color-primary-soft-bg);
+  color: var(--color-primary-soft-text);
+}
+
+.new-group-save:disabled,
+.cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.import-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-bg-sunken);
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+  transition: width var(--duration-fast);
+}
+
+@media (max-width: 480px) {
+  .import-choice {
+    grid-template-columns: 1fr;
+  }
+
+  .import-choice-btn {
+    min-height: 58px;
+    flex-direction: row;
+  }
+}
+
+.import-hint {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.import-summary {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .shelf-header {

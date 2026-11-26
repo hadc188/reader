@@ -161,6 +161,58 @@ pub struct MultiBookGroupParam {
     group_id: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetBooksGroupMaskParam {
+    #[serde(rename = "bookUrls")]
+    book_urls: Option<Vec<String>>,
+    #[serde(rename = "groupMask")]
+    group_mask: Option<i64>,
+}
+
+/// 批量设置导入书籍的分组位域。
+///
+/// 不用前端整表 `saveBooks`: 那个接口会覆盖整个书架，导入期间另一个窗口
+/// 的进度、排序或新增书籍都可能被旧快照盖掉。这里在写锁内只改目标书。
+#[tauri::command]
+pub async fn set_books_group_mask(
+    state: tauri::State<'_, AppState>,
+    req: SetBooksGroupMaskParam,
+) -> Result<ApiResponse<Value>, AppError> {
+    let user_ns = "default";
+    let urls = req.book_urls.unwrap_or_default();
+    let mask = req.group_mask.unwrap_or(0);
+    if urls.is_empty() {
+        return Ok(ApiResponse::ok(serde_json::json!({
+            "updated": 0,
+            "changed": false,
+            "groupMask": mask,
+        })));
+    }
+    let targets: std::collections::HashSet<String> = urls.into_iter().collect();
+    let mut changed = false;
+    let mut updated = 0;
+    state
+        .book_service
+        .update_books_in_place(user_ns, |list| {
+            for book in list.iter_mut() {
+                if targets.contains(&book.book_url) {
+                    updated += 1;
+                    if book.group.unwrap_or(0) != mask {
+                        book.group = Some(mask);
+                        changed = true;
+                    }
+                }
+            }
+            Ok(changed)
+        })
+        .await?;
+    Ok(ApiResponse::ok(serde_json::json!({
+        "updated": updated,
+        "changed": changed,
+        "groupMask": mask,
+    })))
+}
+
 #[tauri::command]
 pub async fn add_book_group_multi(
     state: tauri::State<'_, AppState>,

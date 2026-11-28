@@ -11,7 +11,6 @@
           <select
             class="field source-select"
             :value="store.activeSourceUrl"
-            :disabled="store.categoriesLoading"
             @change="onSourceChange"
           >
             <option

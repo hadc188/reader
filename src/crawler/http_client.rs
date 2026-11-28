@@ -20,6 +20,7 @@ pub struct ProxyStatus {
 #[derive(Clone)]
 pub struct HttpClient {
     client: Arc<RwLock<Client>>,
+    proxy_mode: Arc<RwLock<ProxyMode>>,
     active_proxy: Arc<RwLock<Option<String>>>,
     timeout_secs: u64,
     source_sessions: Arc<RwLock<HashMap<String, Arc<SourceSession>>>>,
@@ -29,13 +30,14 @@ pub struct HttpClient {
 
 impl HttpClient {
     pub fn new(timeout_secs: u64, proxy: Option<String>) -> anyhow::Result<Self> {
-        let configured_proxy = match proxy {
-            Some(value) => resolve_manual_proxy(&value)?,
-            None => resolve_system_proxy(),
+        let (proxy_mode, configured_proxy) = match proxy {
+            Some(value) => (ProxyMode::Manual, resolve_manual_proxy(&value)?),
+            None => (ProxyMode::System, resolve_system_proxy()),
         };
         let client = build_client(timeout_secs, configured_proxy.as_deref())?;
         Ok(Self {
             client: Arc::new(RwLock::new(client)),
+            proxy_mode: Arc::new(RwLock::new(proxy_mode)),
             active_proxy: Arc::new(RwLock::new(configured_proxy)),
             timeout_secs,
             source_sessions: Arc::default(),
@@ -45,6 +47,8 @@ impl HttpClient {
     }
 
     pub fn client(&self) -> Client {
+        // 系统代理可能由 Clash 等外部程序在运行时开关, 不能只沿用启动时的配置。
+        let _ = self.refresh_system_proxy();
         self.client
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -56,9 +60,10 @@ impl HttpClient {
     }
 
     pub fn source_context(&self, user_ns: &str, source_url: &str, proxy: Option<&str>) -> anyhow::Result<SourceHttpContext> {
+        self.refresh_system_proxy()?;
         let proxy = match proxy.map(str::trim).filter(|v| !v.is_empty()) {
             Some(value) => resolve_manual_proxy(value)?,
-            None => self.active_proxy(),
+            None => self.current_active_proxy(),
         };
         self.source_context_with_proxy(user_ns, source_url, proxy)
     }
@@ -125,6 +130,11 @@ impl HttpClient {
 
     /// 当前是否有代理生效。
     pub fn active_proxy(&self) -> Option<String> {
+        let _ = self.refresh_system_proxy();
+        self.current_active_proxy()
+    }
+
+    fn current_active_proxy(&self) -> Option<String> {
         self.active_proxy
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -150,6 +160,7 @@ impl HttpClient {
     /// for unrelated requests (RSS, updates, etc.), while book-source traffic
     /// uses one client per source so sessions cannot cross-contaminate.
     pub fn new_client_with_proxy(&self, proxy: Option<&str>) -> anyhow::Result<Client> {
+        self.refresh_system_proxy()?;
         let configured_proxy = match proxy.map(str::trim).filter(|value| !value.is_empty()) {
             Some(value) => resolve_manual_proxy(value)?,
             None => self
@@ -177,23 +188,13 @@ impl HttpClient {
             }
         };
 
-        let current_proxy = self
-            .active_proxy
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        if current_proxy != configured_proxy {
-            let client = build_client(self.timeout_secs, configured_proxy.as_deref())?;
-            *self
-                .client
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
-            *self
-                .active_proxy
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = configured_proxy.clone();
-            self.source_clients.write().unwrap_or_else(|e| e.into_inner()).clear();
-        }
+        // 持有模式写锁, 防止配置切换与系统代理热刷新交错后写回旧模式。
+        let mut current_mode = self
+            .proxy_mode
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.install_proxy_if_changed(configured_proxy.clone())?;
+        *current_mode = mode;
 
         Ok(ProxyStatus {
             active: configured_proxy.is_some(),
@@ -206,17 +207,56 @@ impl HttpClient {
     /// session cookies accumulated in the jar (e.g. an expired login session
     /// written by an antivirus-degraded page) stop being attached to requests.
     pub fn reset_cookie_jar(&self) -> anyhow::Result<()> {
+        self.refresh_system_proxy()?;
+        // 与代理切换共用 active_proxy 写锁, 防止基于旧代理构建的客户端
+        // 在切换完成后覆盖新客户端。
         let configured_proxy = self
             .active_proxy
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let client = build_client(self.timeout_secs, configured_proxy.as_deref())?;
         *self
             .client
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
         Ok(())
+    }
+
+    fn refresh_system_proxy(&self) -> anyhow::Result<()> {
+        let proxy_mode = self
+            .proxy_mode
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *proxy_mode != ProxyMode::System {
+            return Ok(());
+        }
+        self.install_proxy_if_changed(resolve_system_proxy())?;
+        Ok(())
+    }
+
+    fn install_proxy_if_changed(&self, configured_proxy: Option<String>) -> anyhow::Result<bool> {
+        if self.current_active_proxy() == configured_proxy {
+            return Ok(false);
+        }
+        let mut active_proxy = self
+            .active_proxy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *active_proxy == configured_proxy {
+            return Ok(false);
+        }
+
+        let client = build_client(self.timeout_secs, configured_proxy.as_deref())?;
+        *self
+            .client
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
+        *active_proxy = configured_proxy;
+        self.source_clients
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        Ok(true)
     }
 }
 
@@ -337,8 +377,15 @@ fn resolve_manual_proxy(value: &str) -> anyhow::Result<Option<String>> {
 }
 
 fn resolve_system_proxy() -> Option<String> {
-    platform_system_proxy()
-        .or_else(environment_proxy)
+    resolve_system_proxy_from(platform_system_proxy(), environment_proxy())
+}
+
+fn resolve_system_proxy_from(
+    platform_proxy: Option<Option<String>>,
+    environment_proxy: Option<String>,
+) -> Option<String> {
+    platform_proxy
+        .unwrap_or(environment_proxy)
         .and_then(|value| resolve_manual_proxy(&value).ok().flatten())
 }
 
@@ -351,22 +398,27 @@ fn environment_proxy() -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn platform_system_proxy() -> Option<String> {
+fn platform_system_proxy() -> Option<Option<String>> {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
     let settings = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
         .ok()?;
-    let enabled = settings.get_value::<u32, _>("ProxyEnable").unwrap_or(0) == 1;
+    let enabled = match settings.get_value::<u32, _>("ProxyEnable") {
+        Ok(value) => value == 1,
+        Err(_) => return None,
+    };
     if !enabled {
-        return None;
+        return Some(None);
     }
-    let server = settings.get_value::<String, _>("ProxyServer").ok()?;
-    select_proxy_server(&server)
+    let Some(server) = settings.get_value::<String, _>("ProxyServer").ok() else {
+        return Some(None);
+    };
+    Some(select_proxy_server(&server))
 }
 
 #[cfg(target_os = "macos")]
-fn platform_system_proxy() -> Option<String> {
+fn platform_system_proxy() -> Option<Option<String>> {
     use std::process::Command;
 
     let output = Command::new("networksetup")
@@ -385,16 +437,20 @@ fn platform_system_proxy() -> Option<String> {
             if !text.lines().any(|line| line.trim() == "Enabled: Yes") {
                 continue;
             }
-            let host = setting_value(&text, "Server:")?;
-            let port = setting_value(&text, "Port:")?;
-            return Some(format!("http://{host}:{port}"));
+            let Some(host) = setting_value(&text, "Server:") else {
+                return Some(None);
+            };
+            let Some(port) = setting_value(&text, "Port:") else {
+                return Some(None);
+            };
+            return Some(Some(format!("http://{host}:{port}")));
         }
     }
-    None
+    Some(None)
 }
 
 #[cfg(target_os = "linux")]
-fn platform_system_proxy() -> Option<String> {
+fn platform_system_proxy() -> Option<Option<String>> {
     use std::process::Command;
 
     let mode = Command::new("gsettings")
@@ -402,7 +458,7 @@ fn platform_system_proxy() -> Option<String> {
         .output()
         .ok()?;
     if String::from_utf8_lossy(&mode.stdout).trim() != "'manual'" {
-        return None;
+        return Some(None);
     }
     for scheme in ["https", "http"] {
         let schema = format!("org.gnome.system.proxy.{scheme}");
@@ -420,14 +476,14 @@ fn platform_system_proxy() -> Option<String> {
             .ok()?;
         let port = String::from_utf8_lossy(&port.stdout).trim().to_string();
         if !host.is_empty() && port.parse::<u16>().ok().filter(|port| *port > 0).is_some() {
-            return Some(format!("http://{host}:{port}"));
+            return Some(Some(format!("http://{host}:{port}")));
         }
     }
-    None
+    Some(None)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn platform_system_proxy() -> Option<String> {
+fn platform_system_proxy() -> Option<Option<String>> {
     None
 }
 
@@ -478,6 +534,53 @@ mod tests {
     #[test]
     fn manual_proxy_rejects_unsupported_scheme() {
         assert!(resolve_manual_proxy("socks5://127.0.0.1:7890").is_err());
+    }
+
+    #[test]
+    fn explicit_system_proxy_state_takes_precedence_over_environment_proxy() {
+        let environment = Some("http://env-proxy.example:7890".to_string());
+        assert_eq!(resolve_system_proxy_from(Some(None), environment.clone()), None);
+        assert_eq!(
+            resolve_system_proxy_from(
+                Some(Some("http://system-proxy.example:7890".to_string())),
+                environment,
+            ),
+            Some("http://system-proxy.example:7890".to_string())
+        );
+    }
+
+    #[test]
+    fn environment_proxy_is_used_only_when_platform_state_is_unavailable() {
+        assert_eq!(
+            resolve_system_proxy_from(None, Some("env-proxy.example:7890".to_string())),
+            Some("http://env-proxy.example:7890".to_string())
+        );
+    }
+
+    #[test]
+    fn changing_proxy_snapshot_rebuilds_clients_and_clears_source_cache() {
+        let proxy = Some("http://127.0.0.1:7890".to_string());
+        let http = HttpClient::new(5, proxy.clone()).unwrap();
+        let source = "https://source.example.com";
+
+        let context = http.source_context("proxy-refresh", source, None).unwrap();
+        assert_eq!(context.proxy, proxy);
+        assert!(!http
+            .source_clients
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+
+        assert!(http.install_proxy_if_changed(None).unwrap());
+        assert_eq!(http.active_proxy(), None);
+        assert!(http
+            .source_clients
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+
+        let direct = http.source_context("proxy-refresh", source, None).unwrap();
+        assert_eq!(direct.proxy, None);
     }
 
     #[cfg(target_os = "windows")]

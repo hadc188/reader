@@ -4,6 +4,7 @@ import { useBookshelfStore } from './bookshelf'
 import {
   getBookshelfWithCacheInfo,
   getBookGroups,
+  deleteBooksWithProgress,
   saveBookGroup,
   saveBookGroupOrder,
   saveBooks,
@@ -14,7 +15,7 @@ vi.mock('../api/bookshelf', () => ({
   getBookshelfWithCacheInfo: vi.fn(),
   getBookGroups: vi.fn(),
   deleteBook: vi.fn(),
-  deleteBooks: vi.fn(),
+  deleteBooksWithProgress: vi.fn(),
   saveBookGroupId: vi.fn(),
   saveBookGroup: vi.fn(),
   saveBookGroupOrder: vi.fn(),
@@ -34,6 +35,12 @@ describe('bookshelf search state', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.mocked(getBookshelfWithCacheInfo).mockResolvedValue([])
+    vi.mocked(deleteBooksWithProgress).mockResolvedValue({
+      deleted: 0,
+      removedUrls: [],
+      cacheCleanupFailed: 0,
+      fileCleanupFailed: 0,
+    })
     vi.mocked(saveBooks).mockResolvedValue([] as never)
     vi.mocked(setBooksGroupMask).mockResolvedValue({ updated: 0, changed: false, groupMask: 0 })
   })
@@ -362,6 +369,134 @@ describe('setCachedChapterCounts', () => {
 
     expect(store.books.find((book) => book.bookUrl === 'book:a')?.cachedChapterCount).toBe(0)
     expect(store.books.find((book) => book.bookUrl === 'book:b')?.cachedChapterCount).toBe(5)
+  })
+})
+
+describe('bulkDelete (批量删除进度)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(deleteBooksWithProgress).mockReset()
+    vi.mocked(getBookshelfWithCacheInfo).mockResolvedValue([
+      { name: '书A', author: '作者', origin: 'o', bookUrl: 'book:a' },
+      { name: '书B', author: '作者', origin: 'o', bookUrl: 'book:b' },
+      { name: '书C', author: '作者', origin: 'o', bookUrl: 'book:c' },
+    ] as never)
+  })
+
+  it('记录落盘后立即从视图移除, 同时转发清理进度', async () => {
+    const store = useBookshelfStore()
+    await store.fetchBooks()
+    store.toggleSelection('book:a')
+    store.toggleSelection('book:b')
+    const progress: Array<{ stage: string; current: number; total: number; removedUrls: string[] }> = []
+
+    vi.mocked(deleteBooksWithProgress).mockImplementationOnce(async (_books, onProgress) => {
+      onProgress?.({ stage: 'deleting', current: 0, total: 2, failed: 0, removedUrls: [] })
+      onProgress?.({ stage: 'removed', current: 2, total: 2, failed: 0, removedUrls: ['book:a', 'book:b'] })
+      expect(store.books.map((book) => book.bookUrl)).toEqual(['book:c'])
+      onProgress?.({ stage: 'cleanup', current: 1, total: 2, failed: 0, removedUrls: [] })
+      onProgress?.({ stage: 'cleanup', current: 2, total: 2, failed: 0, removedUrls: [] })
+      onProgress?.({ stage: 'files', current: 0, total: 2, failed: 0, removedUrls: [] })
+      onProgress?.({ stage: 'done', current: 2, total: 2, failed: 0, removedUrls: [] })
+      return { deleted: 2, removedUrls: ['book:a', 'book:b'], cacheCleanupFailed: 0, fileCleanupFailed: 0 }
+    })
+
+    await store.bulkDelete((item) => progress.push(item))
+
+    expect(progress.map((item) => item.stage)).toEqual(['deleting', 'removed', 'cleanup', 'cleanup', 'files', 'done'])
+    expect(progress[1].removedUrls).toEqual(['book:a', 'book:b'])
+    expect(store.books.map((book) => book.bookUrl)).toEqual(['book:c'])
+    expect(store.selectedBookUrls.size).toBe(0)
+  })
+
+  it('清理失败时仍按真实删除集移除视图并返回部分成功', async () => {
+    const store = useBookshelfStore()
+    await store.fetchBooks()
+    store.toggleSelection('book:a')
+
+    vi.mocked(deleteBooksWithProgress).mockImplementationOnce(async (_books, onProgress) => {
+      onProgress?.({ stage: 'removed', current: 1, total: 1, failed: 0, removedUrls: ['book:a'] })
+      onProgress?.({ stage: 'cleanup', current: 1, total: 1, failed: 0, removedUrls: [] })
+      expect(store.books.map((book) => book.bookUrl)).toEqual(['book:b', 'book:c'])
+      return { deleted: 1, removedUrls: ['book:a'], cacheCleanupFailed: 0, fileCleanupFailed: 1 }
+    })
+
+    await expect(store.bulkDelete()).resolves.toMatchObject({
+      deleted: 1,
+      fileCleanupFailed: 1,
+    })
+    expect(store.books.map((book) => book.bookUrl)).toEqual(['book:b', 'book:c'])
+    expect(store.selectedBookUrls.size).toBe(0)
+  })
+
+  it('清理事件带失败数时返回可提示的部分成功状态', async () => {
+    const store = useBookshelfStore()
+    await store.fetchBooks()
+    store.toggleSelection('book:a')
+
+    vi.mocked(deleteBooksWithProgress).mockImplementationOnce(async (_books, onProgress) => {
+      onProgress?.({ stage: 'removed', current: 1, total: 1, failed: 0, removedUrls: ['book:a'] })
+      onProgress?.({ stage: 'cleanup', current: 1, total: 1, failed: 1, removedUrls: [] })
+      onProgress?.({ stage: 'done', current: 1, total: 1, failed: 1, removedUrls: [] })
+      return { deleted: 1, removedUrls: ['book:a'], cacheCleanupFailed: 1, fileCleanupFailed: 0 }
+    })
+
+    await expect(store.bulkDelete()).resolves.toEqual({
+      deleted: 1,
+      removedUrls: ['book:a'],
+      cacheCleanupFailed: 1,
+      fileCleanupFailed: 0,
+    })
+  })
+
+  it('只从视图中移除后端真实删除的书, 不全量清空选中集', async () => {
+    const store = useBookshelfStore()
+    await store.fetchBooks()
+    store.toggleSelection('book:a')
+    store.toggleSelection('book:b')
+
+    vi.mocked(deleteBooksWithProgress).mockResolvedValueOnce({
+      deleted: 1,
+      removedUrls: ['book:a'],
+      cacheCleanupFailed: 0,
+      fileCleanupFailed: 0,
+    })
+
+    await expect(store.bulkDelete()).resolves.toMatchObject({ deleted: 1 })
+    expect(store.books.map((book) => book.bookUrl)).toEqual(['book:b', 'book:c'])
+    expect([...store.selectedBookUrls]).toEqual(['book:b'])
+  })
+
+  it('后端零删除时清空失效选择集并提示由调用方处理', async () => {
+    const store = useBookshelfStore()
+    await store.fetchBooks()
+    store.toggleSelection('book:a')
+
+    vi.mocked(deleteBooksWithProgress).mockResolvedValueOnce({
+      deleted: 0,
+      removedUrls: [],
+      cacheCleanupFailed: 0,
+      fileCleanupFailed: 0,
+    })
+
+    await expect(store.bulkDelete()).resolves.toMatchObject({ deleted: 0 })
+    expect(store.books).toHaveLength(3)
+    expect(store.selectedBookUrls.size).toBe(0)
+  })
+
+  it('已收到真实删除集后返回错误时仍完成视图清理', async () => {
+    const store = useBookshelfStore()
+    await store.fetchBooks()
+    store.toggleSelection('book:a')
+
+    vi.mocked(deleteBooksWithProgress).mockImplementationOnce(async (_books, onProgress) => {
+      onProgress?.({ stage: 'removed', current: 1, total: 1, failed: 0, removedUrls: ['book:a'] })
+      throw new Error('finalize failed')
+    })
+
+    await expect(store.bulkDelete()).rejects.toThrow('finalize failed')
+    expect(store.books.map((book) => book.bookUrl)).toEqual(['book:b', 'book:c'])
+    expect(store.selectedBookUrls.size).toBe(0)
   })
 })
 

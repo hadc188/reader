@@ -1,4 +1,4 @@
-use crate::api::commands::{decode_header_file_name, decode_upload_body};
+﻿use crate::api::commands::{decode_header_file_name, decode_upload_body};
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
 use crate::model::{book::Book, book_chapter::BookChapter, book_source::BookSource, cache_manifest::{CacheFailedEntry, CacheManifest}, search::SearchBook};
@@ -12,8 +12,7 @@ use crate::service::local_txt_book::{
     is_local_txt_origin, is_local_txt_url, LOCAL_TXT_ORIGIN, MAX_TXT_UPLOAD_BYTES,
 };
 use crate::util::text::{normalize_source_url, repair_encoded_url};
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use futures::stream::{self, FuturesUnordered, StreamExt};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,6 +28,7 @@ use tokio::fs;
 const MAX_AVAILABLE_RESULT_LIMIT: usize = 100;
 const DEFAULT_AVAILABLE_CONCURRENT_COUNT: usize = 16;
 const MAX_AVAILABLE_CONCURRENT_COUNT: usize = 20;
+const DELETE_LOCAL_FILE_CONCURRENCY: usize = 8;
 /// 达到候选软上限后停止派发新的书源，已派发书源的结果完整返回。
 /// `lastIndex` 始终停在完整书源边界，客户端通过 `hasMore` 继续扫描。
 const AVAILABLE_SOURCE_SSE_SCAN_SOFT_LIMIT: usize = 60;
@@ -1612,7 +1612,13 @@ async fn import_local_book_from_path(
     match state.book_service.save_book(user_ns, book).await {
         Ok(saved) => Ok(saved),
         Err(error) => {
-            cleanup_local_book_files(state, user_ns, std::slice::from_ref(&parsed_book)).await;
+            let _ = cleanup_local_book_files(
+                state,
+                user_ns,
+                std::slice::from_ref(&parsed_book),
+                |_, _| {},
+            )
+            .await;
             Err(error)
         }
     }
@@ -1998,7 +2004,7 @@ pub async fn delete_book(
     if !deleted {
         return Err(AppError::BadRequest("书架书籍不存在".to_string()));
     }
-    cleanup_local_book_files(&state, &user_ns, &removed_books).await;
+    let _ = cleanup_local_book_files(&state, &user_ns, &removed_books, |_, _| {}).await;
     Ok(ApiResponse::ok(serde_json::json!("删除书籍成功")))
 }
 
@@ -2009,9 +2015,89 @@ pub async fn delete_books(
 ) -> Result<ApiResponse<Value>, AppError> {
     let user_ns = "default";
     let removed_books = find_matching_books(&state, &user_ns, &req).await?;
-    let count = state.book_service.delete_books(&user_ns, req).await?;
-    cleanup_local_book_files(&state, &user_ns, &removed_books).await;
+    let (count, _, _) = state
+        .book_service
+        .delete_books(&user_ns, req, |_stage, _current, _total, _failed| {})
+        .await?;
+    let _ = cleanup_local_book_files(&state, &user_ns, &removed_books, |_, _| {}).await;
     Ok(ApiResponse::ok(serde_json::json!({"deleted": count})))
+}
+
+#[tauri::command]
+pub async fn delete_books_with_progress(
+    state: tauri::State<'_, AppState>,
+    req: Vec<Book>,
+    on_progress: tauri::ipc::Channel<serde_json::Value>,
+) -> Result<ApiResponse<Value>, AppError> {
+    let user_ns = "default";
+    let (_, removed_books, cache_cleanup_failed) = state
+        .book_service
+        .delete_books_with_removed_books(&user_ns, req, |stage, current, total, failed| {
+            send_delete_progress(
+                &on_progress,
+                stage,
+                current,
+                total,
+                failed,
+            );
+        }, |removed| {
+            let _ = on_progress.send(serde_json::json!({
+                "stage": "removed",
+                "current": removed.len(),
+                "total": removed.len(),
+                "failed": 0,
+                "removedUrls": removed.iter().map(|book| book.book_url.clone()).collect::<Vec<_>>(),
+            }));
+        })
+        .await?;
+    let deleted = removed_books.len();
+    let stage_total = removed_books.len();
+    if stage_total > 0 {
+        send_delete_progress(
+            &on_progress,
+            "files",
+            0,
+            stage_total,
+            0,
+        );
+    }
+    let file_cleanup_failed = cleanup_local_book_files(
+        &state,
+        &user_ns,
+        &removed_books,
+        |current, total| {
+            send_delete_progress(&on_progress, "files", current, total, 0);
+        },
+    )
+    .await;
+    send_delete_progress(
+        &on_progress,
+        "done",
+        deleted,
+        stage_total,
+        (cache_cleanup_failed + file_cleanup_failed).min(deleted),
+    );
+    Ok(ApiResponse::ok(serde_json::json!({
+        "deleted": deleted,
+        "removedUrls": removed_books.iter().map(|book| book.book_url.clone()).collect::<Vec<_>>(),
+        "cacheCleanupFailed": cache_cleanup_failed,
+        "fileCleanupFailed": file_cleanup_failed,
+    })))
+}
+
+fn send_delete_progress(
+    channel: &tauri::ipc::Channel<serde_json::Value>,
+    stage: &str,
+    current: usize,
+    total: usize,
+    failed: usize,
+) {
+    let _ = channel.send(serde_json::json!({
+        "stage": stage,
+        "current": current,
+        "total": total,
+        "failed": failed,
+    }));
 }
 
 /// `save_book_progress` 的共享实现 (Tauri command 与 Web HTTP handler 共用)。
@@ -3848,46 +3934,63 @@ async fn find_matching_books(
         .collect())
 }
 
-async fn cleanup_local_book_files(state: &AppState, user_ns: &str, books: &[Book]) {
-    for book in books {
-        if is_local_txt_origin(&book.origin) || is_local_txt_url(&book.book_url) {
-            if let Err(err) = state
-                .local_txt_book_service
-                .delete_book_files(user_ns, &book.book_url)
-                .await
-            {
-                tracing::warn!(
-                    "failed to delete local txt book files for {}: {:?}",
-                    book.book_url,
-                    err
-                );
+async fn cleanup_local_book_files(
+    state: &AppState,
+    user_ns: &str,
+    books: &[Book],
+    on_progress: impl FnMut(usize, usize),
+) -> usize {
+    let mut on_progress = on_progress;
+    let mut failed = 0usize;
+    let mut completed = 0usize;
+    let total = books.len();
+    let mut cleanup = stream::iter(books.to_vec())
+        .map(|book| {
+            let local_txt = state.local_txt_book_service.clone();
+            let local_epub = state.local_epub_book_service.clone();
+            let local_pdf = state.local_pdf_book_service.clone();
+            let user_ns = user_ns.to_owned();
+            async move {
+                if is_local_txt_origin(&book.origin) || is_local_txt_url(&book.book_url) {
+                    if let Err(err) = local_txt.delete_book_files(&user_ns, &book.book_url).await {
+                        tracing::warn!(
+                            "failed to delete local txt book files for {}: {:?}",
+                            book.book_url,
+                            err
+                        );
+                        return true;
+                    }
+                } else if is_local_epub_origin(&book.origin) || is_local_epub_url(&book.book_url) {
+                    if let Err(err) = local_epub.delete_book_files(&user_ns, &book.book_url).await {
+                        tracing::warn!(
+                            "failed to delete local epub book files for {}: {:?}",
+                            book.book_url,
+                            err
+                        );
+                        return true;
+                    }
+                } else if is_local_pdf_origin(&book.origin) || is_local_pdf_url(&book.book_url) {
+                    if let Err(err) = local_pdf.delete_book_files(&user_ns, &book.book_url).await {
+                        tracing::warn!(
+                            "failed to delete local pdf book files for {}: {:?}",
+                            book.book_url,
+                            err
+                        );
+                        return true;
+                    }
+                }
+                false
             }
-        } else if is_local_epub_origin(&book.origin) || is_local_epub_url(&book.book_url) {
-            if let Err(err) = state
-                .local_epub_book_service
-                .delete_book_files(user_ns, &book.book_url)
-                .await
-            {
-                tracing::warn!(
-                    "failed to delete local epub book files for {}: {:?}",
-                    book.book_url,
-                    err
-                );
-            }
-        } else if is_local_pdf_origin(&book.origin) || is_local_pdf_url(&book.book_url) {
-            if let Err(err) = state
-                .local_pdf_book_service
-                .delete_book_files(user_ns, &book.book_url)
-                .await
-            {
-                tracing::warn!(
-                    "failed to delete local pdf book files for {}: {:?}",
-                    book.book_url,
-                    err
-                );
-            }
+        })
+        .buffer_unordered(DELETE_LOCAL_FILE_CONCURRENCY);
+    while let Some(book_failed) = cleanup.next().await {
+        if book_failed {
+            failed += 1;
         }
+        completed += 1;
+        on_progress(completed, total);
     }
+    failed
 }
 
 fn book_matches_delete_target(shelf_book: &Book, target: &Book) -> bool {

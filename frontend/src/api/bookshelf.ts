@@ -77,6 +77,50 @@ export function deleteBooks(books: Partial<Book>[]) {
   return post<{ deleted: number }>('/deleteBooks', books).then((r) => r.data)
 }
 
+export interface DeleteBooksProgress {
+  stage: 'deleting' | 'removed' | 'cleanup' | 'files' | 'done'
+  current: number
+  total: number
+  failed: number
+  removedUrls: string[]
+}
+
+export interface DeleteBooksResult {
+  deleted: number
+  removedUrls: string[]
+  cacheCleanupFailed: number
+  fileCleanupFailed: number
+}
+
+/**
+ * 桌面端批量删除。书架记录落盘后逐本清理缓存，随后清理本地文件。
+ *
+ * 返回的 `removedUrls` 是后端真实匹配并删除的书，不能用选中集代替：
+ * 旧书架数据可能按书名/作者匹配，也可能在请求前已被其他操作移走。
+ */
+export function deleteBooksWithProgress(
+  books: Partial<Book>[],
+  onProgress?: (progress: DeleteBooksProgress) => void,
+): Promise<DeleteBooksResult> {
+  if (!isTauriRuntime()) {
+    return deleteBooks(books).then((result) => ({
+      ...result,
+      removedUrls: books.flatMap((book) => book.bookUrl ? [book.bookUrl] : []),
+      cacheCleanupFailed: 0,
+      fileCleanupFailed: 0,
+    }))
+  }
+  const channel = new Channel<DeleteBooksProgress>()
+  channel.onmessage = (progress) => onProgress?.(progress)
+  return invoke<ApiResponse<DeleteBooksResult>>('delete_books_with_progress', {
+    req: books,
+    onProgress: channel,
+  }).then((res) => {
+    if (!res.isSuccess) throw new Error(res.errorMsg || '批量删除失败')
+    return res.data
+  })
+}
+
 export function getBookInfo(url: string, origin?: string) {
   return post<Book>('/getBookInfo', { url, bookSourceUrl: origin }).then((r) => r.data)
 }

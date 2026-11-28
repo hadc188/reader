@@ -294,22 +294,40 @@
 
       <!-- Batch Toolbar -->
       <Transition name="slide-up">
-        <div v-if="shelfStore.editMode && shelfStore.selectedBookUrls.size > 0" class="batch-toolbar">
+        <div v-if="shelfStore.editMode && (shelfStore.selectedBookUrls.size > 0 || bulkDeleteProgress !== null)" class="batch-toolbar">
           <div class="batch-info">
-            已选中 <span>{{ shelfStore.selectedBookUrls.size }}</span> 本书
+            已选中 <span>{{ shelfStore.selectedBookUrls.size || bulkDeleteProgress?.total }}</span> 本书
           </div>
           <div class="batch-actions">
-            <button class="batch-btn" @click="handleBulkMove">
+            <button class="batch-btn" :disabled="bulkDeleteProgress !== null" @click="handleBulkMove">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" /></svg>
               移动分组
             </button>
-            <button class="batch-btn danger" @click="handleBulkDelete">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a3 3 0 0 1-3-3H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>
-              批量删除
+            <button class="batch-btn danger" :disabled="bulkDeleteProgress !== null" @click="handleBulkDelete">
+              <svg v-if="bulkDeleteProgress === null" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a3 3 0 0 1-3-3H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>
+              <svg v-else class="spinning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+              {{ bulkDeleteProgress === null ? '批量删除' : '删除中' }}
             </button>
           </div>
         </div>
       </Transition>
+      <div
+        v-if="bulkDeleteProgress"
+        class="bulk-delete-progress"
+        role="status"
+        aria-live="polite"
+      >
+        <div class="bulk-delete-progress-head">
+          <span>{{ bulkDeleteProgress.text }}</span>
+          <strong>{{ bulkDeleteProgress.percent }}%</strong>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" :style="{ width: `${bulkDeleteProgress.percent}%` }"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Book Detail Modal -->
@@ -589,6 +607,12 @@ const localBookImportProgress = ref<{
   text: string
 } | null>(null)
 const localBookImportSummary = ref('')
+const bulkDeleteProgress = ref<{
+  current: number
+  total: number
+  percent: number
+  text: string
+} | null>(null)
 
 /** 分组编辑器的目标书: 右键单本时是那一本, 批量时是所有选中书。
  *
@@ -1094,14 +1118,102 @@ watch(() => shelfStore.activeGroupId, async (groupId) => {
 })
 
 async function handleBulkDelete() {
+  if (bulkDeleteProgress.value !== null) return
   const count = shelfStore.selectedBookUrls.size
+  if (count === 0) return
   const ok = await appStore.confirmDialog(`确定删除选中的 ${count} 本书？`, { title: '批量删除', danger: true })
   if (!ok) return
+  const selectedCount = shelfStore.selectedBookUrls.size
+  if (selectedCount === 0) return
+  let settled = false
+  bulkDeleteProgress.value = {
+    current: 0,
+    total: selectedCount,
+    percent: 0,
+    text: '正在移除书架记录',
+  }
   try {
-    await shelfStore.bulkDelete()
-    appStore.showToast(`成功删除 ${count} 本书`, 'success')
+    const result = await shelfStore.bulkDelete((progress) => {
+      const percent = progress.total > 0
+        ? Math.round((progress.current / progress.total) * 100)
+        : 0
+      bulkDeleteProgress.value = {
+        current: progress.current,
+        total: selectedCount,
+        percent: (
+          progress.stage === 'deleting'
+            ? 0
+            : progress.stage === 'removed'
+              ? 0
+              : progress.stage === 'cleanup'
+              ? Math.round(percent * 0.7)
+              : progress.stage === 'files'
+                ? 70 + Math.round((progress.current / Math.max(1, progress.total)) * 20)
+                : 95
+        ),
+        text: progress.stage === 'deleting'
+          ? '正在移除书架记录'
+          : progress.stage === 'removed'
+            ? '正在清理缓存'
+          : progress.stage === 'done'
+            ? '正在整理书架'
+            : progress.stage === 'files'
+              ? `正在清理本地文件 ${progress.current}/${progress.total}`
+              : '删除中',
+      }
+    })
+    if (result.removedUrls.length === 0) {
+      bulkDeleteProgress.value = {
+        ...bulkDeleteProgress.value!,
+        current: 0,
+        total: selectedCount,
+        percent: 100,
+        text: '未删除书籍',
+      }
+      appStore.showToast('选中的书已不在书架', 'warning')
+    } else if (
+      result.cacheCleanupFailed > 0
+      || result.fileCleanupFailed > 0
+      || result.removedUrls.length < selectedCount
+    ) {
+      bulkDeleteProgress.value = {
+        ...bulkDeleteProgress.value!,
+        current: result.deleted,
+        total: selectedCount,
+        percent: 100,
+        text: `已删除 ${result.deleted} 本`,
+      }
+      const failedParts = [
+        result.cacheCleanupFailed > 0 ? `${result.cacheCleanupFailed} 本缓存` : '',
+        result.fileCleanupFailed > 0 ? `${result.fileCleanupFailed} 本文件` : '',
+      ].filter(Boolean)
+      const unmatched = selectedCount - result.removedUrls.length
+      if (unmatched > 0) failedParts.push(`${unmatched} 本未匹配`)
+      appStore.showToast(
+        `已删除 ${result.deleted} 本书${failedParts.length ? `，${failedParts.join('、')}` : ''}`,
+        'warning',
+      )
+    } else {
+      bulkDeleteProgress.value = {
+        ...bulkDeleteProgress.value!,
+        current: result.deleted,
+        total: selectedCount,
+        percent: 100,
+        text: '删除完成',
+      }
+      appStore.showToast(`成功删除 ${result.deleted} 本书`, 'success')
+    }
+    settled = true
   } catch (e: any) {
-    appStore.showToast(e.message, 'error')
+    appStore.showToast(e.message || '批量删除失败', 'error')
+  } finally {
+    if (settled) {
+      window.setTimeout(() => {
+        bulkDeleteProgress.value = null
+      }, 900)
+    } else {
+      bulkDeleteProgress.value = null
+    }
   }
 }
 
@@ -1604,7 +1716,8 @@ onBeforeUnmount(() => {
   border-color: var(--color-primary-soft-border);
 }
 
-.shelf-btn .spinning {
+.shelf-btn .spinning,
+.batch-btn .spinning {
   animation: shelf-spin 0.9s linear infinite;
 }
 
@@ -1975,9 +2088,44 @@ onBeforeUnmount(() => {
   color: var(--color-danger);
 }
 
+.batch-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 .batch-btn svg {
   width: 16px;
   height: 16px;
+}
+
+.bulk-delete-progress {
+  position: fixed;
+  left: 50%;
+  bottom: calc(76px + 88px);
+  z-index: calc(var(--z-sticky) + 4);
+  width: min(420px, calc(100% - var(--space-8)));
+  padding: var(--space-3) var(--space-4);
+  transform: translateX(-50%);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.bulk-delete-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.bulk-delete-progress-head strong {
+  flex-shrink: 0;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
 }
 
 /* slide-up transition */
@@ -2058,6 +2206,10 @@ onBeforeUnmount(() => {
     justify-content: space-between;
   }
   .batch-info { display: none; }
+
+  .bulk-delete-progress {
+    bottom: calc(76px + 84px);
+  }
 }
 
 @media (max-width: 420px) {

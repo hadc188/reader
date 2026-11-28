@@ -20,6 +20,7 @@ use crate::storage::cache::file_cache::FileCache;
 use crate::service::local_pdf_book::{is_local_pdf_origin, is_local_pdf_url};
 use crate::util::hash::md5_hex;
 use crate::util::text::{normalize_source_url, repair_encoded_url, visible_char_count};
+use futures::stream::{self, StreamExt};
 use serde_json::json;
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -30,6 +31,9 @@ use std::time::{Duration, SystemTime};
 use tokio::fs;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
+
+/// 批量删除时同时清理多本书的缓存，限制并发避免磁盘和封面目录扫描互相拖慢。
+const DELETE_CACHE_CLEANUP_CONCURRENCY: usize = 8;
 
 /// 书源 JS 调用 `java.showBrowser(url, html)` 时捕获的请求, 供前端弹出面板。
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -3781,18 +3785,54 @@ impl BookService {
         Ok(deleted)
     }
 
-    pub async fn delete_books(&self, user_ns: &str, books: Vec<Book>) -> Result<usize, AppError> {
+    pub async fn delete_books(
+        &self,
+        user_ns: &str,
+        books: Vec<Book>,
+        mut on_progress: impl FnMut(&'static str, usize, usize, usize),
+    ) -> Result<(usize, Vec<Book>, usize), AppError> {
+        let mut progress_without_removed = |stage, current, total, failed| {
+            on_progress(stage, current, total, failed);
+        };
+        self.delete_books_with_removed_books(
+            user_ns,
+            books,
+            |stage, current, total, failed| {
+                progress_without_removed(stage, current, total, failed);
+            },
+            |_removed| {},
+        )
+        .await
+    }
+
+    pub async fn delete_books_with_removed_books(
+        &self,
+        user_ns: &str,
+        books: Vec<Book>,
+        mut on_progress: impl FnMut(&'static str, usize, usize, usize),
+        mut on_removed: impl FnMut(&[Book]),
+    ) -> Result<(usize, Vec<Book>, usize), AppError> {
+        let total = books.len();
+        on_progress("deleting", 0, total, 0);
         let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
         let mut deleted = 0usize;
         let mut removed_books: Vec<Book> = Vec::new();
+        let mut cleanup_failed = 0usize;
         for book in books {
             let matched: Vec<Book> = list
                 .iter()
                 .filter(|b| books_match_for_delete(b, &book))
                 .cloned()
                 .collect();
-            removed_books.extend(matched);
+            for matched_book in matched {
+                if !removed_books
+                    .iter()
+                    .any(|book| book.book_url == matched_book.book_url)
+                {
+                    removed_books.push(matched_book);
+                }
+            }
             let before = list.len();
             list.retain(|b| !books_match_for_delete(b, &book));
             if list.len() != before {
@@ -3801,11 +3841,77 @@ impl BookService {
         }
         if deleted > 0 {
             self.write_bookshelf(user_ns, &list).await?;
-            for removed_book in &removed_books {
-                let _ = self.clear_book_related_cache(user_ns, removed_book).await;
+            on_removed(&removed_books);
+            on_progress(
+                "cleanup",
+                0,
+                removed_books.len(),
+                cleanup_failed,
+            );
+            let mut cover_urls = Vec::new();
+            for book in &removed_books {
+                if let Some(url) = book.cover_url.as_deref() {
+                    cover_urls.push(url.to_string());
+                }
+                if let Some(url) = book.custom_cover_url.as_deref() {
+                    if book.cover_url.as_deref() != Some(url) {
+                        cover_urls.push(url.to_string());
+                    }
+                }
+            }
+
+            // 每本书的正文、书源和目录缓存互相独立。封面映射在目录里共享，
+            // 单独整批删除，避免每本书都重复扫描一次封面目录。
+            let mut cleanup = stream::iter(removed_books.clone())
+                .map(|book| {
+                    let service = self.clone();
+                    let user_ns = user_ns.to_owned();
+                    async move {
+                        let book_url = book.book_url.clone();
+                        let failed = service
+                            .clear_book_related_cache_without_cover(&user_ns, &book)
+                            .await
+                            .is_err();
+                        (book_url, failed)
+                    }
+                })
+                .buffer_unordered(DELETE_CACHE_CLEANUP_CONCURRENCY);
+            let mut completed = 0usize;
+            while let Some((book_url, failed)) = cleanup.next().await {
+                if failed {
+                    cleanup_failed += 1;
+                }
+                completed += 1;
+                if completed % 20 == 0 || completed == removed_books.len() {
+                    tracing::info!(
+                        "批量删除清理缓存 {}/{}: {}",
+                        completed,
+                        removed_books.len(),
+                        book_url
+                    );
+                }
+                on_progress(
+                    "cleanup",
+                    completed,
+                    removed_books.len(),
+                    cleanup_failed,
+                );
+            }
+
+            if !cover_urls.is_empty() {
+                if self.delete_cover_caches("public", &cover_urls).await.is_err() {
+                    cleanup_failed = (cleanup_failed + 1).min(removed_books.len());
+                    tracing::warn!("批量删除清理封面缓存失败");
+                }
+                on_progress(
+                    "cleanup",
+                    removed_books.len(),
+                    removed_books.len(),
+                    cleanup_failed,
+                );
             }
         }
-        Ok(deleted)
+        Ok((deleted, removed_books, cleanup_failed))
     }
 
     pub async fn cached_chapter_count(
@@ -4518,9 +4624,11 @@ impl BookService {
     ) -> Result<(), AppError> {
         let path = self.book_source_cache_path(user_ns, book_url);
         if path.exists() {
-            fs::remove_file(&path)
-                .await
-                .map_err(|e| AppError::Internal(e.into()))?;
+            match fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(AppError::Internal(err.into())),
+            }
         }
         Ok(())
     }
@@ -4701,44 +4809,95 @@ impl BookService {
     ) -> Result<(), AppError> {
         let path = self.chapter_list_cache_path(user_ns, toc_url);
         if path.exists() {
-            fs::remove_file(&path)
-                .await
-                .map_err(|e| AppError::Internal(e.into()))?;
+            match fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(AppError::Internal(err.into())),
+            }
         }
         Ok(())
     }
 
     async fn clear_book_related_cache(&self, user_ns: &str, book: &Book) -> Result<(), AppError> {
+        let mut failed = self
+            .clear_book_related_cache_without_cover(user_ns, book)
+            .await
+            .is_err();
+        failed |= self.clear_book_cover_cache(book).await.is_err();
+        if failed {
+            Err(AppError::Internal(anyhow::anyhow!(
+                "部分书籍缓存未清理"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// 清理正文、书源和目录缓存。封面缓存由调用方决定逐本清理还是整批清理。
+    async fn clear_book_related_cache_without_cover(
+        &self,
+        user_ns: &str,
+        book: &Book,
+    ) -> Result<(), AppError> {
         let mut chapter_urls = Vec::new();
+        let mut failed = false;
         if let Some(toc_url) = book.toc_url.as_deref().filter(|url| !url.is_empty()) {
             if let Ok(Some(chapters)) = self.load_chapter_list_cache(user_ns, toc_url).await {
                 chapter_urls.extend(chapters.into_iter().map(|chapter| chapter.url));
             }
         }
         if !book.book_url.is_empty() {
-            let _ = self.delete_book_cache(user_ns, &book.book_url).await;
-            let _ = self
+            failed |= self
+                .delete_book_cache(user_ns, &book.book_url)
+                .await
+                .is_err();
+            failed |= self
                 .delete_book_sources_cache(user_ns, &book.book_url)
-                .await;
-            let _ = self
+                .await
+                .is_err();
+            failed |= self
                 .delete_chapter_list_cache(user_ns, &book.book_url)
-                .await;
-        }
-        if let Some(cover_url) = book.cover_url.as_deref() {
-            let _ = self.delete_cover_cache("public", cover_url).await;
-        }
-        if let Some(cover_url) = book.custom_cover_url.as_deref() {
-            if book.cover_url.as_deref() != Some(cover_url) {
-                let _ = self.delete_cover_cache("public", cover_url).await;
-            }
+                .await
+                .is_err();
         }
         if let Some(toc_url) = &book.toc_url {
             if !toc_url.is_empty() {
-                let _ = self.delete_chapter_list_cache(user_ns, toc_url).await;
+                failed |= self
+                    .delete_chapter_list_cache(user_ns, toc_url)
+                    .await
+                    .is_err();
             }
         }
         self.clear_book_variables(&book.book_url, &chapter_urls);
-        Ok(())
+        if failed {
+            Err(AppError::Internal(anyhow::anyhow!(
+                "部分书籍缓存未清理"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn clear_book_cover_cache(
+        &self,
+        book: &Book,
+    ) -> Result<(), AppError> {
+        let mut failed = false;
+        if let Some(cover_url) = book.cover_url.as_deref() {
+            failed |= self.delete_cover_cache("public", cover_url).await.is_err();
+        }
+        if let Some(cover_url) = book.custom_cover_url.as_deref() {
+            if book.cover_url.as_deref() != Some(cover_url) {
+                failed |= self.delete_cover_cache("public", cover_url).await.is_err();
+            }
+        }
+        if failed {
+            Err(AppError::Internal(anyhow::anyhow!(
+                "部分书籍封面缓存未清理"
+            )))
+        } else {
+            Ok(())
+        }
     }
 }
 

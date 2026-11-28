@@ -4,7 +4,8 @@ import {
   getBookshelfWithCacheInfo,
   getBookGroups,
   deleteBook as apiDeleteBook,
-  deleteBooks as apiDeleteBooks,
+  deleteBooksWithProgress as apiDeleteBooksWithProgress,
+  type DeleteBooksProgress,
   saveBook as apiSaveBook,
   saveBookGroupId as apiSaveBookGroupId,
   saveBookGroup as apiSaveBookGroup,
@@ -440,28 +441,74 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     selectedBookUrls.value = new Set()
   }
 
-  async function bulkDelete() {
+  async function bulkDelete(
+    onProgress?: (progress: DeleteBooksProgress) => void,
+  ): Promise<{ deleted: number; removedUrls: string[]; cacheCleanupFailed: number; fileCleanupFailed: number }> {
     const toDelete = books.value
       .filter(b => selectedBookUrls.value.has(b.bookUrl))
       .map(b => ({ bookUrl: b.bookUrl, origin: b.origin }))
     
-    if (toDelete.length === 0) return
-    // 删除前先记下被删的书：清候选缓存需要 name/author/bookUrl/origin 全套，
-    // 而 `apiDeleteBooks` 之后 books 里就查不到了。
-    const removedBooks = books.value.filter(b => selectedBookUrls.value.has(b.bookUrl))
-    await apiDeleteBooks(toDelete as Book[])
-    books.value = books.value.filter(b => !selectedBookUrls.value.has(b.bookUrl))
-    const candidateCache = getSourceCandidateCache()
-    for (const book of removedBooks) {
-      candidateCache.delete(sourceCandidateBookKey({
-        name: book.name,
-        author: book.author,
-        bookUrl: book.bookUrl,
-        origin: book.origin,
-      }))
-      clearReadHistory(book.bookUrl)
+    if (toDelete.length === 0) {
+      return { deleted: 0, removedUrls: [], cacheCleanupFailed: 0, fileCleanupFailed: 0 }
     }
-    clearSelection()
+    // 删除前先记下被删的书：清候选缓存需要 name/author/bookUrl/origin 全套，
+    // 而删除请求完成后 books 里就查不到了。
+    const removedBooks = books.value.filter(b => selectedBookUrls.value.has(b.bookUrl))
+    let result = {
+      deleted: 0,
+      removedUrls: [] as string[],
+      cacheCleanupFailed: 0,
+      fileCleanupFailed: 0,
+    }
+    let cacheCleanupFailed = 0
+    const settleRemoval = () => {
+      const removedUrls = new Set(result.removedUrls)
+      books.value = books.value.filter(b => !removedUrls.has(b.bookUrl))
+      selectedBookUrls.value = new Set([
+        ...selectedBookUrls.value,
+      ].filter(url => !removedUrls.has(url)))
+    }
+    const cleanupDerivedState = () => {
+      const removedUrls = new Set(result.removedUrls)
+      const candidateCache = getSourceCandidateCache()
+      for (const book of removedBooks) {
+        if (!removedUrls.has(book.bookUrl)) continue
+        candidateCache.delete(sourceCandidateBookKey({
+          name: book.name,
+          author: book.author,
+          bookUrl: book.bookUrl,
+          origin: book.origin,
+        }))
+        clearReadHistory(book.bookUrl)
+      }
+    }
+    try {
+      result = await apiDeleteBooksWithProgress(toDelete as Book[], (progress) => {
+        if (progress.stage === 'removed') {
+          result.removedUrls = progress.removedUrls
+          settleRemoval()
+        }
+        if (progress.stage === 'cleanup') {
+          cacheCleanupFailed = progress.failed
+        }
+        onProgress?.(progress)
+      })
+    } catch (error) {
+      if (result.removedUrls.length === 0) throw error
+      // 书架记录已落盘删除，后续文件清理失败不应把它们重新塞回内存列表。
+      settleRemoval()
+      cleanupDerivedState()
+      throw error
+    }
+    if (result.removedUrls.length === 0) clearSelection()
+    settleRemoval()
+    cleanupDerivedState()
+    return {
+      deleted: result.deleted,
+      removedUrls: result.removedUrls,
+      cacheCleanupFailed: Math.max(cacheCleanupFailed, result.cacheCleanupFailed),
+      fileCleanupFailed: result.fileCleanupFailed,
+    }
   }
 
   /** 单本书移入分组(替换它原有的分组归属)。

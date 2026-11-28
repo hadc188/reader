@@ -61,6 +61,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::book::set_book_source,
         commands::book::delete_book,
         commands::book::delete_books,
+        commands::book::delete_books_with_progress,
         commands::book::save_book_progress,
         commands::book::get_shelf_book,
         commands::book::get_shelf_book_with_cache_info,

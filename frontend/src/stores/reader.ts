@@ -4026,8 +4026,9 @@ export const useReaderStore = defineStore('reader', () => {
       }
       // 卷标题章（`第一卷` 之类）的正文天然为空，它不是解析失败：
       // 阅读页会把它渲染成居中的大标题页（对齐 legado 的 isVolumeTitle）。
-      // 未标 isVolume 的空正文仍然按解析失败上报，避免把真正的坏书源掩盖掉。
-      if (!chapterContent.trim() && !chapter.isVolume) {
+      // 本地书同样可能只有标题、没有正文，不能套用书源正文规则报错。
+      // 远端书源未标 isVolume 的空正文仍然按解析失败上报。
+      if (!chapterContent.trim() && !chapter.isVolume && !localBook) {
         throw new Error('书源正文解析为空，请检查正文规则')
       }
       // 任何拿到正文的路径都入缓存, 而不是只由 loadChapter 回写。

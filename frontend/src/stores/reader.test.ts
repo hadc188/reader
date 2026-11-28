@@ -130,6 +130,24 @@ describe('reader local txt chapters', () => {
     await expect(readerStore.fetchChapterContent(0)).resolves.toBe('')
   })
 
+  it('allows an empty non-volume local txt chapter', async () => {
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(false)
+    readerStore.book = {
+      name: '本地书',
+      author: '本地导入',
+      origin: 'local-txt',
+      bookUrl: 'local-txt:abc123',
+    }
+    readerStore.chapters = [
+      { title: '第一章 重生', url: 'local-txt:abc123#0', index: 0 },
+    ]
+    vi.mocked(getBookContent).mockResolvedValue('')
+
+    await expect(readerStore.fetchChapterContent(0)).resolves.toBe('')
+  })
+
   it('does not report a fetch stage for local books', async () => {
     const appStore = useAppStore()
     const readerStore = useReaderStore()

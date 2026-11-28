@@ -30,7 +30,7 @@ fn txt_default_rules_match_legado_enabled_set() {
 
 #[test]
 fn txt_default_rules_do_not_split_numbered_list() {
-    let text = "第一章 开始\n\n1. 起床\n2. 洗漱\n3. 出门\n\n正文继续。\n第二章 结束\n正文二。\n";
+    let text = "第一章 开始\n\n1. 起床\n2、洗漱\n3）出门\n 4. 整理\n01. 出发\n\n这里继续正文内容。\n第二章 结束\n这里仍然是第二章内容。\n";
     let chapters =
         reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
             "local-txt:default-rules-list",
@@ -38,8 +38,13 @@ fn txt_default_rules_do_not_split_numbered_list() {
             &default_txt_toc_rules(),
         );
 
-    assert_eq!(chapters.len(), 2);
-    assert!(text[chapters[0].start..chapters[0].end].contains("1. 起床\n2. 洗漱\n3. 出门"));
+    let titles = chapters
+        .iter()
+        .map(|chapter| chapter.title.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(titles, vec!["第一章 开始", "第二章 结束"]);
+    assert!(text[chapters[0].start..chapters[0].end]
+        .contains("1. 起床\n2、洗漱\n3）出门\n 4. 整理\n01. 出发"));
 }
 
 #[test]
@@ -75,6 +80,120 @@ fn txt_custom_toc_rule_is_applied_to_import() {
     assert_eq!(parsed.len(), 2);
     assert_eq!(parsed[0].title, "【甲】");
     assert_eq!(parsed[1].title, "【乙】");
+}
+
+#[test]
+fn txt_custom_rule_supports_legado_lookaround_and_multiline() {
+    let text = "序章\n这里是序章内容。\n正文 开始\n这里是正文内容。\n正文完\n不应分章。\n第1章 初见\n这里是第一章内容。\n第1节课\n不应分章。\n第1篇章\n这里是篇章内容。\n第1篇张\n不应分章。\n第二章 结束\n结尾。\n";
+    let rule = TxtTocRule {
+        id: 1,
+        name: "手机端目录规则".to_string(),
+        rule: r"^[ 　\t]{0,4}(?:序章|楔子|正文(?!完|结)|终章|后记|尾声|番外|第\s{0,4}[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+?\s{0,4}(?:章|节(?!课)|卷|集(?![合和])|部(?![分赛游])|篇(?!张))).{0,30}$".to_string(),
+        example: "第一章 标准的粤语就是这样".to_string(),
+        enable: true,
+        order: 1,
+    };
+
+    let parsed = reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
+        "local-txt:legado-lookaround",
+        text,
+        &[rule],
+    );
+
+    let titles = parsed
+        .iter()
+        .map(|chapter| chapter.title.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        vec!["序章", "正文 开始", "第1章 初见", "第1篇章", "第二章 结束"]
+    );
+    assert!(text[parsed[2].start..parsed[2].end].contains("第1节课"));
+    assert!(text[parsed[3].start..parsed[3].end].contains("第1篇张"));
+}
+
+#[test]
+fn txt_custom_rule_matches_legado_lookbehind_on_first_line() {
+    let text = "第1章 开始\n这里是第一章内容。\n第二章 后来\n这里是第二章内容。\n";
+    let rule = TxtTocRule {
+        id: 1,
+        name: "手机端首行目录规则".to_string(),
+        rule: r"(?<=[　\s])第\s{0,4}[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+?\s{0,4}章.{0,30}$".to_string(),
+        example: "第1章 开始".to_string(),
+        enable: true,
+        order: 1,
+    };
+
+    let parsed = reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
+        "local-txt:legado-lookbehind-first-line",
+        text,
+        &[rule],
+    );
+
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].title, "第1章 开始");
+    assert_eq!(parsed[1].title, "第二章 后来");
+    assert!(text[parsed[0].start..parsed[0].end].contains("这里是第一章内容。"));
+}
+
+#[test]
+fn txt_custom_rule_merges_overlapping_first_line_matches() {
+    let text = "  第1章 开始\n这里是第一章内容。\n第二章 后来\n这里是第二章内容。\n";
+    let rule = TxtTocRule {
+        id: 1,
+        name: "首行空白目录规则".to_string(),
+        rule: r"(?<=\s)\s*第\s{0,4}[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+?\s{0,4}章.*$".to_string(),
+        example: "  第1章 开始".to_string(),
+        enable: true,
+        order: 1,
+    };
+
+    let parsed = reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
+        "local-txt:legado-overlap-first-line",
+        text,
+        &[rule],
+    );
+
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].title, "第1章 开始");
+    assert_eq!(parsed[1].title, "第二章 后来");
+    assert!(text[parsed[0].start..parsed[0].end].contains("这里是第一章内容。"));
+}
+
+#[test]
+fn txt_custom_rule_supports_cr_only_line_endings() {
+    let text = "第1章 开始\r这里是第一章内容。\r第二章 后来\r这里是第二章内容。";
+    let rule = TxtTocRule {
+        id: 1,
+        name: "CR 换行目录规则".to_string(),
+        rule: r"(?<=[　\s])第\s{0,4}[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+?\s{0,4}章.{0,30}$".to_string(),
+        example: "第1章 开始".to_string(),
+        enable: true,
+        order: 1,
+    };
+
+    let parsed = reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
+        "local-txt:legado-cr-only",
+        text,
+        &[rule],
+    );
+
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].title, "第1章 开始");
+    assert_eq!(parsed[1].title, "第二章 后来");
+    assert!(text[parsed[0].start..parsed[0].end].contains("这里是第一章内容。"));
+}
+
+#[test]
+fn txt_fallback_splits_cr_only_headings() {
+    let text = "第1章 开始\r这里是第一章内容。\r第二章 后来\r这里是第二章内容。";
+
+    let chapters = parse_txt_chapters("local-txt:cr-only-fallback", text);
+
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0].title, "第1章 开始");
+    assert!(chapters[0].content.contains("这里是第一章内容。"));
+    assert_eq!(chapters[1].title, "第二章 后来");
 }
 
 #[test]
@@ -228,7 +347,7 @@ async fn txt_import_saves_book_index_and_content_for_server_bookshelf() {
         std::fs::remove_dir_all(&storage_dir).unwrap();
     }
     let service = reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
-    let bytes = "第1章 开始\n第一章内容。\n第二章 后来\n第二章内容。".as_bytes();
+    let bytes = "第1章 开始\n这里是第一章内容。\n第二章 后来\n这里是第二章内容。".as_bytes();
 
     let book = service
         .import_txt_book("alice", "测试小说.txt", bytes)
@@ -263,7 +382,7 @@ async fn txt_existing_book_rebuilds_with_new_rules() {
     ));
     let _ = std::fs::remove_dir_all(&storage_dir);
     let service = reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
-    let text = "第一卷\n\n01、初见\n第一章正文。\n02、重逢\n第二章正文。\n";
+    let text = "第一卷\n\n01、初见\n这里是第一章正文。\n02、重逢\n这里是第二章正文。\n";
     let book = service
         .import_txt_book("alice", "重建目录.txt", text.as_bytes())
         .await
@@ -428,7 +547,7 @@ async fn txt_content_reads_only_the_chapter_byte_range() {
 
     let mut text = String::new();
     for index in 1..=200 {
-        text.push_str(&format!("第{index}章 标题\n第{index}章正文。\n"));
+        text.push_str(&format!("第{index}章 标题\n这里是第{index}章正文。\n"));
     }
     let book = service
         .import_txt_book("alice", "多章.txt", text.as_bytes())
@@ -444,7 +563,7 @@ async fn txt_content_reads_only_the_chapter_byte_range() {
         .get_content("alice", &chapters[199].url)
         .await
         .unwrap();
-    assert_eq!(last.trim(), "第200章正文。");
+    assert_eq!(last.trim(), "这里是第200章正文。");
 
     let _ = std::fs::remove_dir_all(storage_dir);
 }

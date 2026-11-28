@@ -6,6 +6,7 @@ use crate::util::hash::md5_hex;
 use encoding_rs::GB18030;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -155,15 +156,26 @@ pub fn parse_txt_chapter_ranges_with_rules(
     };
     let mut headings: Vec<(usize, usize, String)> = Vec::new();
     let mut offset = 0usize;
-    for line in text.split_inclusive('\n') {
-        let raw_line = line.trim_end_matches(['\r', '\n']);
+    while offset < text.len() {
+        let remaining = &text[offset..];
+        let line_len = remaining
+            .find(['\r', '\n'])
+            .unwrap_or(remaining.len());
+        let raw_line = &remaining[..line_len];
         let title = raw_line.trim();
         let content_len = raw_line.len();
         if is_chapter_heading(title, &heading_re) || is_bracketed_heading(title, &heading_re) {
             let leading_ws = raw_line.len().saturating_sub(raw_line.trim_start().len());
             headings.push((offset + leading_ws, offset + content_len, title.to_string()));
         }
-        offset += line.len();
+        let line_break_len = if remaining[line_len..].starts_with("\r\n") {
+            2
+        } else if line_len < remaining.len() {
+            1
+        } else {
+            0
+        };
+        offset += line_len + line_break_len;
     }
 
     if headings.is_empty() {
@@ -658,26 +670,137 @@ fn fallback_range(book_url: &str, text: &str) -> Vec<TxtChapterRange> {
     }]
 }
 
+const CUSTOM_TOC_RULE_BACKTRACK_LIMIT: usize = 100_000;
+
+fn normalize_toc_line_endings(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let has_bare_cr = bytes
+        .iter()
+        .enumerate()
+        .any(|(index, byte)| *byte == b'\r' && bytes.get(index + 1) != Some(&b'\n'));
+    if !has_bare_cr {
+        return Cow::Borrowed(text);
+    }
+
+    let mut normalized = bytes.to_vec();
+    for index in 0..normalized.len() {
+        if normalized[index] == b'\r' && normalized.get(index + 1) != Some(&b'\n') {
+            normalized[index] = b'\n';
+        }
+    }
+    Cow::Owned(
+        String::from_utf8(normalized)
+            .expect("replacing ASCII carriage returns keeps TXT matching text valid UTF-8"),
+    )
+}
+
+/// 手机端规则常使用 look-around，Rust `regex` 不支持这些断言。
+/// 先走无回溯的快速引擎，无法编译时再用带回溯上限的兼容引擎。
+enum TocRuleRegex {
+    Fast(Regex),
+    Compatible(fancy_regex::Regex),
+}
+
+impl TocRuleRegex {
+    fn new(pattern: &str) -> Option<Self> {
+        if let Ok(regex) = regex::RegexBuilder::new(pattern)
+            .multi_line(true)
+            .build()
+        {
+            return Some(Self::Fast(regex));
+        }
+        fancy_regex::RegexBuilder::new(pattern)
+            .multi_line(true)
+            .backtrack_limit(CUSTOM_TOC_RULE_BACKTRACK_LIMIT)
+            .build()
+            .ok()
+            .map(Self::Compatible)
+    }
+
+    fn find_ranges(&self, text: &str) -> Option<Vec<(usize, usize)>> {
+        let normalized_text = normalize_toc_line_endings(text);
+        let text = normalized_text.as_ref();
+        match self {
+            Self::Fast(regex) => Some(
+                regex
+                    .find_iter(text)
+                    .map(|item| (item.start(), item.end()))
+                    .collect(),
+            ),
+            Self::Compatible(regex) => {
+                let mut ranges = Vec::new();
+
+                // 手机端规则常用 `(?<=[　\s])` 判断标题边界。文件首行前面没有字符，
+                // 单独用虚拟换行匹配首行，再把偏移映射回原文。
+                let first_line_end = text.find(['\r', '\n']).unwrap_or(text.len());
+                if first_line_end > 0 {
+                    let mut first_line = String::with_capacity(first_line_end + 1);
+                    first_line.push('\n');
+                    first_line.push_str(&text[..first_line_end]);
+                    for item in regex.find_iter(&first_line) {
+                        let item = item.ok()?;
+                        if item.start() > 0 {
+                            ranges.push((item.start() - 1, item.end() - 1));
+                        }
+                    }
+                }
+
+                for item in regex.find_iter(text) {
+                    let item = item.ok()?;
+                    ranges.push((item.start(), item.end()));
+                }
+                ranges.sort_unstable();
+                let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+                for range in ranges {
+                    if range.0 >= range.1 {
+                        continue;
+                    }
+                    if let Some(previous) = merged.last_mut() {
+                        if range.0 < previous.1 {
+                            previous.1 = previous.1.max(range.1);
+                            continue;
+                        }
+                    }
+                    merged.push(range);
+                }
+                Some(merged)
+            }
+        }
+    }
+}
+
 fn parse_with_custom_toc_rule(
     book_url: &str,
     text: &str,
     rule: &TxtTocRule,
 ) -> Option<Vec<TxtChapterRange>> {
-    let regex = Regex::new(rule.rule.trim()).ok()?;
-    let mut matches = regex.find_iter(text);
+    let regex = match TocRuleRegex::new(rule.rule.trim()) {
+        Some(regex) => regex,
+        None => {
+            tracing::warn!(rule = %rule.name, "TXT 目录规则无法编译");
+            return None;
+        }
+    };
+    let mut matches = match regex.find_ranges(text) {
+        Some(ranges) => ranges.into_iter(),
+        None => {
+            tracing::warn!(rule = %rule.name, "TXT 目录规则执行失败，可能超过回溯上限");
+            return None;
+        }
+    };
     let first = matches.next()?;
-    if !is_standalone_match(text, first.start(), first.end()) {
+    if !is_standalone_match(text, first.0, first.1) {
         return None;
     }
     let mut chapters = Vec::new();
 
-    if text[..first.start()].trim().len() > 0 {
+    if text[..first.0].trim().len() > 0 {
         chapters.push(TxtChapterRange {
             title: "序章".to_string(),
             url: build_chapter_url(book_url, 0),
             index: 0,
             start: 0,
-            end: trim_chapter_end(text, first.start()),
+            end: trim_chapter_end(text, first.0),
             is_volume: false,
         });
     }
@@ -685,14 +808,14 @@ fn parse_with_custom_toc_rule(
     let mut current = first;
     loop {
         let next = matches.next();
-        if next.is_some_and(|item| !is_standalone_match(text, item.start(), item.end())) {
+        if next.is_some_and(|item| !is_standalone_match(text, item.0, item.1)) {
             return None;
         }
-        let content_start = skip_line_break(text, current.end());
+        let content_start = skip_line_break(text, current.1);
         let end = next
-            .map(|item| trim_chapter_end(text, item.start()).max(content_start))
+            .map(|item| trim_chapter_end(text, item.0).max(content_start))
             .unwrap_or(text.len());
-        let title = text[current.start()..current.end()].trim().to_string();
+        let title = text[current.0..current.1].trim().to_string();
         if title.is_empty() {
             return None;
         }
@@ -716,7 +839,7 @@ fn parse_with_custom_toc_rule(
 
 fn is_standalone_match(text: &str, start: usize, end: usize) -> bool {
     let line_start = text[..start]
-        .rfind('\n')
+        .rfind(['\r', '\n'])
         .map(|index| index + 1)
         .unwrap_or(0);
     let line_end = text[end..]
@@ -860,5 +983,26 @@ fn map_local_txt_read_error(err: std::io::Error) -> AppError {
         AppError::BadRequest("本地 TXT 不存在".to_string())
     } else {
         AppError::Internal(err.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::local_txt_default_rules::default_txt_toc_rules;
+
+    #[test]
+    fn default_txt_toc_rules_compile_in_compatible_engine() {
+        for rule in default_txt_toc_rules() {
+            if rule.rule.trim().is_empty() {
+                continue;
+            }
+            assert!(
+                TocRuleRegex::new(rule.rule.trim()).is_some(),
+                "内置目录规则无法编译: {} => {}",
+                rule.name,
+                rule.rule
+            );
+        }
     }
 }

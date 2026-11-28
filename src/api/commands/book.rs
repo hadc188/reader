@@ -11,6 +11,7 @@ use crate::service::local_pdf_book::{
 use crate::service::local_txt_book::{
     is_local_txt_origin, is_local_txt_url, TxtTocRule, LOCAL_TXT_ORIGIN, MAX_TXT_UPLOAD_BYTES,
 };
+use crate::service::local_txt_default_rules::default_txt_toc_rules;
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use futures::stream::{self, FuturesUnordered, StreamExt};
 use once_cell::sync::Lazy;
@@ -3949,6 +3950,23 @@ pub async fn get_txt_toc_rules(
         .json_document_service
         .read_list::<TxtTocRule>("settings", "txt_toc_rules.json")
         .await?;
+    if rules.is_empty() {
+        rules = default_txt_toc_rules();
+        state
+            .json_document_service
+            .write_list("settings", "txt_toc_rules.json", &rules)
+            .await?;
+    }
+    // 旧版本会把负数内置 id 当新规则并反复插入；读取时按规则内容去重，
+    // 让已经产生的重复项（即使被重新分配成了不同正数 id）自动收敛。
+    let rules_before_dedup = rules.len();
+    dedup_txt_toc_rules(&mut rules);
+    if rules.len() != rules_before_dedup {
+        state
+            .json_document_service
+            .write_list("settings", "txt_toc_rules.json", &rules)
+            .await?;
+    }
     rules.sort_by_key(|rule| rule.order);
     Ok(ApiResponse::ok(rules))
 }
@@ -3967,7 +3985,29 @@ pub async fn save_txt_toc_rule(
         .json_document_service
         .read_list::<TxtTocRule>("settings", "txt_toc_rules.json")
         .await?;
-    if rule.id <= 0 {
+    upsert_txt_toc_rule(&mut rules, rule.clone());
+    state
+        .json_document_service
+        .write_list("settings", "txt_toc_rules.json", &rules)
+        .await?;
+    Ok(ApiResponse::ok(rule))
+}
+
+fn dedup_txt_toc_rules(rules: &mut Vec<TxtTocRule>) {
+    let mut seen_rules = std::collections::HashSet::new();
+    rules.retain(|rule| {
+        seen_rules.insert((
+            rule.name.clone(),
+            rule.rule.clone(),
+            rule.example.clone(),
+        ))
+    });
+}
+
+fn upsert_txt_toc_rule(rules: &mut Vec<TxtTocRule>, mut rule: TxtTocRule) -> TxtTocRule {
+    // 手机端内置规则的 id 是负数，必须保留并原位更新。
+    // 只有 0 表示“尚未分配 id 的新规则”。
+    if rule.id == 0 {
         rule.id = rules.iter().map(|item| item.id).max().unwrap_or(0) + 1;
     }
     if rule.order <= 0 {
@@ -3978,11 +4018,7 @@ pub async fn save_txt_toc_rule(
     } else {
         rules.push(rule.clone());
     }
-    state
-        .json_document_service
-        .write_list("settings", "txt_toc_rules.json", &rules)
-        .await?;
-    Ok(ApiResponse::ok(rule))
+    rule
 }
 
 #[tauri::command]
@@ -4309,7 +4345,7 @@ mod tests {
     use super::{
         book_matches_delete_target, build_available_book_source_response,
         cache_count_for_shelf_display, dedup_chapters, fallback_available_book,
-        merge_book, normalized_url_arg,
+        dedup_txt_toc_rules, merge_book, normalized_url_arg, upsert_txt_toc_rule,
         resolve_cache_start_index, retain_enabled_source_books, run_cache_tasks,
         should_use_available_source_cache, is_current_source_candidate,
         effective_available_result_limit,
@@ -4329,6 +4365,43 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    fn txt_rule(id: i64, name: &str, rule: &str, enable: bool) -> crate::service::local_txt_book::TxtTocRule {
+        crate::service::local_txt_book::TxtTocRule {
+            id,
+            name: name.to_string(),
+            rule: rule.to_string(),
+            example: String::new(),
+            enable,
+            order: id.unsigned_abs() as i64,
+        }
+    }
+
+    #[test]
+    fn txt_toc_negative_builtin_id_updates_in_place_when_toggled() {
+        let mut rules = vec![txt_rule(-2, "目录", "^第.+章$", true)];
+
+        let saved = upsert_txt_toc_rule(&mut rules, txt_rule(-2, "目录", "^第.+章$", false));
+
+        assert_eq!(saved.id, -2);
+        assert_eq!(rules.len(), 1);
+        assert!(!rules[0].enable);
+    }
+
+    #[test]
+    fn txt_toc_duplicate_content_is_removed() {
+        let mut rules = vec![
+            txt_rule(-2, "目录", "^第.+章$", true),
+            txt_rule(27, "目录", "^第.+章$", false),
+            txt_rule(-1, "另一条规则", "^序章$", true),
+        ];
+
+        dedup_txt_toc_rules(&mut rules);
+
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].id, -2);
+        assert_eq!(rules[1].id, -1);
+    }
 
     #[tokio::test]
     async fn timed_out_search_source_is_reported_without_stopping_other_tasks() {

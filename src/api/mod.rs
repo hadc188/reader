@@ -77,6 +77,8 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::book::get_available_book_source_sse,
         commands::book::book_source_debug_sse,
         commands::book::get_txt_toc_rules,
+        commands::book::save_txt_toc_rule,
+        commands::book::delete_txt_toc_rule,
         commands::export::export_books_sse,
         commands::http_tts::get_http_tts_list,
         commands::http_tts::save_http_tts_list,

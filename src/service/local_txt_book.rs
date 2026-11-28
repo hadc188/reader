@@ -1,6 +1,7 @@
 use crate::error::error::AppError;
 use crate::model::{book::Book, book_chapter::BookChapter};
 use crate::service::json_document_service::JsonDocumentService;
+use crate::service::local_txt_default_rules::default_txt_toc_rules;
 use crate::util::hash::md5_hex;
 use encoding_rs::GB18030;
 use regex::Regex;
@@ -335,7 +336,7 @@ impl LocalTxtBookService {
         // 上一次分章的区间去读新文件（章号可能对不上）。
         self.invalidate_index(user_ns, &book_url).await;
         // 只要区间: 旧实现为每章复制一份正文却从不使用(索引只存 start/end)。
-        let rules = if let Some(document_service) = self.document_service.as_ref() {
+        let mut rules = if let Some(document_service) = self.document_service.as_ref() {
             match document_service
                 .read_list::<TxtTocRule>(TXT_TOC_RULE_NAMESPACE, TXT_TOC_RULE_NAME)
                 .await
@@ -349,6 +350,9 @@ impl LocalTxtBookService {
         } else {
             Vec::new()
         };
+        if rules.is_empty() {
+            rules = default_txt_toc_rules();
+        }
         let chapters = parse_txt_chapter_ranges_with_rules(&book_url, &text, &rules);
         let book_dir = self.book_dir(user_ns, &book_url)?;
         fs::create_dir_all(&book_dir)

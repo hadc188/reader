@@ -438,16 +438,24 @@ async function applyImport() {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
-  padding: 14px 0;
+  padding: 13px 12px;
   border-bottom: 1px solid var(--color-divider);
+  border-radius: 8px;
+  transition: background-color 0.15s ease;
+}
+
+.rule-row:not(.muted) {
+  background: color-mix(in srgb, var(--color-primary) 5%, var(--color-bg-elevated));
+  border-left: 3px solid color-mix(in srgb, var(--color-primary) 58%, transparent);
 }
 
 .rule-row.muted {
-  background: color-mix(in srgb, currentColor 2.5%, transparent);
+  background: color-mix(in srgb, var(--color-text-secondary) 7%, var(--color-bg-elevated));
+  border-left: 3px solid color-mix(in srgb, var(--color-text-tertiary) 42%, transparent);
 }
 
 .rule-row.muted .rule-copy {
-  opacity: 0.56;
+  opacity: 0.62;
 }
 
 .switch-button {

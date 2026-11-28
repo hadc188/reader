@@ -9,6 +9,7 @@ pub mod json_document_service;
 pub mod local_epub_book;
 pub mod local_pdf_book;
 pub mod local_txt_book;
+pub mod local_txt_default_rules;
 pub mod ms_demo_tts;
 pub mod reading_stats_service;
 pub mod source_browser;

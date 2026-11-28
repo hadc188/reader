@@ -1,4 +1,5 @@
 use reader_rust::service::local_txt_book::{build_chapter_url, parse_txt_chapters, TxtTocRule};
+use reader_rust::service::local_txt_default_rules::default_txt_toc_rules;
 
 #[test]
 fn txt_parser_splits_common_chapter_headings() {
@@ -14,6 +15,31 @@ fn txt_parser_splits_common_chapter_headings() {
     assert_eq!(chapters[1].content.trim(), "第一章正文。");
     assert_eq!(chapters[2].title, "第二章 重逢");
     assert_eq!(chapters[2].content.trim(), "第二章正文。");
+}
+
+#[test]
+fn txt_default_rules_match_legado_enabled_set() {
+    let rules = default_txt_toc_rules();
+
+    assert_eq!(rules.len(), 26);
+    assert_eq!(rules.iter().filter(|rule| rule.enable).count(), 11);
+    assert!(rules.iter().any(|rule| rule.name == "目录(去空白)" && rule.enable));
+    assert!(rules.iter().any(|rule| rule.name == "数字 分隔符 标题名称" && !rule.enable));
+    assert!(rules.iter().any(|rule| rule.name == "默认分章规则" && !rule.enable));
+}
+
+#[test]
+fn txt_default_rules_do_not_split_numbered_list() {
+    let text = "第一章 开始\n\n1. 起床\n2. 洗漱\n3. 出门\n\n正文继续。\n第二章 结束\n正文二。\n";
+    let chapters =
+        reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
+            "local-txt:default-rules-list",
+            text,
+            &default_txt_toc_rules(),
+        );
+
+    assert_eq!(chapters.len(), 2);
+    assert!(text[chapters[0].start..chapters[0].end].contains("1. 起床\n2. 洗漱\n3. 出门"));
 }
 
 #[test]

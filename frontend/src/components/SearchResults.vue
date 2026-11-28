@@ -117,6 +117,7 @@ import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
 import { showContextMenu } from '../composables/useContextMenu'
 import type { Book, SearchBook } from '../types'
+import { normalizeSearchConcurrency } from '../utils/searchConcurrency'
 
 import { storeToRefs } from 'pinia'
 
@@ -461,7 +462,7 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
   const stream = searchBookMultiSSE({
     key,
     page: pageNo,
-    concurrentCount: 24,
+    concurrentCount: normalizeSearchConcurrency(appStore.searchConcurrency),
     bookSourceGroup: searchScope.value === 'group' ? selectedGroup.value : undefined,
     bookSourceUrl: searchScope.value === 'source' ? selectedSourceUrl.value : undefined,
     lastIndex: startIndex,

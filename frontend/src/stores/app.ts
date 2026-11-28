@@ -19,6 +19,7 @@ import {
   normalizeTitlebarShortcut,
   DEFAULT_TITLEBAR_SHORTCUT,
 } from '../utils/bossKey'
+import { normalizeSearchConcurrency } from '../utils/searchConcurrency'
 
 export const useAppStore = defineStore('app', () => {
   const STATS_KEY = 'reader-stats'
@@ -33,6 +34,7 @@ export const useAppStore = defineStore('app', () => {
   const TITLEBAR_SHORTCUT_KEY = 'reader-titlebar-shortcut'
   const NETWORK_PROXY_MODE_KEY = 'reader-network-proxy-mode'
   const NETWORK_PROXY_URL_KEY = 'reader-network-proxy-url'
+  const SEARCH_CONCURRENCY_KEY = 'reader-search-concurrency'
   // ─── Theme ───
   const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null
   const legacyReaderNight = localStorage.getItem('reader-isNight') === 'true'
@@ -267,6 +269,16 @@ export const useAppStore = defineStore('app', () => {
     localStorage.setItem(NETWORK_PROXY_MODE_KEY, mode)
     localStorage.setItem(NETWORK_PROXY_URL_KEY, normalizedUrl)
     return status
+  }
+
+  // ─── Search concurrency ───
+  const searchConcurrency = ref(
+    normalizeSearchConcurrency(localStorage.getItem(SEARCH_CONCURRENCY_KEY)),
+  )
+
+  function setSearchConcurrency(value: number) {
+    searchConcurrency.value = normalizeSearchConcurrency(value)
+    localStorage.setItem(SEARCH_CONCURRENCY_KEY, String(searchConcurrency.value))
   }
 
   // ─── 隐藏功能（在设置里可隐藏统计、RSS 等导航入口）───
@@ -763,6 +775,7 @@ export const useAppStore = defineStore('app', () => {
     hideTitlebar, titlebarShortcut,
     setHideTitlebar, setTitlebarShortcut, resetTitlebarShortcut, toggleTitlebar,
     networkProxyMode, networkProxyUrl, networkProxyStatus, applyNetworkProxy, setNetworkProxy,
+    searchConcurrency, setSearchConcurrency,
     versionUpdate, versionUpdateLoading, desktopUpdateLoading, desktopUpdateProgress, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
     autoCheckUpdate, setAutoCheckUpdate, runStartupVersionCheck,
     checkVersionUpdate, dismissVersionUpdateReminder, applyDesktopUpdate, cancelDesktopUpdate,

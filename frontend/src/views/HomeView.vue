@@ -1350,12 +1350,20 @@ onBeforeUnmount(() => {
 
 .shelf-content {
   height: 100%;
-  max-width: var(--content-max-width);
+  width: 100%;
+  max-width: 1760px;
   margin: 0 auto;
   padding: 0 var(--space-6);
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+@media (min-width: 1600px) {
+  .shelf-content {
+    max-width: 1920px;
+    padding-inline: var(--space-10);
+  }
 }
 
 
@@ -1658,6 +1666,12 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   padding: var(--space-6) 0 var(--space-3);
+}
+
+@media (min-width: 1600px) {
+  .shelf-header {
+    padding-top: var(--space-8);
+  }
 }
 
 .shelf-title {

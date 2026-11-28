@@ -106,6 +106,12 @@ pub struct TxtChapterRange {
     pub is_volume: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuiltTxtToc {
+    pub chapter_count: usize,
+    pub latest_chapter_title: Option<String>,
+}
+
 pub fn parse_txt_chapters(book_url: &str, text: &str) -> Vec<ParsedTxtChapter> {
     parse_txt_chapter_ranges(book_url, text)
         .into_iter()
@@ -439,6 +445,106 @@ impl LocalTxtBookService {
                 ..BookChapter::default()
             })
             .collect())
+    }
+
+    pub async fn rebuild_chapters_with_current_rules(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+    ) -> Result<RebuiltTxtToc, AppError> {
+        let book_dir = self.book_dir(user_ns, book_url)?;
+        let text = match fs::read_to_string(book_dir.join("book.txt")).await {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RebuiltTxtToc {
+                    chapter_count: 0,
+                    latest_chapter_title: None,
+                });
+            }
+            Err(err) => return Err(map_local_txt_read_error(err)),
+        };
+        let old_index = self.read_index(user_ns, book_url).await?;
+        let mut rules = if let Some(document_service) = self.document_service.as_ref() {
+            match document_service
+                .read_list::<TxtTocRule>(TXT_TOC_RULE_NAMESPACE, TXT_TOC_RULE_NAME)
+                .await
+            {
+                Ok(rules) => rules,
+                Err(error) => {
+                    tracing::warn!("failed to read local txt toc rules, using defaults: {error}");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        if rules.is_empty() {
+            rules = default_txt_toc_rules();
+        }
+        let rebuilt = self
+            .write_rebuilt_index(book_url, &book_dir, &text, &old_index, &rules)
+            .await?;
+        self.invalidate_index(user_ns, book_url).await;
+        Ok(rebuilt)
+    }
+
+    pub async fn rebuild_chapters_with_rules(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        rules: &[TxtTocRule],
+    ) -> Result<RebuiltTxtToc, AppError> {
+        let book_dir = self.book_dir(user_ns, book_url)?;
+        let text = fs::read_to_string(book_dir.join("book.txt"))
+            .await
+            .map_err(map_local_txt_read_error)?;
+        let old_index = self.read_index(user_ns, book_url).await?;
+        let rebuilt = self
+            .write_rebuilt_index(book_url, &book_dir, &text, &old_index, rules)
+            .await?;
+        self.invalidate_index(user_ns, book_url).await;
+        Ok(rebuilt)
+    }
+
+    async fn write_rebuilt_index(
+        &self,
+        book_url: &str,
+        book_dir: &Path,
+        text: &str,
+        old_index: &StoredTxtIndex,
+        rules: &[TxtTocRule],
+    ) -> Result<RebuiltTxtToc, AppError> {
+        let chapters = parse_txt_chapter_ranges_with_rules(book_url, text, rules);
+        let stored = chapters
+            .into_iter()
+            .map(|chapter| StoredTxtChapter {
+                title: chapter.title,
+                url: chapter.url,
+                index: chapter.index,
+                start: chapter.start,
+                end: chapter.end,
+                is_volume: chapter.is_volume,
+            })
+            .collect::<Vec<_>>();
+        let chapter_count = stored.len();
+        let latest_chapter_title = stored.last().map(|chapter| chapter.title.clone());
+        let index = StoredTxtIndex {
+            book_url: old_index.book_url.clone(),
+            name: old_index.name.clone(),
+            file_name: old_index.file_name.clone(),
+            byte_len: text.len(),
+            char_len: text.chars().count(),
+            chapters: stored,
+        };
+        let data =
+            serde_json::to_string_pretty(&index).map_err(|e| AppError::Internal(e.into()))?;
+        fs::write(book_dir.join("chapters.json"), data)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        Ok(RebuiltTxtToc {
+            chapter_count,
+            latest_chapter_title,
+        })
     }
 
     pub async fn get_content(&self, user_ns: &str, chapter_url: &str) -> Result<String, AppError> {

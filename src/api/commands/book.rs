@@ -9,7 +9,8 @@ use crate::service::local_pdf_book::{
     is_local_pdf_origin, is_local_pdf_url, MAX_PDF_UPLOAD_BYTES,
 };
 use crate::service::local_txt_book::{
-    is_local_txt_origin, is_local_txt_url, TxtTocRule, LOCAL_TXT_ORIGIN, MAX_TXT_UPLOAD_BYTES,
+    is_local_txt_origin, is_local_txt_url, RebuiltTxtToc, TxtTocRule, LOCAL_TXT_ORIGIN,
+    MAX_TXT_UPLOAD_BYTES,
 };
 use crate::service::local_txt_default_rules::default_txt_toc_rules;
 use crate::util::text::{normalize_source_url, repair_encoded_url};
@@ -3958,10 +3959,8 @@ pub async fn get_txt_toc_rules(
             .await?;
     }
     // 旧版本会把负数内置 id 当新规则并反复插入；读取时按规则内容去重，
-    // 让已经产生的重复项（即使被重新分配成了不同正数 id）自动收敛。
-    let rules_before_dedup = rules.len();
-    dedup_txt_toc_rules(&mut rules);
-    if rules.len() != rules_before_dedup {
+    // 并把遗留的 id=0 转成唯一正数 id，避免同一个开关再次分裂成两条规则。
+    if normalize_txt_toc_rules(&mut rules) {
         state
             .json_document_service
             .write_list("settings", "txt_toc_rules.json", &rules)
@@ -3985,30 +3984,80 @@ pub async fn save_txt_toc_rule(
         .json_document_service
         .read_list::<TxtTocRule>("settings", "txt_toc_rules.json")
         .await?;
-    upsert_txt_toc_rule(&mut rules, rule.clone());
+    let saved = upsert_txt_toc_rule(&mut rules, rule);
     state
         .json_document_service
         .write_list("settings", "txt_toc_rules.json", &rules)
         .await?;
-    Ok(ApiResponse::ok(rule))
+    Ok(ApiResponse::ok(saved))
 }
 
 fn dedup_txt_toc_rules(rules: &mut Vec<TxtTocRule>) {
     let mut seen_rules = std::collections::HashSet::new();
+    // 保留最后一次保存的状态。旧数据里 id=0 的启用副本通常在前，
+    // 后续真正保存过开关的正数 id 副本在后；保留第一条会把关闭状态丢掉。
+    rules.reverse();
     rules.retain(|rule| {
-        seen_rules.insert((
-            rule.name.clone(),
-            rule.rule.clone(),
-            rule.example.clone(),
-        ))
+        seen_rules.insert(txt_toc_rule_key(rule))
     });
+    rules.reverse();
+}
+
+fn txt_toc_rule_key(rule: &TxtTocRule) -> (String, String, String) {
+    (rule.name.clone(), rule.rule.clone(), rule.example.clone())
+}
+
+fn same_txt_toc_rule(left: &TxtTocRule, right: &TxtTocRule) -> bool {
+    left.name == right.name && left.rule == right.rule && left.example == right.example
+}
+
+fn next_txt_toc_rule_id(rules: &[TxtTocRule]) -> i64 {
+    rules
+        .iter()
+        .map(|item| item.id)
+        .filter(|id| *id > 0)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .max(1)
+}
+
+fn normalize_txt_toc_rules(rules: &mut Vec<TxtTocRule>) -> bool {
+    let rules_before_dedup = rules.len();
+    dedup_txt_toc_rules(rules);
+    let mut changed = rules.len() != rules_before_dedup;
+    let mut next_id = rules
+        .iter()
+        .map(|item| item.id)
+        .filter(|id| *id > 0)
+        .max()
+        .unwrap_or(0);
+    for rule in rules.iter_mut().filter(|rule| rule.id == 0) {
+        next_id = next_id.saturating_add(1).max(1);
+        rule.id = next_id;
+        changed = true;
+    }
+    changed
 }
 
 fn upsert_txt_toc_rule(rules: &mut Vec<TxtTocRule>, mut rule: TxtTocRule) -> TxtTocRule {
+    normalize_txt_toc_rules(rules);
     // 手机端内置规则的 id 是负数，必须保留并原位更新。
     // 只有 0 表示“尚未分配 id 的新规则”。
     if rule.id == 0 {
-        rule.id = rules.iter().map(|item| item.id).max().unwrap_or(0) + 1;
+        // 旧数据可能留下 id=0 的既有规则。前端编辑这种规则时仍会传 id=0，
+        // 若直接分配新 id 会插入重复项；内容相同则原位更新归一化后的记录。
+        if let Some(existing) = rules
+            .iter()
+            .find(|item| same_txt_toc_rule(item, &rule))
+        {
+            rule.id = existing.id;
+            if rule.order <= 0 {
+                rule.order = existing.order;
+            }
+        } else {
+            rule.id = next_txt_toc_rule_id(rules);
+        }
     }
     if rule.order <= 0 {
         rule.order = rules.iter().map(|item| item.order).max().unwrap_or(0) + 1;
@@ -4036,6 +4085,84 @@ pub async fn delete_txt_toc_rule(
         .write_list("settings", "txt_toc_rules.json", &rules)
         .await?;
     Ok(ApiResponse::ok(()))
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebuildLocalTxtTocsResult {
+    pub rebuilt: usize,
+    pub failed: usize,
+    pub metadata_failed: usize,
+}
+
+async fn update_rebuilt_local_txt_metadata(
+    state: &AppState,
+    user_ns: &str,
+    book_url: &str,
+    rebuilt: &RebuiltTxtToc,
+) -> Result<bool, AppError> {
+    let mut updated = false;
+    state
+        .book_service
+        .update_books_in_place(user_ns, |books| {
+            let Some(book) = books.iter_mut().find(|book| book.book_url == book_url) else {
+                return Ok(false);
+            };
+            book.total_chapter_num = Some(rebuilt.chapter_count as i32);
+            book.latest_chapter_title = rebuilt.latest_chapter_title.clone();
+            updated = true;
+            Ok(true)
+        })
+        .await?;
+    Ok(updated)
+}
+
+/// 仅在用户显式刷新单本本地 TXT 时重建目录。规则增删改和启停只保存规则表。
+#[tauri::command]
+pub async fn rebuild_local_txt_tocs(
+    state: tauri::State<'_, AppState>,
+    book_url: String,
+) -> Result<ApiResponse<RebuildLocalTxtTocsResult>, AppError> {
+    let user_ns = "default";
+    let book_url = book_url.trim();
+    if book_url.is_empty() {
+        return Err(AppError::BadRequest("bookUrl required".to_string()));
+    }
+    if !is_local_txt_url(book_url) {
+        return Err(AppError::BadRequest("bookUrl 不是本地 TXT 书籍".to_string()));
+    }
+    let book_url = repair_encoded_url(book_url);
+    let rebuilt_toc = state
+        .local_txt_book_service
+        .rebuild_chapters_with_current_rules(user_ns, &book_url)
+        .await?;
+    if rebuilt_toc.chapter_count == 0 {
+        return Ok(ApiResponse::ok(RebuildLocalTxtTocsResult {
+            rebuilt: 0,
+            failed: 1,
+            metadata_failed: 0,
+        }));
+    }
+    match update_rebuilt_local_txt_metadata(&state, user_ns, &book_url, &rebuilt_toc).await {
+        Ok(true) => Ok(ApiResponse::ok(RebuildLocalTxtTocsResult {
+            rebuilt: 1,
+            failed: 0,
+            metadata_failed: 0,
+        })),
+        Ok(false) => Ok(ApiResponse::ok(RebuildLocalTxtTocsResult {
+            rebuilt: 1,
+            failed: 0,
+            metadata_failed: 1,
+        })),
+        Err(error) => {
+            tracing::warn!(book_url = %book_url, "failed to update local txt metadata: {error}");
+            Ok(ApiResponse::ok(RebuildLocalTxtTocsResult {
+                rebuilt: 1,
+                failed: 0,
+                metadata_failed: 1,
+            }))
+        }
+    }
 }
 
 async fn find_matching_books(
@@ -4345,7 +4472,8 @@ mod tests {
     use super::{
         book_matches_delete_target, build_available_book_source_response,
         cache_count_for_shelf_display, dedup_chapters, fallback_available_book,
-        dedup_txt_toc_rules, merge_book, normalized_url_arg, upsert_txt_toc_rule,
+        dedup_txt_toc_rules, merge_book, normalize_txt_toc_rules, normalized_url_arg,
+        upsert_txt_toc_rule,
         resolve_cache_start_index, retain_enabled_source_books, run_cache_tasks,
         should_use_available_source_cache, is_current_source_candidate,
         effective_available_result_limit,
@@ -4389,7 +4517,18 @@ mod tests {
     }
 
     #[test]
-    fn txt_toc_duplicate_content_is_removed() {
+    fn txt_toc_new_rule_returns_assigned_id() {
+        let mut rules = vec![txt_rule(-2, "内置规则", "^第.+章$", true)];
+
+        let saved = upsert_txt_toc_rule(&mut rules, txt_rule(0, "新规则", "^序章$", true));
+
+        assert_eq!(saved.id, 1);
+        assert!(saved.order > 0);
+        assert_eq!(rules.last().map(|rule| rule.id), Some(saved.id));
+    }
+
+    #[test]
+    fn txt_toc_duplicate_content_keeps_latest_state() {
         let mut rules = vec![
             txt_rule(-2, "目录", "^第.+章$", true),
             txt_rule(27, "目录", "^第.+章$", false),
@@ -4399,8 +4538,58 @@ mod tests {
         dedup_txt_toc_rules(&mut rules);
 
         assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0].id, -2);
+        assert_eq!(rules[0].id, 27);
+        assert!(!rules[0].enable);
         assert_eq!(rules[1].id, -1);
+    }
+
+    #[test]
+    fn txt_toc_legacy_zero_id_is_normalized_on_read() {
+        let mut rules = vec![
+            txt_rule(0, "数字章节", r"^\d+、.+$", true),
+            txt_rule(-1, "内置规则", "^第一章$", true),
+        ];
+
+        assert!(normalize_txt_toc_rules(&mut rules));
+
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].id, 1);
+        assert!(rules[0].enable);
+        assert!(!normalize_txt_toc_rules(&mut rules));
+    }
+
+    #[test]
+    fn txt_toc_legacy_zero_duplicate_keeps_closed_state() {
+        let mut rules = vec![
+            txt_rule(0, "数字章节", r"^\d+、.+$", true),
+            txt_rule(1, "数字章节", r"^\d+、.+$", false),
+        ];
+
+        assert!(normalize_txt_toc_rules(&mut rules));
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, 1);
+        assert!(!rules[0].enable);
+    }
+
+    #[test]
+    fn txt_toc_legacy_zero_id_toggle_updates_same_rule() {
+        let mut rules = vec![txt_rule(
+            0,
+            "数字章节",
+            r"^\d+、.+$",
+            true,
+        )];
+
+        let saved = upsert_txt_toc_rule(
+            &mut rules,
+            txt_rule(0, "数字章节", r"^\d+、.+$", false),
+        );
+
+        assert_eq!(saved.id, 1);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, 1);
+        assert!(!rules[0].enable);
     }
 
     #[tokio::test]

@@ -21,7 +21,8 @@ import {
 import { applyReplaceRulesInSandbox, getReplaceRules, type SandboxReplaceRuleStep } from '../api/replaceRule'
 import type { Book, BookChapter, Bookmark, ReplaceRule } from '../types'
 import { readHistoryStorageKey } from '../utils/readHistory'
-import { isLocalBook } from '../utils/localBook'
+import { isLocalBook, isLocalTxtBook } from '../utils/localBook'
+import { rebuildLocalTxtTocs } from '../api/txtTocRule'
 import { PDF_PAGE_ATTR } from '../utils/pdfPages'
 import { saveRecentReadBook } from '../utils/recentBooks'
 import {
@@ -4053,8 +4054,8 @@ export const useReaderStore = defineStore('reader', () => {
     index: number,
     forceRefresh = false,
     initialProgressOverride?: number,
-  ) {
-    if (!book.value || !chapters.value[index]) return
+  ): Promise<boolean> {
+    if (!book.value || !chapters.value[index]) return false
 
     if (legadoPositionRestoreCompleted.value?.index !== index) {
       legadoPositionRestoreCompleted.value = null
@@ -4099,8 +4100,8 @@ export const useReaderStore = defineStore('reader', () => {
         if (requestId === chapterLoadRequestId) loading.value = true
         chapterContent = await fetchChapterContent(index, forceRefresh, true)
       }
-      if (chapterContent == null) return
-      if (requestId !== chapterLoadRequestId || book.value?.bookUrl !== bookUrl) return
+      if (chapterContent == null) return false
+      if (requestId !== chapterLoadRequestId || book.value?.bookUrl !== bookUrl) return false
 
       const previousSavedIndex = book.value.durChapterIndex ?? 0
       const previousSavedProgress = decodeServerProgress(book.value.durChapterPos)
@@ -4145,12 +4146,13 @@ export const useReaderStore = defineStore('reader', () => {
       loading.value = false
 
       if (!isOpeningSavedChapter) {
-        void persistProgress(index, cloudProgress ?? 0)
+        void persistProgress(index, initialProgress)
       }
 
       if (config.enablePreload) {
         void preloadAroundChapter(index)
       }
+      return true
     } catch (error) {
       // 章节加载失败必须让用户看到原因(如书源提示"VIP专属内容"、正文规则为空、
       // 网络失败)。此前错误只向上抛: 目录/跳章的调用点没有 catch, 变成未处理
@@ -4159,6 +4161,7 @@ export const useReaderStore = defineStore('reader', () => {
         const message = error instanceof Error ? error.message : String(error ?? '')
         appStore.showToast(message.trim() || '章节加载失败，请稍后重试', 'error')
       }
+      return false
     } finally {
       // 只收尾 loading：阶段提示由 fetchChapterContent 的持有者机制管理，
       // 这里再清一次会误清连续模式下并发加载刚设置的提示。
@@ -4242,21 +4245,28 @@ export const useReaderStore = defineStore('reader', () => {
 
   function resolveChapterIndexByTitle(list: BookChapter[], targetTitle?: string, fallbackIndex = 0) {
     if (!list.length) return 0
+    const fallback = Math.max(0, Math.min(list.length - 1, fallbackIndex))
     const normalizedTarget = normalizeChapterTitle(targetTitle)
     if (!normalizedTarget) {
-      return Math.max(0, Math.min(list.length - 1, fallbackIndex))
+      return fallback
     }
 
-    const exactIndex = list.findIndex((chapter) => normalizeChapterTitle(chapter.title) === normalizedTarget)
-    if (exactIndex >= 0) return exactIndex
-
-    const partialIndex = list.findIndex((chapter) => {
+    let exactIndex = -1
+    let partialIndex = -1
+    const distance = (index: number) => Math.abs(index - fallback)
+    list.forEach((chapter, index) => {
       const title = normalizeChapterTitle(chapter.title)
-      return title.includes(normalizedTarget) || normalizedTarget.includes(title)
+      if (title === normalizedTarget && (exactIndex < 0 || distance(index) < distance(exactIndex))) {
+        exactIndex = index
+      } else if ((title.includes(normalizedTarget) || normalizedTarget.includes(title))
+        && (partialIndex < 0 || distance(index) < distance(partialIndex))) {
+        partialIndex = index
+      }
     })
+    if (exactIndex >= 0) return exactIndex
     if (partialIndex >= 0) return partialIndex
 
-    return Math.max(0, Math.min(list.length - 1, fallbackIndex))
+    return fallback
   }
 
   /* ─── Switch Source ─── */
@@ -4479,32 +4489,65 @@ export const useReaderStore = defineStore('reader', () => {
     return task
   }
 
-  async function refreshChapters() {
-    if (!book.value) return
+  async function refreshChapters(): Promise<boolean> {
+    const currentBook = book.value
+    if (!currentBook) return false
+    const requestId = bookLoadRequestId
+    const bookUrl = currentBook.bookUrl
+    const previousChapters = chapters.value
+    const previousIndex = currentIndex.value
+    const previousTitle = chapters.value[currentIndex.value]?.title
+    const previousProgress = chapterScrollProgress.value
     chaptersLoading.value = true
     bookLoadError.value = ''
     try {
       preloadedContent.value.clear()
       preloadingContent.clear()
       chapterPreloadGeneration += 1
-      markTocChecked(book.value.bookUrl)
-      const fresh = await fetchTocListWithStabilizing()
+      let fresh: BookChapter[]
+      if (isLocalTxtBook(currentBook)) {
+        const rebuilt = await rebuildLocalTxtTocs(bookUrl)
+        if (rebuilt.failed > 0 || rebuilt.rebuilt === 0) {
+          throw new Error('本地 TXT 目录重建失败')
+        }
+        if (requestId !== bookLoadRequestId || book.value?.bookUrl !== bookUrl) return false
+        fresh = await getChapterList({ bookUrl, bookSourceUrl: currentBook.origin })
+      } else {
+        markTocChecked(bookUrl)
+        fresh = await fetchTocListWithStabilizing()
+      }
+      if (requestId !== bookLoadRequestId || book.value?.bookUrl !== bookUrl) return false
       if (!fresh.length) {
         // 目录刷成空必须报出来。此前这里静默接受空数组：目录列表直接变空白，
         // 阅读页正文也不动，用户只会以为"刷新按钮坏了"。
         throw new Error('目录为空，请检查书源或稍后重试')
       }
       chapters.value = fresh
-      const targetIndex = Math.max(0, Math.min(chapters.value.length - 1, currentIndex.value))
+      const targetIndex = resolveChapterIndexByTitle(fresh, previousTitle, currentIndex.value)
       if (chapters.value[targetIndex]) {
-        await loadChapter(targetIndex, true)
+        const refreshChapterRequestId = chapterLoadRequestId + 1
+        if (!await loadChapter(targetIndex, true, previousProgress)) {
+          if (requestId === bookLoadRequestId
+            && book.value?.bookUrl === bookUrl
+            && chapterLoadRequestId === refreshChapterRequestId) {
+            chapters.value = previousChapters
+            currentIndex.value = previousIndex
+            chapterScrollProgress.value = previousProgress
+          }
+          return false
+        }
+        saveReaderSession()
       }
+      return true
     } catch (error) {
+      if (requestId !== bookLoadRequestId || book.value?.bookUrl !== bookUrl) return false
       const message = (error instanceof Error ? error.message : String(error ?? '')).trim()
       appStore.showToast(message || '刷新目录失败', 'error')
       throw error
     } finally {
-      chaptersLoading.value = false
+      if (requestId === bookLoadRequestId && book.value?.bookUrl === bookUrl) {
+        chaptersLoading.value = false
+      }
     }
   }
 

@@ -473,7 +473,7 @@ import {
   shouldShowChapterLoading,
 } from '../utils/readerChapterLoading'
 import { shouldPreferServerReadingPosition, toMillis, type ReadingPositionSnapshot } from '../utils/readingPosition'
-import { isLocalBook, isLocalEpubBook } from '../utils/localBook'
+import { isLocalBook, isLocalEpubBook, isLocalTxtBook } from '../utils/localBook'
 import { PDF_PAGE_ATTR, isPdfBook, releasePdfBook, renderPdfChapterPages } from '../utils/pdfPages'
 import { rewriteCssAssetUrls, toReaderAssetUrl } from '../utils/localEpubAsset'
 import { readerWindowBackground as composeReaderWindowBackground } from '../utils/readerBackground'
@@ -3111,11 +3111,18 @@ function stopAutoReadingFromStatus() {
 
 async function refreshFromContextMenu() {
   closeReaderContextMenu()
+  const localTxt = isLocalTxtBook(store.book)
   try {
-    await store.refreshContent()
-    appStore.showToast('当前章节已刷新', 'success')
+    if (localTxt) {
+      if (await store.refreshChapters()) {
+        appStore.showToast('本地 TXT 目录和当前章节已刷新', 'success')
+      }
+    } else {
+      await store.refreshContent()
+      appStore.showToast('当前章节已刷新', 'success')
+    }
   } catch (error) {
-    appStore.showToast((error as Error).message || '刷新失败', 'error')
+    if (!localTxt) appStore.showToast((error as Error).message || '刷新失败', 'error')
   }
 }
 

@@ -128,7 +128,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
-import { deleteTxtTocRule, getTxtTocRules, saveTxtTocRule, type TxtTocRule } from '../api/txtTocRule'
+import {
+  deleteTxtTocRule,
+  getTxtTocRules,
+  saveTxtTocRule,
+  type TxtTocRule,
+} from '../api/txtTocRule'
 import SettingsRuleDialog from './SettingsRuleDialog.vue'
 import {
   markImportedRules,
@@ -241,18 +246,29 @@ async function applyImport() {
   const selected = selectedCandidates.value
   if (!selected.length || importBusy.value) return
   importBusy.value = true
+  let imported = 0
+  let failed = false
   try {
     for (const rule of selected) {
       const { selected: _selected, importState: _importState, ...payload } = rule
-      await saveTxtTocRule(payload)
+      const saved = await saveTxtTocRule(payload)
+      replaceOrAppendRule(saved)
+      imported += 1
     }
-    closeImport()
-    await fetchRules()
-    appStore.showToast(`已导入 ${selected.length} 条目录规则`, 'success')
   } catch (error) {
-    appStore.showToast((error as Error).message || '导入失败', 'error')
+    failed = true
+    appStore.showToast(
+      imported > 0
+        ? `已导入 ${imported} 条规则，后续导入失败`
+        : (error as Error).message || '导入失败',
+      'error',
+    )
   } finally {
     importBusy.value = false
+  }
+  if (!failed) {
+    closeImport()
+    appStore.showToast(`已导入 ${selected.length} 条目录规则`, 'success')
   }
 }
 
@@ -265,24 +281,37 @@ async function saveRule() {
   }
   saving.value = true
   try {
-    await saveTxtTocRule(rule)
+    const saved = await saveTxtTocRule(rule)
+    replaceOrAppendRule(saved)
     editing.value = null
-    await fetchRules()
   } catch (error) {
     appStore.showToast((error as Error).message || '保存失败', 'error')
+    return
   } finally {
     saving.value = false
   }
+}
+
+function replaceOrAppendRule(saved: TxtTocRule) {
+  const index = rules.value.findIndex((item) => item.id === saved.id)
+  if (index >= 0) {
+    rules.value[index] = saved
+  } else {
+    rules.value.push(saved)
+  }
+  rules.value.sort((a, b) => a.order - b.order)
 }
 
 async function toggleRule(rule: TxtTocRule) {
   const previous = rule.enable
   rule.enable = !previous
   try {
-    await saveTxtTocRule({ ...rule })
+    const saved = await saveTxtTocRule({ ...rule })
+    Object.assign(rule, saved)
   } catch (error) {
     rule.enable = previous
     appStore.showToast((error as Error).message || '规则状态保存失败', 'error')
+    return
   }
 }
 
@@ -294,10 +323,11 @@ async function removeRule(rule: TxtTocRule) {
   if (!confirmed) return
   try {
     await deleteTxtTocRule(rule.id)
-    await fetchRules()
   } catch (error) {
     appStore.showToast((error as Error).message || '删除失败', 'error')
+    return
   }
+  rules.value = rules.value.filter((item) => item.id !== rule.id)
 }
 </script>
 

@@ -268,7 +268,8 @@ async function goToChapter(index: number) {
 
 async function refreshCatalog() {
   try {
-    await store.refreshChapters()
+    const refreshed = await store.refreshChapters()
+    if (!refreshed) return
   } catch {
     // 失败原因由 store 统一 toast（含「目录为空」这类后端不回错的场景）;
     // 这里只要不继续滚动列表即可 —— 抛出去会变成未处理的 Promise 拒绝。

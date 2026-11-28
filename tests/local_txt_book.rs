@@ -256,6 +256,48 @@ async fn txt_import_saves_book_index_and_content_for_server_bookshelf() {
 }
 
 #[tokio::test]
+async fn txt_existing_book_rebuilds_with_new_rules() {
+    let storage_dir = std::env::temp_dir().join(format!(
+        "reader-rust-local-txt-rebuild-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&storage_dir);
+    let service = reader_rust::service::local_txt_book::LocalTxtBookService::new(&storage_dir);
+    let text = "第一卷\n\n01、初见\n第一章正文。\n02、重逢\n第二章正文。\n";
+    let book = service
+        .import_txt_book("alice", "重建目录.txt", text.as_bytes())
+        .await
+        .unwrap();
+    let before = service
+        .get_chapter_list("alice", &book.book_url)
+        .await
+        .unwrap();
+    let rules = vec![TxtTocRule {
+        id: 1,
+        name: "数字章节".to_string(),
+        rule: r"(?m)^\d{1,5}、.+$".to_string(),
+        example: "01、初见".to_string(),
+        enable: true,
+        order: 1,
+    }];
+
+    let rebuilt = service
+        .rebuild_chapters_with_rules("alice", &book.book_url, &rules)
+        .await
+        .unwrap();
+    let after = service
+        .get_chapter_list("alice", &book.book_url)
+        .await
+        .unwrap();
+
+    assert_ne!(rebuilt.chapter_count, before.len());
+    assert_eq!(rebuilt.latest_chapter_title.as_deref(), Some("02、重逢"));
+    assert!(after.iter().any(|chapter| chapter.title == "01、初见"));
+    assert!(after.iter().any(|chapter| chapter.title == "02、重逢"));
+    let _ = std::fs::remove_dir_all(storage_dir);
+}
+
+#[tokio::test]
 async fn txt_import_rejects_non_txt_files() {
     let storage_dir = std::env::temp_dir().join(format!(
         "reader-rust-local-txt-reject-test-{}",

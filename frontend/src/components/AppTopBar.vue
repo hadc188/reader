@@ -177,13 +177,21 @@ function openSourceManager() {
 }
 
 .topbar-inner {
-  max-width: var(--content-max-width);
+  width: 100%;
+  max-width: 1760px;
   margin: 0 auto;
   min-height: var(--header-height);
   display: flex;
   align-items: center;
   gap: var(--space-4);
   padding: 0 var(--space-6);
+}
+
+@media (min-width: 1600px) {
+  .topbar-inner {
+    max-width: 1920px;
+    padding-inline: var(--space-10);
+  }
 }
 
 .topbar-left {

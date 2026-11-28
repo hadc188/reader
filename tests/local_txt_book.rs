@@ -1,4 +1,4 @@
-use reader_rust::service::local_txt_book::{build_chapter_url, parse_txt_chapters};
+use reader_rust::service::local_txt_book::{build_chapter_url, parse_txt_chapters, TxtTocRule};
 
 #[test]
 fn txt_parser_splits_common_chapter_headings() {
@@ -30,16 +30,90 @@ fn txt_parser_splits_no_space_chapter_headings() {
 }
 
 #[test]
-fn txt_parser_splits_numbered_chapter_headings() {
-    let text = "01、初见\n第一章正文。\n02、重逢\n第二章正文。\n";
+fn txt_custom_toc_rule_is_applied_to_import() {
+    let text = "【甲】\n正文甲。\n【乙】\n正文乙。\n";
+    let rule = TxtTocRule {
+        id: 1,
+        name: "方括号章节".to_string(),
+        rule: r"(?m)^【[^】]+】$".to_string(),
+        example: "【甲】".to_string(),
+        enable: true,
+        order: 1,
+    };
+    let parsed = reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
+        "local-txt:custom-rule",
+        text,
+        &[rule],
+    );
 
-    let chapters = parse_txt_chapters("local-txt:numbered", text);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].title, "【甲】");
+    assert_eq!(parsed[1].title, "【乙】");
+}
 
-    assert_eq!(chapters.len(), 2);
-    assert_eq!(chapters[0].title, "01、初见");
-    assert_eq!(chapters[0].content.trim(), "第一章正文。");
-    assert_eq!(chapters[1].title, "02、重逢");
-    assert_eq!(chapters[1].content.trim(), "第二章正文。");
+#[test]
+fn txt_custom_toc_rules_fall_through_in_order() {
+    let text = "【甲】\n正文甲。\n【乙】\n正文乙。\n";
+    let rules = vec![
+        TxtTocRule {
+            id: 1,
+            name: "不存在的标题".to_string(),
+            rule: r"(?m)^第.+章$".to_string(),
+            example: "第一章".to_string(),
+            enable: true,
+            order: 1,
+        },
+        TxtTocRule {
+            id: 2,
+            name: "方括号章节".to_string(),
+            rule: r"(?m)^【[^】]+】$".to_string(),
+            example: "【甲】".to_string(),
+            enable: true,
+            order: 2,
+        },
+    ];
+
+    let parsed = reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
+        "local-txt:custom-fallthrough",
+        text,
+        &rules,
+    );
+
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].title, "【甲】");
+    assert_eq!(parsed[1].title, "【乙】");
+}
+
+#[test]
+fn txt_custom_toc_rules_fall_through_after_empty_title_match() {
+    let text = "\n \n【甲】\n正文甲。\n【乙】\n正文乙。\n";
+    let rules = vec![
+        TxtTocRule {
+            id: 1,
+            name: "空行".to_string(),
+            rule: r"(?m)^[ ]+$".to_string(),
+            example: "空行".to_string(),
+            enable: true,
+            order: 1,
+        },
+        TxtTocRule {
+            id: 2,
+            name: "方括号章节".to_string(),
+            rule: r"(?m)^【[^】]+】$".to_string(),
+            example: "【甲】".to_string(),
+            enable: true,
+            order: 2,
+        },
+    ];
+
+    let parsed = reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
+        "local-txt:custom-empty-title",
+        text,
+        &rules,
+    );
+
+    assert_eq!(parsed[0].title, "【甲】");
+    assert_eq!(parsed[1].title, "【乙】");
 }
 
 #[test]
@@ -53,37 +127,38 @@ fn txt_parser_ignores_numbered_prose_with_sentence_punctuation() {
 }
 
 #[test]
-fn txt_parser_supports_numbered_heading_separators() {
-    let text = "01:初见\n第一章正文。\n02. 重逢\n第二章正文。\n";
+fn txt_parser_does_not_split_numbered_list_by_default() {
+    let text = "第一章 开始\n\n1. 起床\n2. 洗漱\n3. 出门\n\n正文继续。\n第二章 结束\n正文二。\n";
 
-    let chapters = parse_txt_chapters("local-txt:numbered-separators", text);
-
-    assert_eq!(chapters.len(), 2);
-    assert_eq!(chapters[0].title, "01:初见");
-    assert_eq!(chapters[1].title, "02. 重逢");
-}
-
-#[test]
-fn txt_parser_does_not_split_single_numbered_list_line() {
-    let text = "第一卷\n\n1. 他抵达车站。\n他继续向前。\n第二章 结束\n正文二。\n";
-
-    let chapters = parse_txt_chapters("local-txt:single-numbered-list", text);
+    let chapters = parse_txt_chapters("local-txt:numbered-list", text);
 
     assert_eq!(chapters.len(), 2);
-    assert_eq!(chapters[0].title, "第一卷");
-    assert!(chapters[0].content.contains("1. 他抵达车站。"));
+    assert_eq!(chapters[0].title, "第一章 开始");
+    assert!(chapters[0].content.contains("1. 起床\n2. 洗漱\n3. 出门"));
     assert_eq!(chapters[1].title, "第二章 结束");
 }
 
 #[test]
-fn txt_parser_splits_numbered_heading_at_end_without_newline() {
-    let text = "01、初见\n正文。\n02、无换行末章";
+fn txt_custom_rule_splits_numbered_chapter_headings() {
+    let text = "01、初见\n第一章正文。\n02、重逢\n第二章正文。\n";
+    let rules = vec![TxtTocRule {
+        id: 1,
+        name: "数字章节".to_string(),
+        rule: r"(?m)^\d{1,5}、.+$".to_string(),
+        example: "01、初见".to_string(),
+        enable: true,
+        order: 1,
+    }];
 
-    let chapters = parse_txt_chapters("local-txt:numbered-eof", text);
+    let chapters = reader_rust::service::local_txt_book::parse_txt_chapter_ranges_with_rules(
+        "local-txt:numbered-rule",
+        text,
+        &rules,
+    );
 
     assert_eq!(chapters.len(), 2);
-    assert_eq!(chapters[1].title, "02、无换行末章");
-    assert_eq!(chapters[1].content, "");
+    assert_eq!(chapters[0].title, "01、初见");
+    assert_eq!(chapters[1].title, "02、重逢");
 }
 
 #[test]

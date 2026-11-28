@@ -77,10 +77,13 @@ pub async fn build_state(cfg: &AppConfig) -> anyhow::Result<AppState> {
         tracing::info!(removed_state_dirs, "cleaned empty source-state dirs");
     }
     let book_source_service = Arc::new(BookSourceService::new(repo, &cfg.storage_dir));
-    let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
+    let json_document_service = Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
+    let local_txt_book_service = Arc::new(LocalTxtBookService::with_document_service(
+        &cfg.storage_dir,
+        json_document_service.clone(),
+    ));
     let local_epub_book_service = Arc::new(LocalEpubBookService::new(&cfg.storage_dir));
     let local_pdf_book_service = Arc::new(LocalPdfBookService::new(&cfg.storage_dir));
-    let json_document_service = Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
     let http_tts_service = Arc::new(HttpTtsService::new(json_document_service.clone()));
     let user_service = Arc::new(UserService::new(cfg.clone(), pool.clone()));
     user_service.migrate_legacy_users_from_json().await?;

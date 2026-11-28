@@ -36,6 +36,8 @@
     <SourceManager v-model="appStore.showSourceManager" />
     <WebdavManager v-model="appStore.showWebdavManager" />
     <BookmarkManager v-model="appStore.showBookmarkManager" />
+    <TxtTocRuleManager v-model="appStore.showTxtTocRuleManager" />
+    <SettingsReplaceRuleManager v-model="appStore.showReplaceRuleManager" />
     <ConfirmDialog />
     <UpdateProgressDialog />
     <ContextMenu />
@@ -72,6 +74,8 @@ import SettingsDrawer from './components/SettingsDrawer.vue'
 import SourceManager from './components/SourceManager.vue'
 import WebdavManager from './components/WebdavManager.vue'
 import BookmarkManager from './components/BookmarkManager.vue'
+import TxtTocRuleManager from './components/TxtTocRuleManager.vue'
+import SettingsReplaceRuleManager from './components/SettingsReplaceRuleManager.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import UpdateProgressDialog from './components/UpdateProgressDialog.vue'
 import ContextMenu from './components/ContextMenu.vue'
@@ -99,6 +103,8 @@ const titlebarSurface = computed<'settings' | 'reader-panel' | null>(() => {
     appStore.showSourceManager
     || appStore.showWebdavManager
     || appStore.showBookmarkManager
+    || appStore.showTxtTocRuleManager
+    || appStore.showReplaceRuleManager
   ) return 'settings'
   if (route.name === 'reader' && readerStore.activePanel) return 'reader-panel'
   return null

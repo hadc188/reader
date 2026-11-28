@@ -555,6 +555,13 @@ const ghostStyle = computed(() => {
   padding: var(--space-1) 0;
 }
 
+@media (min-width: 1920px) {
+  .book-grid-list {
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-auto-rows: minmax(168px, auto);
+  }
+}
+
 .book-grid-item {
   min-width: 0;
   width: 100%;

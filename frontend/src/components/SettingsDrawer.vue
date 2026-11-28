@@ -11,100 +11,112 @@
       >
         <div class="drawer-header">
           <h2>&#35774;&#32622;</h2>
-          <button class="close-btn" @click="close">
+          <button class="close-btn" type="button" aria-label="关闭设置" @click="close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M18 6 6 18M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        <nav class="settings-tabs" aria-label="设置分类">
+        <nav
+          class="settings-tabs"
+          :style="{ gridTemplateColumns: `repeat(${settingsTabs.length}, minmax(0, 1fr))` }"
+          role="tablist"
+          aria-label="设置分类"
+        >
           <button
             v-for="tab in settingsTabs"
             :key="tab.value"
             type="button"
+            role="tab"
             :class="{ active: activeSettingsTab === tab.value }"
-            @click="activeSettingsTab = tab.value"
+            :aria-selected="activeSettingsTab === tab.value"
+            @click="switchSettingsTab(tab.value)"
           >{{ tab.label }}</button>
         </nav>
 
-        <div class="drawer-body">
+        <div ref="drawerBodyRef" class="drawer-body">
 
           <section v-show="activeSettingsTab === 'common'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
               </svg>
-              &#20070;&#28304;&#31649;&#29702;
+              内容与数据
             </h3>
-            <div class="btn-group">
-              <button class="action-btn" @click="openSourceManager">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                  <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-                </svg>
-                &#20070;&#28304;&#31649;&#29702;
+            <div class="tool-grid">
+              <button class="tool-card" type="button" @click="openSourceManager">
+                <span class="tool-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                  </svg>
+                </span>
+                <span class="tool-copy">
+                  <strong>书源管理</strong>
+                </span>
               </button>
-            </div>
-          </section>
-
-          <section v-show="activeSettingsTab === 'common'" class="drawer-section">
-            <h3 class="section-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <path d="M6 3h12a2 2 0 0 1 2 2v16l-8-5-8 5V5a2 2 0 0 1 2-2Z" />
-              </svg>
-              阅读数据
-            </h3>
-            <div class="btn-group">
-              <button class="action-btn" @click="openBookmarkManager">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                  <path d="M6 3h12a2 2 0 0 1 2 2v16l-8-5-8 5V5a2 2 0 0 1 2-2Z" />
-                </svg>
-                书签管理
+              <button class="tool-card" type="button" @click="openBookmarkManager">
+                <span class="tool-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M6 3h12a2 2 0 0 1 2 2v16l-8-5-8 5V5a2 2 0 0 1 2-2Z" />
+                  </svg>
+                </span>
+                <span class="tool-copy">
+                  <strong>书签管理</strong>
+                </span>
               </button>
             </div>
           </section>
 
           <section v-if="isDesktopApp" v-show="activeSettingsTab === 'app'" class="drawer-section">
-            <h3 class="section-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.14.38.35.72.6 1 .3.31.68.5 1.1.6h.09v4h-.09c-.42.1-.8.29-1.1.6-.25.28-.46.62-.6 1Z" />
-              </svg>
-              网络代理
-            </h3>
-            <div class="proxy-setting">
-              <div class="proxy-mode-toggle" role="group" aria-label="网络代理模式">
+            <details class="settings-disclosure">
+              <summary>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.14.38.35.72.6 1 .3.31.68.5 1.1.6h.09v4h-.09c-.42.1-.8.29-1.1.6-.25.28-.46.62-.6 1Z" />
+                </svg>
+                <span class="disclosure-copy">
+                  <strong>网络代理</strong>
+                  <small>{{ appStore.networkProxyMode === 'manual' ? '手动代理' : '跟随系统' }}</small>
+                </span>
+                <svg class="disclosure-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </summary>
+              <div class="proxy-setting">
+                <div class="proxy-mode-toggle" role="group" aria-label="网络代理模式">
+                  <button
+                    type="button"
+                    :class="{ active: proxyModeDraft === 'system' }"
+                    @click="proxyModeDraft = 'system'"
+                  >跟随系统</button>
+                  <button
+                    type="button"
+                    :class="{ active: proxyModeDraft === 'manual' }"
+                    @click="proxyModeDraft = 'manual'"
+                  >手动代理</button>
+                </div>
+                <div v-if="proxyModeDraft === 'manual'" class="proxy-address-field">
+                  <label for="network-proxy-url">代理地址</label>
+                  <input
+                    id="network-proxy-url"
+                    v-model.trim="proxyUrlDraft"
+                    type="text"
+                    inputmode="url"
+                    autocomplete="off"
+                    placeholder="http://127.0.0.1:7890"
+                    @keydown.enter="saveNetworkProxy"
+                  >
+                </div>
+                <small class="proxy-hint">{{ proxyDescription }}</small>
                 <button
+                  class="action-btn primary proxy-save-btn"
                   type="button"
-                  :class="{ active: proxyModeDraft === 'system' }"
-                  @click="proxyModeDraft = 'system'"
-                >跟随系统</button>
-                <button
-                  type="button"
-                  :class="{ active: proxyModeDraft === 'manual' }"
-                  @click="proxyModeDraft = 'manual'"
-                >手动代理</button>
+                  :disabled="savingProxy || (proxyModeDraft === 'manual' && !proxyUrlDraft.trim())"
+                  @click="saveNetworkProxy"
+                >{{ savingProxy ? '应用中...' : '保存并应用' }}</button>
               </div>
-              <div v-if="proxyModeDraft === 'manual'" class="proxy-address-field">
-                <label for="network-proxy-url">代理地址</label>
-                <input
-                  id="network-proxy-url"
-                  v-model.trim="proxyUrlDraft"
-                  type="text"
-                  inputmode="url"
-                  autocomplete="off"
-                  placeholder="http://127.0.0.1:7890"
-                  @keydown.enter="saveNetworkProxy"
-                >
-              </div>
-              <small class="proxy-hint">{{ proxyDescription }}</small>
-              <button
-                class="action-btn primary proxy-save-btn"
-                type="button"
-                :disabled="savingProxy || (proxyModeDraft === 'manual' && !proxyUrlDraft.trim())"
-                @click="saveNetworkProxy"
-              >{{ savingProxy ? '应用中...' : '保存并应用' }}</button>
-            </div>
+            </details>
           </section>
 
 
@@ -115,15 +127,45 @@
                 <path d="M7 10l5 5 5-5" />
                 <path d="M12 15V3" />
               </svg>
-              &#22791;&#20221;&#19982;&#24674;&#22797;
+              备份与工具
             </h3>
-            <div class="status-card">
-              <span>{{ webdavStatusTitle }}</span>
-              <small>{{ webdavStatusMessage }}</small>
-            </div>
-            <div class="btn-group">
-              <button class="action-btn" @click="openWebdavManager">
-                &#22791;&#20221;&#19982;&#24674;&#22797;
+            <button class="tool-card wide" type="button" @click="openWebdavManager">
+              <span class="tool-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <path d="M7 10l5 5 5-5" />
+                  <path d="M12 15V3" />
+                </svg>
+              </span>
+              <span class="tool-copy">
+                <strong>{{ webdavStatusTitle }}</strong>
+                <small>{{ webdavStatusMessage }}</small>
+              </span>
+              <svg class="tool-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="m9 18 6-6-6-6" />
+              </svg>
+            </button>
+            <div class="tool-grid">
+              <button class="tool-card" type="button" @click="openTxtTocRuleManager">
+                <span class="tool-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+                    <path d="M14 2v6h6M8 13h8M8 17h6" />
+                  </svg>
+                </span>
+                <span class="tool-copy">
+                  <strong>TXT 目录规则</strong>
+                </span>
+              </button>
+              <button class="tool-card" type="button" @click="openReplaceRuleManager">
+                <span class="tool-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 18 18 4M8 4h10v10" />
+                  </svg>
+                </span>
+                <span class="tool-copy">
+                  <strong>替换净化</strong>
+                </span>
               </button>
             </div>
           </section>
@@ -131,11 +173,10 @@
           <section v-show="activeSettingsTab === 'app'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <path d="M12 16V4" />
-                <path d="m7 9 5-5 5 5" />
-                <path d="M20 16.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5" />
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="M3 9h18" />
               </svg>
-              &#24212;&#29992;
+              窗口与启动
               <span class="section-badge">{{ appVersion }}</span>
             </h3>
             <div v-if="isDesktopApp" class="setting-switch-row">
@@ -155,8 +196,33 @@
                 <span></span>
               </button>
             </div>
-            <div v-if="isDesktopApp" class="boss-key-setting">
-              <div class="setting-switch-row compact-row">
+            <div v-if="isDesktopApp" class="setting-switch-row">
+              <div class="setting-switch-copy">
+                <span>隐藏标题栏</span>
+                <small>{{ appStore.hideTitlebar ? '当前使用无标题栏窗口' : '保留窗口标题栏' }}</small>
+              </div>
+              <button
+                class="switch-control"
+                :class="{ on: appStore.hideTitlebar }"
+                type="button"
+                role="switch"
+                :aria-checked="appStore.hideTitlebar"
+                aria-label="隐藏标题栏"
+                @click="appStore.toggleTitlebar()"
+              ><span></span></button>
+            </div>
+          </section>
+
+          <section v-if="isDesktopApp" v-show="activeSettingsTab === 'app'" class="drawer-section">
+            <h3 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <path d="M4 7h6l2 2h8v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z" />
+                <path d="M8 13h8" />
+              </svg>
+              快捷键
+            </h3>
+            <div class="shortcut-card">
+              <div class="shortcut-row">
                 <div class="setting-switch-copy">
                   <span>老板键</span>
                 </div>
@@ -166,6 +232,7 @@
                   type="button"
                   role="switch"
                   :aria-checked="appStore.bossKeyEnabled"
+                  aria-label="老板键"
                   @click="toggleBossKey"
                 ><span></span></button>
               </div>
@@ -185,8 +252,8 @@
                 <span class="boss-key-hint">{{ recordingBossKey ? 'Esc 取消' : '点击修改' }}</span>
               </button>
             </div>
-            <div v-if="isDesktopApp && appStore.borderlessKind === 'shadow'" class="boss-key-setting">
-              <div class="setting-switch-row compact-row">
+            <div v-if="appStore.borderlessKind === 'shadow'" class="shortcut-card">
+              <div class="shortcut-row">
                 <div class="setting-switch-copy">
                   <span>无边框模式</span>
                 </div>
@@ -196,6 +263,7 @@
                   type="button"
                   role="switch"
                   :aria-checked="appStore.borderlessMode"
+                  aria-label="无边框模式"
                   @click="toggleBorderlessModeSetting"
                 ><span></span></button>
               </div>
@@ -214,19 +282,11 @@
                 <span class="boss-key-hint">{{ recordingBorderlessShortcut ? 'Esc 取消' : '点击修改' }}</span>
               </button>
             </div>
-            <div v-if="isDesktopApp" class="boss-key-setting">
-              <div class="setting-switch-row compact-row">
+            <div class="shortcut-card">
+              <div class="shortcut-row">
                 <div class="setting-switch-copy">
-                  <span>隐藏标题栏</span>
+                  <span>标题栏快捷键</span>
                 </div>
-                <button
-                  class="switch-control"
-                  :class="{ on: appStore.hideTitlebar }"
-                  type="button"
-                  role="switch"
-                  :aria-checked="appStore.hideTitlebar"
-                  @click="appStore.toggleTitlebar()"
-                ><span></span></button>
               </div>
               <button
                 class="boss-key-recorder"
@@ -243,9 +303,15 @@
                 <span class="boss-key-hint">{{ recordingTitlebarShortcut ? 'Esc 取消' : '点击修改' }}</span>
               </button>
             </div>
-            <!-- 与上面的「老板键」同一层级: 都是自带边框的卡片, 不再额外加小标题,
-                 否则两个相邻分组的标题层级不一致(一个有标题、一个没有)。 -->
-            <WebAccessSetting v-if="isDesktopApp" />
+          </section>
+
+          <section v-if="isDesktopApp" v-show="activeSettingsTab === 'app'" class="drawer-section">
+            <h3 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" />
+              </svg>
+              版本更新
+            </h3>
             <template v-if="appStore.canCheckVersionUpdate">
               <div class="setting-switch-row">
                 <div class="setting-switch-copy">
@@ -303,26 +369,45 @@
             </template>
           </section>
 
+          <section v-if="isDesktopApp" v-show="activeSettingsTab === 'app'" class="drawer-section">
+            <details class="settings-disclosure">
+              <summary>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M2 12h20M12 2a15.3 15.3 0 0 1 0 20M12 2a15.3 15.3 0 0 1 0 20" />
+                </svg>
+                <span class="disclosure-copy">
+                  <strong>Web 访问</strong>
+                </span>
+                <svg class="disclosure-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </summary>
+              <WebAccessSetting class="collapsible-web-access" />
+            </details>
+          </section>
+
           <section v-show="activeSettingsTab === 'common'" class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <rect width="7" height="7" x="3" y="3" rx="1" />
-                <rect width="7" height="7" x="14" y="3" rx="1" />
-                <rect width="7" height="7" x="3" y="14" rx="1" />
-                <rect width="7" height="7" x="14" y="14" rx="1" />
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-4-4" />
               </svg>
-              &#20070;&#26550;&#35774;&#32622;
+              搜索并发
             </h3>
-            <div class="btn-group">
-              <button class="action-btn" @click="refreshCache">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                  <path d="M3 3v5h5" />
-                  <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-                  <path d="M16 16h5v5" />
-                </svg>
-                &#21047;&#26032;&#32531;&#23384;
-              </button>
+            <div class="search-concurrency-field">
+              <span>并发数</span>
+              <input
+                id="search-concurrency"
+                v-model="searchConcurrencyDraft"
+                aria-label="搜索并发数"
+                type="number"
+                :min="SEARCH_CONCURRENCY_MIN"
+                :max="SEARCH_CONCURRENCY_MAX"
+                step="1"
+                inputmode="numeric"
+                @change="applySearchConcurrency(($event.target as HTMLInputElement).value)"
+              >
             </div>
           </section>
 
@@ -529,7 +614,6 @@
 import { computed, ref, watch, type Ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { isTauriRuntime } from '../api/transport'
 import {
@@ -544,6 +628,11 @@ import {
 import { captureBossKey, formatBossKey } from '../utils/bossKey'
 import { uploadBackgroundImage } from '../api/background'
 import WebAccessSetting from './WebAccessSetting.vue'
+import {
+  SEARCH_CONCURRENCY_MAX,
+  SEARCH_CONCURRENCY_MIN,
+  normalizeSearchConcurrency,
+} from '../utils/searchConcurrency'
 
 const props = defineProps<{
   modelValue: boolean
@@ -554,16 +643,23 @@ const emit = defineEmits<{
 }>()
 
 const appStore = useAppStore()
-const shelfStore = useBookshelfStore()
 const readerStore = useReaderStore()
 const route = useRoute()
 const appVersion = __APP_VERSION__
 const isDesktopApp = isTauriRuntime()
 const backgroundInputRef = ref<HTMLInputElement | null>(null)
+const drawerBodyRef = ref<HTMLElement | null>(null)
 const processingBackground = ref(false)
 const recordingBossKey = ref(false)
 const recordingBorderlessShortcut = ref(false)
 const recordingTitlebarShortcut = ref(false)
+const searchConcurrencyDraft = ref(String(appStore.searchConcurrency))
+
+function applySearchConcurrency(value: string) {
+  const normalized = normalizeSearchConcurrency(value)
+  searchConcurrencyDraft.value = String(normalized)
+  appStore.setSearchConcurrency(normalized)
+}
 
 /**
  * 设置分类。Web 端只留「外观」——
@@ -589,6 +685,12 @@ const activeSettingsTab = ref<(typeof allSettingsTabs)[number]['value']>(
   // 否则会停在一个根本不渲染的「常用」上, 面板看起来是空的。
   appStore.isWebMode ? 'appearance' : 'common',
 )
+
+function switchSettingsTab(tab: (typeof allSettingsTabs)[number]['value']) {
+  if (activeSettingsTab.value === tab) return
+  activeSettingsTab.value = tab
+  drawerBodyRef.value?.scrollTo({ top: 0 })
+}
 
 const proxyModeDraft = ref<'system' | 'manual'>(appStore.networkProxyMode)
 const proxyUrlDraft = ref(appStore.networkProxyUrl)
@@ -618,6 +720,7 @@ watch(() => props.modelValue, (visible) => {
   if (!visible) return
   proxyModeDraft.value = appStore.networkProxyMode
   proxyUrlDraft.value = appStore.networkProxyUrl
+  searchConcurrencyDraft.value = String(appStore.searchConcurrency)
   if (isDesktopApp && proxyModeDraft.value === 'system') {
     void appStore.applyNetworkProxy().catch(() => undefined)
   }
@@ -698,6 +801,16 @@ function openWebdavManager() {
 function openBookmarkManager() {
   close()
   appStore.showBookmarkManager = true
+}
+
+function openTxtTocRuleManager() {
+  close()
+  appStore.showTxtTocRuleManager = true
+}
+
+function openReplaceRuleManager() {
+  close()
+  appStore.showReplaceRuleManager = true
 }
 
 async function toggleBossKey() {
@@ -824,12 +937,6 @@ async function recordBossKey(event: KeyboardEvent) {
   }
 }
 
-function refreshCache() {
-  shelfStore.fetchBooks()
-  appStore.showToast('\u4e66\u67b6\u5df2\u5237\u65b0', 'success')
-  close()
-}
-
 function setTheme(t: 'light' | 'dark') {
   appStore.setTheme(t)
 }
@@ -950,7 +1057,7 @@ async function handleCheckVersionUpdate() {
   top: var(--titlebar-height, 30px);
   right: 0;
   bottom: 0;
-  width: min(420px, 94vw);
+  width: min(460px, 94vw);
   box-sizing: border-box;
   background: var(--color-bg-elevated);
   z-index: var(--z-modal);
@@ -1073,8 +1180,13 @@ async function handleCheckVersionUpdate() {
   border-bottom: 1px solid var(--color-divider);
 }
 
+.drawer-section:first-child {
+  padding-top: var(--space-3);
+}
+
 .drawer-section:last-child {
   border-bottom: none;
+  padding-bottom: 0;
 }
 
 .section-title {
@@ -1085,7 +1197,189 @@ async function handleCheckVersionUpdate() {
   font-weight: 600;
   color: var(--color-text-secondary);
   letter-spacing: 0;
+  margin-bottom: var(--space-4);
+}
+
+.section-title > svg {
+  color: var(--color-text-tertiary);
+}
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
   margin-bottom: var(--space-3);
+}
+
+.tool-card {
+  min-width: 0;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg);
+  color: var(--color-text);
+  text-align: left;
+  transition: background var(--duration-fast), border-color var(--duration-fast), transform var(--duration-fast);
+}
+
+.tool-card:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border);
+}
+
+.tool-card:active {
+  transform: scale(0.985);
+}
+
+.tool-card.wide {
+  width: 100%;
+  margin-bottom: var(--space-2);
+}
+
+.tool-icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+  color: var(--color-text-secondary);
+}
+
+.tool-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.tool-copy {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tool-copy strong {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.tool-copy small {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.tool-chevron {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--color-text-tertiary);
+}
+
+.shortcut-card {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg);
+}
+
+.shortcut-card:last-child {
+  margin-bottom: 0;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.settings-disclosure {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.settings-disclosure summary {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  color: var(--color-text);
+  cursor: pointer;
+  list-style: none;
+  transition: background var(--duration-fast);
+}
+
+.settings-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-disclosure summary:hover {
+  background: var(--color-bg-hover);
+}
+
+.settings-disclosure summary > svg:first-child {
+  flex: 0 0 18px;
+  color: var(--color-text-tertiary);
+}
+
+.settings-disclosure[open] .disclosure-chevron {
+  transform: rotate(180deg);
+}
+
+.disclosure-copy {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.disclosure-copy strong {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.disclosure-copy small {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.disclosure-chevron {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--color-text-tertiary);
+  transition: transform var(--duration-fast);
+}
+
+.settings-disclosure[open] > :not(summary) {
+  margin: 0 var(--space-3) var(--space-3);
+}
+
+.settings-disclosure[open] :deep(.web-access) {
+  margin: 0 var(--space-3) var(--space-3);
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.settings-disclosure[open] :deep(.web-access-head) {
+  display: none;
 }
 
 .section-hint {
@@ -1190,6 +1484,12 @@ async function handleCheckVersionUpdate() {
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-lg);
   background: var(--color-bg);
+}
+
+@media (max-width: 360px) {
+  .tool-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .proxy-mode-toggle {
@@ -1365,6 +1665,43 @@ async function handleCheckVersionUpdate() {
   color: var(--color-text-secondary);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.search-concurrency-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.search-concurrency-field input {
+  width: 96px;
+  min-height: 38px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  font: inherit;
+  text-align: right;
+}
+
+.search-concurrency-field input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: var(--focus-ring);
+}
+
+.search-concurrency-field input::-webkit-outer-spin-button,
+.search-concurrency-field input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
 }
 
 .background-actions {

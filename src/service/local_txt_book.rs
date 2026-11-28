@@ -1,5 +1,6 @@
 use crate::error::error::AppError;
 use crate::model::{book::Book, book_chapter::BookChapter};
+use crate::service::json_document_service::JsonDocumentService;
 use crate::util::hash::md5_hex;
 use encoding_rs::GB18030;
 use regex::Regex;
@@ -14,6 +15,29 @@ pub const LOCAL_TXT_ORIGIN_NAME: &str = "本地 TXT";
 pub const MAX_TXT_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 const LOCAL_BOOK_DIR: &str = "local_books";
 const LOCAL_TXT_HASH_LEN: usize = 32;
+const TXT_TOC_RULE_NAMESPACE: &str = "settings";
+const TXT_TOC_RULE_NAME: &str = "txt_toc_rules.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TxtTocRule {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub rule: String,
+    #[serde(default)]
+    pub example: String,
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    #[serde(default)]
+    pub order: i64,
+}
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -101,32 +125,34 @@ pub fn parse_txt_chapters(book_url: &str, text: &str) -> Vec<ParsedTxtChapter> {
 /// 导入路径用它: 旧实现顺手为每章 `to_string()` 一份正文却从不用(索引只存区间),
 /// 一本几十 MB 的 TXT 等于白白多复制一整本书。
 pub fn parse_txt_chapter_ranges(book_url: &str, text: &str) -> Vec<TxtChapterRange> {
+    parse_txt_chapter_ranges_with_rules(book_url, text, &[])
+}
+
+pub fn parse_txt_chapter_ranges_with_rules(
+    book_url: &str,
+    text: &str,
+    rules: &[TxtTocRule],
+) -> Vec<TxtChapterRange> {
+    let mut custom_rules = rules
+        .iter()
+        .filter(|rule| rule.enable && !rule.rule.trim().is_empty())
+        .collect::<Vec<_>>();
+    custom_rules.sort_by_key(|rule| rule.order);
+    for rule in custom_rules {
+        if let Some(chapters) = parse_with_custom_toc_rule(book_url, text, rule) {
+            return chapters;
+        }
+    }
     let Some(heading_re) = chapter_heading_regex() else {
         return fallback_range(book_url, text);
     };
-    let numbered_headings = text
-        .lines()
-        .filter_map(|line| parse_numbered_heading(line.trim()))
-        .filter(|(_, title)| is_distinct_numbered_chapter_title(title))
-        .map(|(number, title)| (number, title))
-        .collect::<Vec<_>>();
-    let numbered_sequence = numbered_headings
-        .windows(2)
-        .any(|pair| {
-            pair[0].0 < pair[1].0
-                && !pair[0].1.contains(['。', '！', '？', '!', '?'])
-        });
-
     let mut headings: Vec<(usize, usize, String)> = Vec::new();
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
         let raw_line = line.trim_end_matches(['\r', '\n']);
         let title = raw_line.trim();
         let content_len = raw_line.len();
-        if is_chapter_heading(title, &heading_re)
-            || is_bracketed_heading(title, &heading_re)
-            || (numbered_sequence && is_numbered_heading(title))
-        {
+        if is_chapter_heading(title, &heading_re) || is_bracketed_heading(title, &heading_re) {
             let leading_ws = raw_line.len().saturating_sub(raw_line.trim_start().len());
             headings.push((offset + leading_ws, offset + content_len, title.to_string()));
         }
@@ -237,6 +263,7 @@ pub fn validate_txt_upload(file_name: &str, byte_len: usize) -> Result<(), AppEr
 #[derive(Clone)]
 pub struct LocalTxtBookService {
     storage_dir: PathBuf,
+    document_service: Option<Arc<JsonDocumentService>>,
     /// 已解析的章节目录缓存。
     ///
     /// 本地 TXT 每翻一章都要按章号查区间，而 `chapters.json` 是一份可能上千章的
@@ -253,6 +280,18 @@ impl LocalTxtBookService {
     pub fn new(storage_dir: impl AsRef<Path>) -> Self {
         Self {
             storage_dir: storage_dir.as_ref().to_path_buf(),
+            document_service: None,
+            indexes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn with_document_service(
+        storage_dir: impl AsRef<Path>,
+        document_service: Arc<JsonDocumentService>,
+    ) -> Self {
+        Self {
+            storage_dir: storage_dir.as_ref().to_path_buf(),
+            document_service: Some(document_service),
             indexes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -296,7 +335,21 @@ impl LocalTxtBookService {
         // 上一次分章的区间去读新文件（章号可能对不上）。
         self.invalidate_index(user_ns, &book_url).await;
         // 只要区间: 旧实现为每章复制一份正文却从不使用(索引只存 start/end)。
-        let chapters = parse_txt_chapter_ranges(&book_url, &text);
+        let rules = if let Some(document_service) = self.document_service.as_ref() {
+            match document_service
+                .read_list::<TxtTocRule>(TXT_TOC_RULE_NAMESPACE, TXT_TOC_RULE_NAME)
+                .await
+            {
+                Ok(rules) => rules,
+                Err(error) => {
+                    tracing::warn!("failed to read local txt toc rules, using defaults: {error}");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let chapters = parse_txt_chapter_ranges_with_rules(&book_url, &text, &rules);
         let book_dir = self.book_dir(user_ns, &book_url)?;
         fs::create_dir_all(&book_dir)
             .await
@@ -495,6 +548,74 @@ fn fallback_range(book_url: &str, text: &str) -> Vec<TxtChapterRange> {
     }]
 }
 
+fn parse_with_custom_toc_rule(
+    book_url: &str,
+    text: &str,
+    rule: &TxtTocRule,
+) -> Option<Vec<TxtChapterRange>> {
+    let regex = Regex::new(rule.rule.trim()).ok()?;
+    let mut matches = regex.find_iter(text);
+    let first = matches.next()?;
+    if !is_standalone_match(text, first.start(), first.end()) {
+        return None;
+    }
+    let mut chapters = Vec::new();
+
+    if text[..first.start()].trim().len() > 0 {
+        chapters.push(TxtChapterRange {
+            title: "序章".to_string(),
+            url: build_chapter_url(book_url, 0),
+            index: 0,
+            start: 0,
+            end: trim_chapter_end(text, first.start()),
+            is_volume: false,
+        });
+    }
+
+    let mut current = first;
+    loop {
+        let next = matches.next();
+        if next.is_some_and(|item| !is_standalone_match(text, item.start(), item.end())) {
+            return None;
+        }
+        let content_start = skip_line_break(text, current.end());
+        let end = next
+            .map(|item| trim_chapter_end(text, item.start()).max(content_start))
+            .unwrap_or(text.len());
+        let title = text[current.start()..current.end()].trim().to_string();
+        if title.is_empty() {
+            return None;
+        }
+        let index = chapters.len() as i32;
+        chapters.push(TxtChapterRange {
+            title,
+            url: build_chapter_url(book_url, index as usize),
+            index,
+            start: content_start,
+            end,
+            is_volume: false,
+        });
+        let Some(next) = next else {
+            break;
+        };
+        current = next;
+    }
+
+    (!chapters.is_empty()).then_some(chapters)
+}
+
+fn is_standalone_match(text: &str, start: usize, end: usize) -> bool {
+    let line_start = text[..start]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = text[end..]
+        .find(['\r', '\n'])
+        .map(|index| end + index)
+        .unwrap_or(text.len());
+    text[line_start..start].trim().is_empty() && text[end..line_end].trim().is_empty()
+}
+
 fn chapter_heading_regex() -> Option<Regex> {
     Regex::new(r"^(?:第[\p{N}零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+[章节回卷部集篇]|卷[\p{N}零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+)(?:$|[\s:：、.．\-—].*|[^\s:：、.．\-—](?:.*[^。！？!?；;，,、])?)$").ok()
 }
@@ -577,42 +698,6 @@ fn is_chapter_heading(line: &str, re: &Regex) -> bool {
         return false;
     }
     re.is_match(line)
-}
-
-fn is_numbered_heading(line: &str) -> bool {
-    parse_numbered_heading(line)
-        .is_some_and(|(_, title)| is_distinct_numbered_chapter_title(title))
-}
-
-fn is_distinct_numbered_chapter_title(title: &str) -> bool {
-    !title.contains(['。', '！', '？', '!', '?'])
-        && !title.chars().any(|ch| ch.is_whitespace())
-}
-
-fn parse_numbered_heading(line: &str) -> Option<(u64, &str)> {
-    let line = line.trim();
-    let number_len = line
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit() || ch.is_numeric())
-        .count();
-    if number_len == 0 || number_len > 5 {
-        return None;
-    }
-    let number_end = line
-        .char_indices()
-        .nth(number_len)
-        .map(|(index, _)| index)
-        .unwrap_or(line.len());
-    let number = line[..number_end].parse::<u64>().ok()?;
-    let rest = line[number_end..].trim_start();
-    let rest = ['、', '.', '．', ',', '，', ':', '：', '_', '-', '—']
-        .into_iter()
-        .find_map(|separator| rest.strip_prefix(separator))?;
-    let rest = rest.strip_prefix(' ').unwrap_or(rest);
-    if rest.is_empty() || rest.chars().count() > 30 {
-        return None;
-    }
-    Some((number, rest))
 }
 
 fn skip_line_break(text: &str, offset: usize) -> usize {

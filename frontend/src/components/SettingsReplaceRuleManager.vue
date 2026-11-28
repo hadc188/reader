@@ -2,7 +2,7 @@
   <SettingsRuleDialog
     :model-value="modelValue"
     title="替换净化"
-    subtitle="全部书籍"
+    subtitle="全部规则"
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div class="rule-toolbar">
@@ -57,9 +57,21 @@
           <span>替换为</span>
           <input v-model="editing.replacement" placeholder="留空表示删除">
         </label>
+        <div class="editor-divider" aria-hidden="true"></div>
+        <label>
+          <span>生效范围</span>
+          <input v-model="editing.scope" placeholder="全部书籍，填写书名或书源 URL">
+        </label>
+        <label>
+          <span>排除范围</span>
+          <input v-model="editing.excludeScope" placeholder="不排除，填写书名或书源 URL">
+        </label>
         <div class="editor-row">
-          <label class="inline-check"><input v-model="editing.scopeContent" type="checkbox">正文</label>
-          <label class="inline-check"><input v-model="editing.scopeTitle" type="checkbox">章节标题</label>
+          <span class="editor-label">作用于</span>
+          <div class="target-options">
+            <label class="inline-check"><input v-model="editing.scopeContent" type="checkbox">正文</label>
+            <label class="inline-check"><input v-model="editing.scopeTitle" type="checkbox">章节标题</label>
+          </div>
         </div>
         <div class="editor-row">
           <label class="inline-check"><input v-model="editing.isRegex" type="checkbox">正则表达式</label>
@@ -197,6 +209,8 @@ function editRule(rule?: ReplaceRule) {
   editing.value = rule
     ? {
         ...rule,
+        scope: !rule.scope || rule.scope === '*' ? '' : rule.scope,
+        excludeScope: rule.excludeScope || '',
         scopeContent: rule.scopeContent !== false,
         scopeTitle: rule.scopeTitle === true,
       }
@@ -205,7 +219,8 @@ function editRule(rule?: ReplaceRule) {
         name: '',
         pattern: '',
         replacement: '',
-        scope: '*',
+        scope: '',
+        excludeScope: '',
         scopeContent: true,
         scopeTitle: false,
         isEnabled: true,
@@ -671,6 +686,24 @@ async function applyImport() {
 .inline-check {
   display: flex !important;
   align-items: center;
+  gap: 7px;
+}
+
+.editor-divider {
+  height: 1px;
+  background: var(--color-divider);
+}
+
+.editor-label {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.target-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 18px;
 }
 
 .switch-button:hover {

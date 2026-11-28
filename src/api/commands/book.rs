@@ -1,4 +1,4 @@
-﻿use crate::api::commands::{decode_header_file_name, decode_upload_body};
+use crate::api::commands::{decode_header_file_name, decode_upload_body};
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
 use crate::model::{book::Book, book_chapter::BookChapter, book_source::BookSource, cache_manifest::{CacheFailedEntry, CacheManifest}, search::SearchBook};
@@ -9,7 +9,7 @@ use crate::service::local_pdf_book::{
     is_local_pdf_origin, is_local_pdf_url, MAX_PDF_UPLOAD_BYTES,
 };
 use crate::service::local_txt_book::{
-    is_local_txt_origin, is_local_txt_url, LOCAL_TXT_ORIGIN, MAX_TXT_UPLOAD_BYTES,
+    is_local_txt_origin, is_local_txt_url, TxtTocRule, LOCAL_TXT_ORIGIN, MAX_TXT_UPLOAD_BYTES,
 };
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use futures::stream::{self, FuturesUnordered, StreamExt};
@@ -29,6 +29,7 @@ const MAX_AVAILABLE_RESULT_LIMIT: usize = 100;
 const DEFAULT_AVAILABLE_CONCURRENT_COUNT: usize = 16;
 const MAX_AVAILABLE_CONCURRENT_COUNT: usize = 20;
 const DELETE_LOCAL_FILE_CONCURRENCY: usize = 8;
+const SEARCH_SOURCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// 达到候选软上限后停止派发新的书源，已派发书源的结果完整返回。
 /// `lastIndex` 始终停在完整书源边界，客户端通过 `hasMore` 继续扫描。
 const AVAILABLE_SOURCE_SSE_SCAN_SOFT_LIMIT: usize = 60;
@@ -3034,6 +3035,7 @@ pub async fn search_book_multi_sse(
 
         let mut idx = last_index + 1;
         let mut last_idx = last_index;
+        let mut completed = std::collections::BTreeSet::new();
         // 当前书源页是否还有任何书源返回了结果。legado 用同一口径判断
         // 「滚动到底还能不能再拉一页」：只要本页有源返回非空，就让客户端
         // 继续请求下一页；下一页全空时自然停止。
@@ -3059,9 +3061,13 @@ pub async fn search_book_multi_sse(
                 let cur_idx = idx;
                 let user_ns_value = user_ns;
                 tasks.push(tokio::spawn(async move {
-                    let res = svc
-                        .search_book(&user_ns_value, &source, &k, search_page)
-                        .await;
+                    let res = search_source_timeout_result(
+                        tokio::time::timeout(
+                            SEARCH_SOURCE_TIMEOUT,
+                            svc.search_book(&user_ns_value, &source, &k, search_page),
+                        )
+                        .await,
+                    );
                     (cur_idx, source.book_source_name, res)
                 }));
                 idx += 1;
@@ -3075,9 +3081,8 @@ pub async fn search_book_multi_sse(
             if let Some(res) = next {
                 match res {
                     Ok((cur_idx, _source_name, Ok(list))) => {
-                        // 任务完成顺序与书源下标无关, 不能直接覆盖: 先完成的
-                        // 大下标会被后完成的小下标改回去, 前端续搜就会重复扫。
-                        last_idx = last_idx.max(cur_idx);
+                        completed.insert(cur_idx);
+                        last_idx = contiguous_search_cursor(last_idx, &completed, sources.len() as i32);
                         if !list.is_empty() {
                             page_has_results = true;
                             let payload = serde_json::json!({"event": "data", "lastIndex": cur_idx, "data": list});
@@ -3085,9 +3090,11 @@ pub async fn search_book_multi_sse(
                         }
                     }
                     Ok((cur_idx, _source_name, Err(e))) => {
-                        last_idx = last_idx.max(cur_idx);
+                        completed.insert(cur_idx);
+                        last_idx = contiguous_search_cursor(last_idx, &completed, sources.len() as i32);
                         tracing::error!("search_book error from {}: {:?}", _source_name, e);
                     }
+                    Err(e) if e.is_cancelled() => {}
                     Err(e) => {
                         tracing::error!("task join error: {:?}", e);
                     }
@@ -3100,7 +3107,7 @@ pub async fn search_book_multi_sse(
         let _ = on_event.send(serde_json::json!({
             "event": "end",
             "lastIndex": last_idx,
-            "hasMore": (idx as usize) < sources.len(),
+            "hasMore": (idx as usize) < sources.len() || !tasks.is_empty(),
             "hasMorePages": page_has_results
         }));
     });
@@ -3749,6 +3756,27 @@ fn json_end(last_index: i32) -> Value {
     serde_json::json!({"event": "end", "lastIndex": last_index})
 }
 
+fn search_source_timeout_result<T>(
+    result: Result<Result<T, AppError>, tokio::time::error::Elapsed>,
+) -> Result<T, AppError> {
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(AppError::BadRequest("书源搜索超时".to_string())),
+    }
+}
+
+fn contiguous_search_cursor(
+    previous: i32,
+    completed: &std::collections::BTreeSet<i32>,
+    source_count: i32,
+) -> i32 {
+    let mut cursor = previous;
+    while cursor + 1 < source_count && completed.contains(&(cursor + 1)) {
+        cursor += 1;
+    }
+    cursor
+}
+
 fn json_msg(msg: &str) -> Value {
     serde_json::json!({"event": "data", "msg": msg})
 }
@@ -3914,8 +3942,64 @@ fn merge_book(target: &mut Book, info: Book) {
 }
 
 #[tauri::command]
-pub async fn get_txt_toc_rules() -> Result<ApiResponse<Vec<serde_json::Value>>, AppError> {
-    Ok(ApiResponse::ok(vec![]))
+pub async fn get_txt_toc_rules(
+    state: tauri::State<'_, AppState>,
+) -> Result<ApiResponse<Vec<TxtTocRule>>, AppError> {
+    let mut rules = state
+        .json_document_service
+        .read_list::<TxtTocRule>("settings", "txt_toc_rules.json")
+        .await?;
+    rules.sort_by_key(|rule| rule.order);
+    Ok(ApiResponse::ok(rules))
+}
+
+#[tauri::command]
+pub async fn save_txt_toc_rule(
+    state: tauri::State<'_, AppState>,
+    mut rule: TxtTocRule,
+) -> Result<ApiResponse<TxtTocRule>, AppError> {
+    if rule.name.trim().is_empty() {
+        return Err(AppError::BadRequest("规则名称不能为空".to_string()));
+    }
+    rule.name = rule.name.trim().to_string();
+    rule.rule = rule.rule.trim().to_string();
+    let mut rules = state
+        .json_document_service
+        .read_list::<TxtTocRule>("settings", "txt_toc_rules.json")
+        .await?;
+    if rule.id <= 0 {
+        rule.id = rules.iter().map(|item| item.id).max().unwrap_or(0) + 1;
+    }
+    if rule.order <= 0 {
+        rule.order = rules.iter().map(|item| item.order).max().unwrap_or(0) + 1;
+    }
+    if let Some(existing) = rules.iter_mut().find(|item| item.id == rule.id) {
+        *existing = rule.clone();
+    } else {
+        rules.push(rule.clone());
+    }
+    state
+        .json_document_service
+        .write_list("settings", "txt_toc_rules.json", &rules)
+        .await?;
+    Ok(ApiResponse::ok(rule))
+}
+
+#[tauri::command]
+pub async fn delete_txt_toc_rule(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<ApiResponse<()>, AppError> {
+    let mut rules = state
+        .json_document_service
+        .read_list::<TxtTocRule>("settings", "txt_toc_rules.json")
+        .await?;
+    rules.retain(|rule| rule.id != id);
+    state
+        .json_document_service
+        .write_list("settings", "txt_toc_rules.json", &rules)
+        .await?;
+    Ok(ApiResponse::ok(()))
 }
 
 async fn find_matching_books(
@@ -4229,6 +4313,8 @@ mod tests {
         resolve_cache_start_index, retain_enabled_source_books, run_cache_tasks,
         should_use_available_source_cache, is_current_source_candidate,
         effective_available_result_limit,
+        contiguous_search_cursor,
+        search_source_timeout_result,
         local_book_rename_needs_stats_migration,
         source_identity_url,
         take_available_source_cached_matches,
@@ -4243,6 +4329,25 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn timed_out_search_source_is_reported_without_stopping_other_tasks() {
+        let result = tokio::time::timeout(
+            std::time::Duration::ZERO,
+            std::future::pending::<Result<Vec<SearchBook>, AppError>>(),
+        )
+        .await;
+        let error = search_source_timeout_result(result).unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(message) if message == "书源搜索超时"));
+    }
+
+    #[test]
+    fn search_cursor_waits_for_an_earlier_slow_source() {
+        let completed = std::collections::BTreeSet::from([0, 2, 3]);
+        assert_eq!(contiguous_search_cursor(-1, &completed, 5), 0);
+        let completed = std::collections::BTreeSet::from([0, 1, 2, 3]);
+        assert_eq!(contiguous_search_cursor(-1, &completed, 5), 3);
+    }
 
     /// 目录里重复的章节地址必须去重：否则同一章被缓存两次、各计一次进度，
     /// 会出现 `cachedCount > totalChapters`。
